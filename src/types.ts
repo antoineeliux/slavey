@@ -123,6 +123,24 @@ export type WorktreeReview = {
   untrackedFiles: string[];
 };
 
+export type WorktreeCommit = {
+  hash: string;
+  shortHash: string;
+  message: string;
+  timestamp: number;
+};
+
+export type WorktreeHandoffPreview = {
+  employeeId: string;
+  currentBranch?: string | null;
+  baseBranch?: string | null;
+  upstreamBranch?: string | null;
+  ahead?: number | null;
+  behind?: number | null;
+  head?: WorktreeCommit | null;
+  message: string;
+};
+
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 
 export type ApprovalKind = "shell_command" | "file_write" | "git_operation";

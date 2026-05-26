@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 use crate::{
@@ -45,6 +45,43 @@ pub struct WorktreeReview {
     pub unstaged_diff: String,
     pub staged_diff: String,
     pub untracked_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeCommitPreview {
+    pub employee_id: String,
+    pub has_staged_changes: bool,
+    pub staged_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeCommit {
+    pub hash: String,
+    pub short_hash: String,
+    pub message: String,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeHandoffPreview {
+    pub employee_id: String,
+    pub current_branch: Option<String>,
+    pub base_branch: Option<String>,
+    pub upstream_branch: Option<String>,
+    pub ahead: Option<u32>,
+    pub behind: Option<u32>,
+    pub head: Option<WorktreeCommit>,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeCommitRequest {
+    pub employee_id: String,
+    pub message: String,
 }
 
 #[tauri::command]
@@ -301,6 +338,95 @@ pub fn git_worktree_file_diff_for_employee(
 }
 
 #[tauri::command]
+pub fn git_worktree_commit_preview_for_employee(
+    state: State<'_, AppState>,
+    employee_id: String,
+) -> Result<WorktreeCommitPreview, String> {
+    let (worktree, _) = employee_worktree(&state, &employee_id)?;
+    let status = parse_status_lines(&run_git(&worktree, &["status", "--porcelain"])?);
+    let staged_files = parse_staged_files(&status);
+
+    Ok(WorktreeCommitPreview {
+        employee_id,
+        has_staged_changes: !staged_files.is_empty(),
+        staged_files,
+    })
+}
+
+#[tauri::command]
+pub fn git_worktree_commit_for_employee(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    payload: WorktreeCommitRequest,
+) -> Result<WorktreeCommit, String> {
+    let message = validate_commit_message(&payload.message)?;
+    let (worktree, _) = employee_worktree(&state, &payload.employee_id)?;
+    let status = parse_status_lines(&run_git(&worktree, &["status", "--porcelain"])?);
+    if !has_staged_changes(&status) {
+        return Err("commit requires staged changes".to_string());
+    }
+
+    let output = run_git(&worktree, &["commit", "-m", message])?;
+    let commit = git_log(&worktree, 1)?
+        .into_iter()
+        .next()
+        .or_else(|| commit_from_output(&output))
+        .ok_or_else(|| "commit succeeded but metadata could not be read".to_string())?;
+
+    emit_log(
+        &app,
+        LogLevel::Info,
+        format!("committed worktree changes {}", commit.short_hash),
+    );
+    Ok(commit)
+}
+
+#[tauri::command]
+pub fn git_worktree_log_for_employee(
+    state: State<'_, AppState>,
+    employee_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<WorktreeCommit>, String> {
+    let (worktree, _) = employee_worktree(&state, &employee_id)?;
+    git_log(&worktree, limit.unwrap_or(5).clamp(1, 20))
+}
+
+#[tauri::command]
+pub fn git_worktree_handoff_preview_for_employee(
+    state: State<'_, AppState>,
+    employee_id: String,
+) -> Result<WorktreeHandoffPreview, String> {
+    let (worktree, branch_name) = employee_worktree(&state, &employee_id)?;
+    let worktree_branch = branch_name.or_else(|| current_branch(&worktree).ok().flatten());
+    let upstream_branch = upstream_branch(&worktree).ok().flatten();
+    let base_branch = upstream_branch
+        .clone()
+        .or_else(|| current_branch(&state.workspace_root).ok().flatten());
+    let (behind, ahead) = base_branch
+        .as_deref()
+        .and_then(|base| ahead_behind(&worktree, base).ok())
+        .unwrap_or((None, None));
+    let head = git_log(&worktree, 1).ok().and_then(|mut commits| {
+        if commits.is_empty() {
+            None
+        } else {
+            Some(commits.remove(0))
+        }
+    });
+
+    Ok(WorktreeHandoffPreview {
+        employee_id,
+        current_branch: worktree_branch,
+        base_branch,
+        upstream_branch,
+        ahead,
+        behind,
+        head,
+        message: "Handoff merge/apply is not implemented yet".to_string(),
+    })
+}
+
+#[tauri::command]
 pub fn git_worktree_stage_file(
     state: State<'_, AppState>,
     employee_id: String,
@@ -309,6 +435,35 @@ pub fn git_worktree_stage_file(
     let (worktree, _) = employee_worktree(&state, &employee_id)?;
     let relative = resolve_worktree_relative_path(&worktree, &path)?;
     run_git(&worktree, &["add", "--", &relative])?;
+    git_worktree_review_for_employee(state, employee_id)
+}
+
+#[tauri::command]
+pub fn git_worktree_discard_file_for_employee(
+    state: State<'_, AppState>,
+    employee_id: String,
+    path: String,
+) -> Result<WorktreeReview, String> {
+    let (worktree, _) = employee_worktree(&state, &employee_id)?;
+    let status = parse_status_lines(&run_git(&worktree, &["status", "--porcelain"])?);
+    let relative = resolve_safe_worktree_relative_path(&worktree, &path)?;
+    if !has_unstaged_change_for_path(&status, &relative) {
+        return Err("file has no unstaged change to discard".to_string());
+    }
+
+    run_git(&worktree, &["restore", "--", &relative])?;
+    git_worktree_review_for_employee(state, employee_id)
+}
+
+#[tauri::command]
+pub fn git_worktree_delete_untracked_file_for_employee(
+    state: State<'_, AppState>,
+    employee_id: String,
+    path: String,
+) -> Result<WorktreeReview, String> {
+    let (worktree, _) = employee_worktree(&state, &employee_id)?;
+    let status = parse_status_lines(&run_git(&worktree, &["status", "--porcelain"])?);
+    remove_untracked_file(&worktree, &status, &path)?;
     git_worktree_review_for_employee(state, employee_id)
 }
 
@@ -560,10 +715,10 @@ fn parse_untracked_files(status: &[String]) -> Vec<String> {
 }
 
 fn is_untracked_file(status: &[String], path: &str) -> bool {
-    let normalized_path = normalize_git_path(path);
+    let normalized_path = normalize_git_path_for_compare(path);
     parse_untracked_files(status)
         .iter()
-        .any(|untracked| normalize_git_path(untracked) == normalized_path)
+        .any(|untracked| normalize_git_path_for_compare(untracked) == normalized_path)
 }
 
 fn parse_changed_files(status: &[String]) -> Vec<String> {
@@ -571,6 +726,39 @@ fn parse_changed_files(status: &[String]) -> Vec<String> {
         .iter()
         .filter_map(|line| parse_status_path(line))
         .collect()
+}
+
+fn parse_staged_files(status: &[String]) -> Vec<String> {
+    status
+        .iter()
+        .filter(|line| has_staged_change_line(line))
+        .filter_map(|line| parse_status_path(line))
+        .collect()
+}
+
+fn has_staged_changes(status: &[String]) -> bool {
+    status.iter().any(|line| has_staged_change_line(line))
+}
+
+fn has_staged_change_line(line: &str) -> bool {
+    let Some(staged) = line.as_bytes().first() else {
+        return false;
+    };
+    *staged != b' ' && *staged != b'?'
+}
+
+fn has_unstaged_change_for_path(status: &[String], path: &str) -> bool {
+    let normalized_path = normalize_git_path(path);
+    status.iter().any(|line| {
+        !line.starts_with("?? ")
+            && line
+                .as_bytes()
+                .get(1)
+                .is_some_and(|unstaged| *unstaged != b' ')
+            && parse_status_path(line)
+                .map(|status_path| normalize_git_path(&status_path) == normalized_path)
+                .unwrap_or(false)
+    })
 }
 
 fn parse_status_path(line: &str) -> Option<String> {
@@ -583,6 +771,124 @@ fn parse_status_path(line: &str) -> Option<String> {
     } else {
         Some(path.to_string())
     }
+}
+
+fn validate_commit_message(message: &str) -> Result<&str, String> {
+    let message = message.trim();
+    if message.is_empty() {
+        Err("commit message is required".to_string())
+    } else {
+        Ok(message)
+    }
+}
+
+fn git_log(cwd: &Path, limit: usize) -> Result<Vec<WorktreeCommit>, String> {
+    let limit = limit.clamp(1, 20).to_string();
+    let output = run_git(
+        cwd,
+        &["log", "-n", &limit, "--pretty=format:%H%x1f%h%x1f%ct%x1f%s"],
+    )?;
+    Ok(parse_commit_log(&output))
+}
+
+fn parse_commit_log(output: &str) -> Vec<WorktreeCommit> {
+    output.lines().filter_map(parse_commit_log_line).collect()
+}
+
+fn parse_commit_log_line(line: &str) -> Option<WorktreeCommit> {
+    let mut parts = line.splitn(4, '\u{1f}');
+    let hash = parts.next()?.trim();
+    let short_hash = parts.next()?.trim();
+    let timestamp = parts
+        .next()?
+        .trim()
+        .parse::<u64>()
+        .ok()?
+        .saturating_mul(1000);
+    let message = parts.next()?.trim();
+    if hash.is_empty() || short_hash.is_empty() || message.is_empty() {
+        return None;
+    }
+    Some(WorktreeCommit {
+        hash: hash.to_string(),
+        short_hash: short_hash.to_string(),
+        message: message.to_string(),
+        timestamp,
+    })
+}
+
+fn commit_from_output(output: &str) -> Option<WorktreeCommit> {
+    let (short_hash, message) = parse_commit_output(output)?;
+    Some(WorktreeCommit {
+        hash: short_hash.clone(),
+        short_hash,
+        message,
+        timestamp: 0,
+    })
+}
+
+fn parse_commit_output(output: &str) -> Option<(String, String)> {
+    let first_line = output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let close = first_line.find(']')?;
+    let header = first_line.strip_prefix('[')?.get(..close - 1)?.trim();
+    let short_hash = header.split_whitespace().last()?.trim();
+    let message = first_line.get(close + 1..)?.trim();
+    if short_hash.is_empty()
+        || !short_hash
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+        || message.is_empty()
+    {
+        return None;
+    }
+    Some((short_hash.to_string(), message.to_string()))
+}
+
+fn current_branch(cwd: &Path) -> Result<Option<String>, String> {
+    let branch = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    Ok(non_empty_trimmed(branch))
+}
+
+fn upstream_branch(cwd: &Path) -> Result<Option<String>, String> {
+    match run_git(
+        cwd,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    ) {
+        Ok(branch) => Ok(non_empty_trimmed(branch)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn ahead_behind(cwd: &Path, base: &str) -> Result<(Option<u32>, Option<u32>), String> {
+    let range = format!("{base}...HEAD");
+    let output = run_git(cwd, &["rev-list", "--left-right", "--count", &range])?;
+    Ok(parse_ahead_behind(&output))
+}
+
+fn parse_ahead_behind(output: &str) -> (Option<u32>, Option<u32>) {
+    let mut parts = output.split_whitespace();
+    let behind = parts.next().and_then(|value| value.parse::<u32>().ok());
+    let ahead = parts.next().and_then(|value| value.parse::<u32>().ok());
+    (behind, ahead)
+}
+
+fn non_empty_trimmed(value: String) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn resolve_safe_worktree_relative_path(worktree: &Path, input: &str) -> Result<String, String> {
+    let relative = resolve_worktree_relative_path(worktree, input)?;
+    ensure_not_sensitive_git_path(&relative)?;
+    Ok(relative)
 }
 
 fn resolve_worktree_relative_path(worktree: &Path, input: &str) -> Result<String, String> {
@@ -637,6 +943,24 @@ fn resolve_worktree_relative_path(worktree: &Path, input: &str) -> Result<String
     .map(ToString::to_string)
 }
 
+fn remove_untracked_file(worktree: &Path, status: &[String], input: &str) -> Result<(), String> {
+    let relative = resolve_safe_worktree_relative_path(worktree, input)?;
+    if !is_untracked_file(status, &relative) {
+        return Err("file is not untracked".to_string());
+    }
+
+    let target = worktree.join(&relative);
+    let metadata = std_fs::symlink_metadata(&target).map_err(|error| error.to_string())?;
+    if metadata.is_dir() {
+        return Err("untracked directory deletion is not supported".to_string());
+    }
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        std_fs::remove_file(&target).map_err(|error| error.to_string())
+    } else {
+        Err("untracked path is not a file".to_string())
+    }
+}
+
 fn untracked_file_preview(worktree: &Path, relative: &str) -> Result<String, String> {
     let path = worktree.join(relative);
     let resolved = path.canonicalize().map_err(|error| error.to_string())?;
@@ -688,8 +1012,35 @@ fn ensure_path_inside(root: &Path, path: &Path) -> Result<(), String> {
     }
 }
 
+fn ensure_not_sensitive_git_path(path: &str) -> Result<(), String> {
+    if path.split(['/', '\\']).any(is_sensitive_name) {
+        Err("path is blocked because it may contain secrets or credentials".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn is_sensitive_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == ".env"
+        || lower.starts_with(".env.")
+        || lower == ".ssh"
+        || lower == ".git"
+        || lower == ".npmrc"
+        || lower == ".pypirc"
+        || lower == "credentials"
+        || lower == "id_rsa"
+        || lower == "id_ed25519"
+        || lower.ends_with(".pem")
+        || lower.ends_with(".key")
+}
+
 fn normalize_git_path(path: &str) -> String {
     path.replace('\\', "/")
+}
+
+fn normalize_git_path_for_compare(path: &str) -> String {
+    normalize_git_path(path).trim_end_matches('/').to_string()
 }
 
 fn branch_name_for_employee(employee: &Employee) -> String {
@@ -729,8 +1080,11 @@ mod tests {
     use std::{fs as std_fs, path::PathBuf};
 
     use super::{
-        append_git_output, is_untracked_file, parse_changed_files, parse_status_lines,
-        parse_untracked_files, untracked_file_preview, GitOutputChunk, MAX_GIT_OUTPUT_BYTES,
+        append_git_output, has_staged_changes, has_unstaged_change_for_path, is_untracked_file,
+        parse_ahead_behind, parse_changed_files, parse_commit_log, parse_commit_output,
+        parse_staged_files, parse_status_lines, parse_untracked_files, remove_untracked_file,
+        resolve_safe_worktree_relative_path, untracked_file_preview, validate_commit_message,
+        GitOutputChunk, MAX_GIT_OUTPUT_BYTES,
     };
 
     fn test_root(name: &str) -> PathBuf {
@@ -783,6 +1137,61 @@ mod tests {
                 "scratch.txt".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn staged_change_detection_requires_index_changes() {
+        let unstaged = parse_status_lines(" M src/main.rs\n?? scratch.txt\n");
+        let staged = parse_status_lines("A  src/new.rs\nM  src/lib.rs\n");
+
+        assert!(!has_staged_changes(&unstaged));
+        assert!(has_staged_changes(&staged));
+        assert_eq!(
+            parse_staged_files(&staged),
+            vec!["src/new.rs".to_string(), "src/lib.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn unstaged_change_detection_matches_selected_path() {
+        let changes = parse_status_lines("MM src/main.rs\n M src/other.rs\nA  staged.rs\n");
+
+        assert!(has_unstaged_change_for_path(&changes, "src/main.rs"));
+        assert!(has_unstaged_change_for_path(&changes, "src/other.rs"));
+        assert!(!has_unstaged_change_for_path(&changes, "staged.rs"));
+    }
+
+    #[test]
+    fn commit_message_validation_rejects_empty_messages() {
+        assert!(validate_commit_message("Add handoff").is_ok());
+        assert!(validate_commit_message("   ").is_err());
+    }
+
+    #[test]
+    fn commit_output_parser_extracts_hash_and_message() {
+        let parsed =
+            parse_commit_output("[slavey/test abc1234] Add review handoff\n 1 file changed")
+                .unwrap();
+
+        assert_eq!(parsed.0, "abc1234");
+        assert_eq!(parsed.1, "Add review handoff");
+    }
+
+    #[test]
+    fn commit_log_parser_extracts_recent_commits() {
+        let commits =
+            parse_commit_log("abcdef123456\u{1f}abcdef1\u{1f}1710000000\u{1f}Add handoff\n");
+
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].hash, "abcdef123456");
+        assert_eq!(commits[0].short_hash, "abcdef1");
+        assert_eq!(commits[0].message, "Add handoff");
+        assert_eq!(commits[0].timestamp, 1_710_000_000_000);
+    }
+
+    #[test]
+    fn ahead_behind_parser_reads_left_right_counts() {
+        assert_eq!(parse_ahead_behind("2\t5\n"), (Some(2), Some(5)));
     }
 
     #[test]
@@ -863,5 +1272,66 @@ mod tests {
         let preview = untracked_file_preview(&root, "binary.bin").unwrap();
 
         assert!(preview.contains("binary file omitted"));
+    }
+
+    #[test]
+    fn worktree_relative_path_rejects_parent_escape_for_destructive_ops() {
+        let root = test_root("destructive-path-outside");
+        let outside = root
+            .parent()
+            .unwrap()
+            .join(format!("slavey-git-outside-{}.txt", uuid::Uuid::new_v4()));
+        std_fs::write(&outside, "outside").unwrap();
+
+        let error =
+            resolve_safe_worktree_relative_path(&root, outside.to_str().unwrap()).unwrap_err();
+
+        assert!(error.contains("outside the worktree"));
+        let _ = std_fs::remove_file(outside);
+    }
+
+    #[test]
+    fn worktree_relative_path_rejects_sensitive_paths_for_destructive_ops() {
+        let root = test_root("destructive-path-sensitive");
+        std_fs::write(root.join(".env"), "SECRET=1").unwrap();
+
+        let error = resolve_safe_worktree_relative_path(&root, ".env").unwrap_err();
+
+        assert!(error.contains("secrets or credentials"));
+    }
+
+    #[test]
+    fn untracked_file_delete_removes_only_status_marked_file() {
+        let root = test_root("untracked-delete");
+        std_fs::write(root.join("scratch.txt"), "temporary").unwrap();
+        let status = parse_status_lines("?? scratch.txt\n");
+
+        remove_untracked_file(&root, &status, "scratch.txt").unwrap();
+
+        assert!(!root.join("scratch.txt").exists());
+    }
+
+    #[test]
+    fn untracked_file_delete_rejects_tracked_or_unknown_file() {
+        let root = test_root("untracked-delete-reject");
+        std_fs::write(root.join("tracked.txt"), "keep").unwrap();
+        let status = parse_status_lines(" M tracked.txt\n");
+
+        let error = remove_untracked_file(&root, &status, "tracked.txt").unwrap_err();
+
+        assert!(error.contains("not untracked"));
+        assert!(root.join("tracked.txt").exists());
+    }
+
+    #[test]
+    fn untracked_file_delete_rejects_directories() {
+        let root = test_root("untracked-delete-dir");
+        std_fs::create_dir(root.join("scratch-dir")).unwrap();
+        let status = parse_status_lines("?? scratch-dir/\n");
+
+        let error = remove_untracked_file(&root, &status, "scratch-dir").unwrap_err();
+
+        assert!(error.contains("directory deletion is not supported"));
+        assert!(root.join("scratch-dir").exists());
     }
 }

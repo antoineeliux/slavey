@@ -777,6 +777,7 @@ select:focus {
 .policy-panel,
 .action-panel,
 .session-panel,
+.handoff-panel,
 .process-panel,
 .review-panel {
   display: grid;
@@ -834,6 +835,13 @@ select:focus {
 .action-toolbar {
   display: flex;
   gap: 8px;
+}
+
+.commit-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  min-width: 0;
 }
 
 .approval-item,

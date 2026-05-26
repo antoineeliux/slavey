@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import {
   Check,
   Code2,
@@ -17,7 +17,14 @@ import { EmployeeDashboard } from "./components/EmployeeDashboard";
 import { EditorPane } from "./components/EditorPane";
 import { TerminalPane } from "./components/TerminalPane";
 import { useAppStore } from "./store/appStore";
-import type { Action, ApprovalRequest, TerminalSessionRecord, WorktreeReview } from "./types";
+import type {
+  Action,
+  ApprovalRequest,
+  TerminalSessionRecord,
+  WorktreeCommit,
+  WorktreeHandoffPreview,
+  WorktreeReview,
+} from "./types";
 
 export default function App() {
   const activeTab = useAppStore((state) => state.activeTab);
@@ -144,6 +151,8 @@ function EmployeeDetails() {
   const rolePolicies = useAppStore((state) => state.rolePolicies);
   const worktreeStatuses = useAppStore((state) => state.worktreeStatuses);
   const worktreeReviews = useAppStore((state) => state.worktreeReviews);
+  const worktreeCommits = useAppStore((state) => state.worktreeCommits);
+  const worktreeHandoffs = useAppStore((state) => state.worktreeHandoffs);
   const worktreeChangedFiles = useAppStore((state) => state.worktreeChangedFiles);
   const worktreeFileDiffs = useAppStore((state) => state.worktreeFileDiffs);
   const selectedReviewFiles = useAppStore((state) => state.selectedReviewFiles);
@@ -152,6 +161,8 @@ function EmployeeDetails() {
   const removeWorktree = useAppStore((state) => state.removeWorktree);
   const loadWorktreeStatus = useAppStore((state) => state.loadWorktreeStatus);
   const loadWorktreeReview = useAppStore((state) => state.loadWorktreeReview);
+  const loadWorktreeCommits = useAppStore((state) => state.loadWorktreeCommits);
+  const loadWorktreeHandoff = useAppStore((state) => state.loadWorktreeHandoff);
   const loadWorktreeChangedFiles = useAppStore((state) => state.loadWorktreeChangedFiles);
   const loadCodexCliStatus = useAppStore((state) => state.loadCodexCliStatus);
   const startTerminal = useAppStore((state) => state.startTerminal);
@@ -164,10 +175,14 @@ function EmployeeDetails() {
     if (selectedEmployee?.worktreePath) {
       void loadWorktreeStatus(selectedEmployee.id);
       void loadWorktreeReview(selectedEmployee.id);
+      void loadWorktreeCommits(selectedEmployee.id);
+      void loadWorktreeHandoff(selectedEmployee.id);
       void loadWorktreeChangedFiles(selectedEmployee.id);
     }
   }, [
+    loadWorktreeCommits,
     loadWorktreeChangedFiles,
+    loadWorktreeHandoff,
     loadWorktreeReview,
     loadWorktreeStatus,
     selectedEmployee?.id,
@@ -193,6 +208,8 @@ function EmployeeDetails() {
     pendingApprovals.length > 0 ? "waiting_approval" : selectedEmployee.status;
   const worktreeStatus = worktreeStatuses[selectedEmployee.id];
   const worktreeReview = worktreeReviews[selectedEmployee.id];
+  const employeeCommits = worktreeCommits[selectedEmployee.id] ?? [];
+  const handoff = worktreeHandoffs[selectedEmployee.id];
   const employeeActions = actions.filter(
     (action) => action.employeeId === selectedEmployee.id,
   );
@@ -394,9 +411,13 @@ function EmployeeDetails() {
           changedFiles={worktreeChangedFiles[selectedEmployee.id] ?? []}
           selectedFile={selectedReviewFiles[selectedEmployee.id] ?? null}
           fileDiffs={worktreeFileDiffs}
+          commits={employeeCommits}
+          handoff={handoff}
           onRefresh={() => {
             void loadWorktreeStatus(selectedEmployee.id);
             void loadWorktreeReview(selectedEmployee.id);
+            void loadWorktreeCommits(selectedEmployee.id);
+            void loadWorktreeHandoff(selectedEmployee.id);
             void loadWorktreeChangedFiles(selectedEmployee.id);
           }}
         />
@@ -447,6 +468,8 @@ function ReviewPanel({
   changedFiles,
   selectedFile,
   fileDiffs,
+  commits,
+  handoff,
   onRefresh,
 }: {
   employeeId: string;
@@ -454,15 +477,35 @@ function ReviewPanel({
   changedFiles: string[];
   selectedFile: string | null;
   fileDiffs: Record<string, string>;
+  commits: WorktreeCommit[];
+  handoff?: WorktreeHandoffPreview;
   onRefresh: () => void;
 }) {
+  const [commitMessage, setCommitMessage] = useState("");
   const selectReviewFile = useAppStore((state) => state.selectReviewFile);
   const stageWorktreeFile = useAppStore((state) => state.stageWorktreeFile);
   const unstageWorktreeFile = useAppStore((state) => state.unstageWorktreeFile);
+  const discardWorktreeFile = useAppStore((state) => state.discardWorktreeFile);
+  const deleteUntrackedWorktreeFile = useAppStore((state) => state.deleteUntrackedWorktreeFile);
+  const commitWorktree = useAppStore((state) => state.commitWorktree);
   const selectedStatus = selectedFile ? statusForFile(review?.status ?? [], selectedFile) : null;
   const fileDiff = selectedFile ? fileDiffs[reviewFileKey(employeeId, selectedFile)] ?? "" : "";
   const canStage = Boolean(selectedFile);
   const canUnstage = Boolean(selectedFile && selectedStatus && hasStagedChange(selectedStatus));
+  const canDiscard = Boolean(selectedFile && selectedStatus && hasUnstagedChange(selectedStatus));
+  const canDeleteUntracked = Boolean(selectedFile && selectedStatus?.startsWith("?? "));
+  const hasStaged = (review?.status ?? []).some(hasStagedChange);
+  const canCommit = hasStaged && commitMessage.trim().length > 0;
+  const latestCommit = commits[0] ?? handoff?.head ?? null;
+
+  const runCommit = async () => {
+    const message = commitMessage.trim();
+    if (!message) {
+      return;
+    }
+    await commitWorktree(employeeId, message);
+    setCommitMessage("");
+  };
 
   return (
     <section className="review-panel">
@@ -510,6 +553,34 @@ function ReviewPanel({
             >
               Unstage
             </button>
+            <button
+              className="command-button compact"
+              disabled={!canDiscard}
+              onClick={() => {
+                if (
+                  selectedFile &&
+                  window.confirm(`Discard unstaged changes in ${selectedFile}?`)
+                ) {
+                  void discardWorktreeFile(employeeId, selectedFile);
+                }
+              }}
+            >
+              Discard
+            </button>
+            <button
+              className="command-button compact danger"
+              disabled={!canDeleteUntracked}
+              onClick={() => {
+                if (
+                  selectedFile &&
+                  window.confirm(`Delete untracked file ${selectedFile}?`)
+                ) {
+                  void deleteUntrackedWorktreeFile(employeeId, selectedFile);
+                }
+              }}
+            >
+              Delete
+            </button>
           </div>
           <ReviewBlock
             title={selectedFile ?? "Selected file"}
@@ -528,6 +599,45 @@ function ReviewPanel({
         value={review?.untrackedFiles.join("\n") ?? ""}
         empty="No untracked files."
       />
+      <div className="commit-panel">
+        <input
+          value={commitMessage}
+          onChange={(event) => setCommitMessage(event.target.value)}
+          placeholder="Commit message"
+          aria-label="Commit message"
+        />
+        <button
+          className="command-button primary compact"
+          disabled={!canCommit}
+          onClick={() => void runCommit()}
+        >
+          Commit
+        </button>
+      </div>
+      <div className="handoff-panel">
+        <div className="section-heading compact-heading">
+          <GitBranch size={15} />
+          Handoff
+        </div>
+        <div className="policy-grid">
+          <span>Branch</span>
+          <strong title={handoff?.currentBranch ?? review?.branchName ?? ""}>
+            {handoff?.currentBranch ?? review?.branchName ?? "unknown"}
+          </strong>
+          <span>Base</span>
+          <strong title={handoff?.baseBranch ?? ""}>{handoff?.baseBranch ?? "unknown"}</strong>
+          <span>Ahead</span>
+          <strong>{handoff?.ahead ?? "unknown"}</strong>
+          <span>Behind</span>
+          <strong>{handoff?.behind ?? "unknown"}</strong>
+          <span>Latest</span>
+          <strong title={latestCommit?.message ?? ""}>
+            {latestCommit ? `${latestCommit.shortHash} ${latestCommit.message}` : "none"}
+          </strong>
+          <span>Merge</span>
+          <strong>{handoff?.message ?? "handoff not implemented yet"}</strong>
+        </div>
+      </div>
     </section>
   );
 }
@@ -819,6 +929,10 @@ function statusPath(line: string): string | null {
 function hasStagedChange(statusLine: string): boolean {
   const staged = statusLine[0];
   return staged !== " " && staged !== "?";
+}
+
+function hasUnstagedChange(statusLine: string): boolean {
+  return !statusLine.startsWith("?? ") && statusLine[1] !== " ";
 }
 
 function statusLabel(statusLine: string): string {

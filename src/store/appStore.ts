@@ -25,6 +25,8 @@ import type {
   TerminalDataPayload,
   TerminalSessionRecord,
   TerminalSessionUpdatedPayload,
+  WorktreeCommit,
+  WorktreeHandoffPreview,
   WorktreeReview,
   WorktreeStatus,
 } from "../types";
@@ -84,6 +86,8 @@ type AppStore = {
   worktreeStatuses: Record<string, WorktreeStatus>;
   worktreeDiffs: Record<string, string>;
   worktreeReviews: Record<string, WorktreeReview>;
+  worktreeCommits: Record<string, WorktreeCommit[]>;
+  worktreeHandoffs: Record<string, WorktreeHandoffPreview>;
   worktreeChangedFiles: Record<string, string[]>;
   worktreeFileDiffs: Record<string, string>;
   selectedReviewFiles: Record<string, string | null>;
@@ -119,10 +123,15 @@ type AppStore = {
   loadWorktreeStatus: (employeeId: string) => Promise<void>;
   loadWorktreeDiff: (employeeId: string) => Promise<void>;
   loadWorktreeReview: (employeeId: string) => Promise<void>;
+  loadWorktreeCommits: (employeeId: string) => Promise<void>;
+  loadWorktreeHandoff: (employeeId: string) => Promise<void>;
   loadWorktreeChangedFiles: (employeeId: string) => Promise<void>;
   loadWorktreeFileDiff: (employeeId: string, path: string) => Promise<void>;
   stageWorktreeFile: (employeeId: string, path: string) => Promise<void>;
   unstageWorktreeFile: (employeeId: string, path: string) => Promise<void>;
+  discardWorktreeFile: (employeeId: string, path: string) => Promise<void>;
+  deleteUntrackedWorktreeFile: (employeeId: string, path: string) => Promise<void>;
+  commitWorktree: (employeeId: string, message: string) => Promise<void>;
   selectReviewFile: (employeeId: string, path: string | null) => void;
   spawnProcess: (employeeId: string | null, command: string, cwd: string, title?: string) => Promise<void>;
   killProcess: (processId: string) => Promise<void>;
@@ -166,6 +175,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   worktreeStatuses: {},
   worktreeDiffs: {},
   worktreeReviews: {},
+  worktreeCommits: {},
+  worktreeHandoffs: {},
   worktreeChangedFiles: {},
   worktreeFileDiffs: {},
   selectedReviewFiles: {},
@@ -388,6 +399,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
         const { [employeeId]: _status, ...worktreeStatuses } = state.worktreeStatuses;
         const { [employeeId]: _diff, ...worktreeDiffs } = state.worktreeDiffs;
         const { [employeeId]: _review, ...worktreeReviews } = state.worktreeReviews;
+        const { [employeeId]: _commits, ...worktreeCommits } = state.worktreeCommits;
+        const { [employeeId]: _handoff, ...worktreeHandoffs } = state.worktreeHandoffs;
         const { [employeeId]: _changed, ...worktreeChangedFiles } = state.worktreeChangedFiles;
         const { [employeeId]: _selected, ...selectedReviewFiles } = state.selectedReviewFiles;
         const worktreeFileDiffs = Object.fromEntries(
@@ -399,6 +412,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
           worktreeStatuses,
           worktreeDiffs,
           worktreeReviews,
+          worktreeCommits,
+          worktreeHandoffs,
           worktreeChangedFiles,
           selectedReviewFiles,
           worktreeFileDiffs,
@@ -528,6 +543,34 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  loadWorktreeCommits: async (employeeId) => {
+    try {
+      const commits = await invoke<WorktreeCommit[]>("git_worktree_log_for_employee", {
+        employeeId,
+        limit: 5,
+      });
+      set((state) => ({
+        worktreeCommits: { ...state.worktreeCommits, [employeeId]: commits },
+      }));
+    } catch (error) {
+      get().addLog(localLog("warn", `worktree log failed: ${formatError(error)}`));
+    }
+  },
+
+  loadWorktreeHandoff: async (employeeId) => {
+    try {
+      const handoff = await invoke<WorktreeHandoffPreview>(
+        "git_worktree_handoff_preview_for_employee",
+        { employeeId },
+      );
+      set((state) => ({
+        worktreeHandoffs: { ...state.worktreeHandoffs, [employeeId]: handoff },
+      }));
+    } catch (error) {
+      get().addLog(localLog("warn", `handoff preview failed: ${formatError(error)}`));
+    }
+  },
+
   loadWorktreeChangedFiles: async (employeeId) => {
     try {
       const files = await invoke<string[]>("git_worktree_changed_files_for_employee", {
@@ -596,6 +639,64 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await get().loadWorktreeFileDiff(employeeId, path);
     } catch (error) {
       get().addLog(localLog("error", `unstage file failed: ${formatError(error)}`));
+    }
+  },
+
+  discardWorktreeFile: async (employeeId, path) => {
+    try {
+      const review = await invoke<WorktreeReview>("git_worktree_discard_file_for_employee", {
+        employeeId,
+        path,
+      });
+      set((state) => ({
+        worktreeReviews: { ...state.worktreeReviews, [employeeId]: review },
+      }));
+      await get().loadWorktreeChangedFiles(employeeId);
+      await get().loadWorktreeStatus(employeeId);
+    } catch (error) {
+      get().addLog(localLog("error", `discard file failed: ${formatError(error)}`));
+    }
+  },
+
+  deleteUntrackedWorktreeFile: async (employeeId, path) => {
+    try {
+      const review = await invoke<WorktreeReview>(
+        "git_worktree_delete_untracked_file_for_employee",
+        {
+          employeeId,
+          path,
+        },
+      );
+      set((state) => ({
+        worktreeReviews: { ...state.worktreeReviews, [employeeId]: review },
+      }));
+      await get().loadWorktreeChangedFiles(employeeId);
+      await get().loadWorktreeStatus(employeeId);
+    } catch (error) {
+      get().addLog(localLog("error", `delete untracked file failed: ${formatError(error)}`));
+    }
+  },
+
+  commitWorktree: async (employeeId, message) => {
+    try {
+      const commit = await invoke<WorktreeCommit>("git_worktree_commit_for_employee", {
+        payload: { employeeId, message },
+      });
+      set((state) => ({
+        worktreeCommits: {
+          ...state.worktreeCommits,
+          [employeeId]: [commit, ...(state.worktreeCommits[employeeId] ?? [])].filter(
+            (item, index, commits) =>
+              commits.findIndex((candidate) => candidate.hash === item.hash) === index,
+          ).slice(0, 5),
+        },
+      }));
+      get().addLog(localLog("info", `committed ${commit.shortHash}: ${commit.message}`));
+      await refreshWorktreeReviewForEmployee(get, employeeId);
+      await get().loadWorktreeCommits(employeeId);
+      await get().loadWorktreeHandoff(employeeId);
+    } catch (error) {
+      get().addLog(localLog("error", `commit failed: ${formatError(error)}`));
     }
   },
 
@@ -770,7 +871,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       session.status !== "running" &&
       previous?.status !== session.status
     ) {
-      refreshWorktreeReviewForEmployee(get, session.employeeId);
+      void refreshWorktreeReviewForEmployee(get, session.employeeId);
     }
   },
 
@@ -913,13 +1014,16 @@ function reviewFileKey(employeeId: string, path: string): string {
   return `${employeeId}:${path}`;
 }
 
-function refreshWorktreeReviewForEmployee(get: () => AppStore, employeeId: string): void {
+async function refreshWorktreeReviewForEmployee(
+  get: () => AppStore,
+  employeeId: string,
+): Promise<void> {
   const employee = get().employees.find((item) => item.id === employeeId);
   if (!employee?.worktreePath) {
     return;
   }
 
-  void Promise.all([
+  await Promise.all([
     get().loadWorktreeStatus(employeeId),
     get().loadWorktreeReview(employeeId),
     get().loadWorktreeChangedFiles(employeeId),
