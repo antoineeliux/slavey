@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+
+npm run check:format
+npm run typecheck

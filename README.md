@@ -6,17 +6,13 @@ MVP desktop app for managing AI coding-agent employees. The app uses Tauri 2, a 
 
 ```sh
 npm install
+npm run install-hooks
+npm run check
 npm run dev
+npm run build
 ```
 
 The Tauri app serves the Vite frontend at `http://localhost:1420` during development.
-
-## Build
-
-```sh
-npm run typecheck
-npm run build
-```
 
 ## Workspace Safety
 
