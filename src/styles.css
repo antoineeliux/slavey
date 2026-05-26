@@ -691,7 +691,7 @@ select:focus {
 
 .policy-panel,
 .action-panel,
-.diff-panel {
+.review-panel {
   display: grid;
   gap: 10px;
   min-width: 0;
@@ -812,11 +812,12 @@ select:focus {
 
 .approval-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
 .action-item pre,
-.diff-panel pre {
+.review-block pre {
   max-height: 160px;
   overflow: auto;
   margin: 0;
@@ -829,6 +830,26 @@ select:focus {
   font-size: 11px;
   line-height: 1.45;
   white-space: pre-wrap;
+}
+
+.action-item pre.error-output {
+  border-color: #542234;
+  color: #ffb4c6;
+}
+
+.review-block {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.review-block strong {
+  overflow: hidden;
+  color: #8e96a6;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .event-log {

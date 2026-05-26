@@ -137,12 +137,12 @@ function EmployeeDetails() {
   const actions = useAppStore((state) => state.actions);
   const rolePolicies = useAppStore((state) => state.rolePolicies);
   const worktreeStatuses = useAppStore((state) => state.worktreeStatuses);
-  const worktreeDiffs = useAppStore((state) => state.worktreeDiffs);
+  const worktreeReviews = useAppStore((state) => state.worktreeReviews);
   const createApproval = useAppStore((state) => state.createApproval);
   const createWorktree = useAppStore((state) => state.createWorktree);
   const removeWorktree = useAppStore((state) => state.removeWorktree);
   const loadWorktreeStatus = useAppStore((state) => state.loadWorktreeStatus);
-  const loadWorktreeDiff = useAppStore((state) => state.loadWorktreeDiff);
+  const loadWorktreeReview = useAppStore((state) => state.loadWorktreeReview);
   const startTerminal = useAppStore((state) => state.startTerminal);
   const stopTerminal = useAppStore((state) => state.stopTerminal);
   const removeEmployee = useAppStore((state) => state.removeEmployee);
@@ -150,9 +150,9 @@ function EmployeeDetails() {
   useEffect(() => {
     if (selectedEmployee?.worktreePath) {
       void loadWorktreeStatus(selectedEmployee.id);
-      void loadWorktreeDiff(selectedEmployee.id);
+      void loadWorktreeReview(selectedEmployee.id);
     }
-  }, [loadWorktreeDiff, loadWorktreeStatus, selectedEmployee?.id, selectedEmployee?.worktreePath]);
+  }, [loadWorktreeReview, loadWorktreeStatus, selectedEmployee?.id, selectedEmployee?.worktreePath]);
 
   if (!selectedEmployee) {
     return (
@@ -172,7 +172,7 @@ function EmployeeDetails() {
   const displayStatus =
     pendingApprovals.length > 0 ? "waiting_approval" : selectedEmployee.status;
   const worktreeStatus = worktreeStatuses[selectedEmployee.id];
-  const worktreeDiff = worktreeDiffs[selectedEmployee.id] ?? "";
+  const worktreeReview = worktreeReviews[selectedEmployee.id];
   const employeeActions = actions.filter(
     (action) => action.employeeId === selectedEmployee.id,
   );
@@ -282,7 +282,13 @@ function EmployeeDetails() {
         </button>
         <button
           className="command-button danger"
+          disabled={Boolean(selectedEmployee.worktreePath)}
           onClick={() => void removeEmployee(selectedEmployee.id)}
+          title={
+            selectedEmployee.worktreePath
+              ? "Remove or archive the worktree before deleting employee"
+              : "Remove employee"
+          }
         >
           Remove
         </button>
@@ -303,19 +309,38 @@ function EmployeeDetails() {
       />
       <ActionPanel employeeId={selectedEmployee.id} cwd={selectedEmployee.cwd} actions={employeeActions} />
       {selectedEmployee.worktreePath ? (
-        <section className="diff-panel">
+        <section className="review-panel">
           <div className="section-heading">
             <GitBranch size={15} />
-            Diff
+            Review
             <button
               className="icon-button"
-              title="Refresh diff"
-              onClick={() => void loadWorktreeDiff(selectedEmployee.id)}
+              title="Refresh review"
+              onClick={() => void loadWorktreeReview(selectedEmployee.id)}
             >
               <ListTree size={14} />
             </button>
           </div>
-          <pre>{worktreeDiff.trim() || "No worktree diff."}</pre>
+          <ReviewBlock
+            title="Status"
+            value={worktreeReview?.status.join("\n") ?? ""}
+            empty="No status changes."
+          />
+          <ReviewBlock
+            title="Untracked"
+            value={worktreeReview?.untrackedFiles.join("\n") ?? ""}
+            empty="No untracked files."
+          />
+          <ReviewBlock
+            title="Unstaged diff"
+            value={worktreeReview?.unstagedDiff ?? ""}
+            empty="No unstaged diff."
+          />
+          <ReviewBlock
+            title="Staged diff"
+            value={worktreeReview?.stagedDiff ?? ""}
+            empty="No staged diff."
+          />
         </section>
       ) : null}
     </div>
@@ -336,6 +361,7 @@ function ActionPanel({
   const approveAction = useAppStore((state) => state.approveAction);
   const rejectAction = useAppStore((state) => state.rejectAction);
   const runAction = useAppStore((state) => state.runAction);
+  const cancelAction = useAppStore((state) => state.cancelAction);
 
   return (
     <section className="action-panel">
@@ -390,6 +416,7 @@ function ActionPanel({
               <p>{action.description}</p>
               <code title={action.command ?? action.path ?? action.kind}>
                 {action.command ?? action.path ?? action.kind}
+                {action.timeoutSecs ? ` · ${action.timeoutSecs}s` : ""}
               </code>
               <div className="approval-actions">
                 <button
@@ -409,7 +436,7 @@ function ActionPanel({
                 </button>
                 <button
                   className="icon-button"
-                  disabled={!["pending_approval", "approved"].includes(action.status)}
+                  disabled={action.status !== "pending_approval"}
                   title="Reject"
                   onClick={() => void rejectAction(action.id)}
                 >
@@ -422,15 +449,42 @@ function ActionPanel({
                 >
                   Run
                 </button>
+                <button
+                  className="command-button compact"
+                  disabled={!["draft", "pending_approval", "approved", "running"].includes(action.status)}
+                  onClick={() => void cancelAction(action.id)}
+                >
+                  Cancel
+                </button>
               </div>
-              {action.output || action.error ? (
-                <pre>{action.output || action.error}</pre>
+              {action.error ? (
+                <pre className="error-output">{action.error}</pre>
+              ) : null}
+              {action.output ? (
+                <pre>{action.output}</pre>
               ) : null}
             </div>
           ))}
         </div>
       )}
     </section>
+  );
+}
+
+function ReviewBlock({
+  title,
+  value,
+  empty,
+}: {
+  title: string;
+  value: string;
+  empty: string;
+}) {
+  return (
+    <div className="review-block">
+      <strong>{title}</strong>
+      <pre>{value.trim() || empty}</pre>
+    </div>
   );
 }
 

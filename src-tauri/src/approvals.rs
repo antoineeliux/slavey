@@ -6,6 +6,7 @@ use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::{
+    actions::Action,
     events::{emit_action_updated, emit_approval_updated, emit_log, now_ms, LogLevel},
     AppState,
 };
@@ -64,9 +65,13 @@ pub struct ApprovalManager {
 
 impl ApprovalManager {
     pub fn create(&self, payload: ApprovalCreateRequest) -> ApprovalRequest {
+        self.create_with_id(Uuid::new_v4().to_string(), payload)
+    }
+
+    pub fn create_with_id(&self, id: String, payload: ApprovalCreateRequest) -> ApprovalRequest {
         let now = now_ms();
         let approval = ApprovalRequest {
-            id: Uuid::new_v4().to_string(),
+            id,
             employee_id: payload.employee_id,
             action_id: payload.action_id,
             kind: payload.kind,
@@ -96,12 +101,25 @@ impl ApprovalManager {
         approvals
     }
 
-    pub fn resolve(&self, id: &str, status: ApprovalStatus) -> Option<ApprovalRequest> {
+    pub fn get(&self, id: &str) -> Option<ApprovalRequest> {
+        self.approvals.lock().get(id).cloned()
+    }
+
+    pub fn resolve(&self, id: &str, status: ApprovalStatus) -> Result<ApprovalRequest, String> {
+        validate_resolution_target(status)?;
         let mut approvals = self.approvals.lock();
-        let approval = approvals.get_mut(id)?;
+        let approval = approvals
+            .get_mut(id)
+            .ok_or_else(|| "approval not found".to_string())?;
+        if approval.status != ApprovalStatus::Pending {
+            return Err(format!(
+                "approval is already {}",
+                approval_status_label(approval.status)
+            ));
+        }
         approval.status = status;
         approval.resolved_at = Some(now_ms());
-        Some(approval.clone())
+        Ok(approval.clone())
     }
 }
 
@@ -139,11 +157,9 @@ pub fn approval_approve(
     state: State<'_, AppState>,
     approval_id: String,
 ) -> Result<ApprovalRequest, String> {
-    let approval = state
-        .approvals
-        .resolve(&approval_id, ApprovalStatus::Approved)
-        .ok_or_else(|| "approval not found".to_string())?;
-    if let Some(action) = state.actions.approve_by_approval(&approval.id) {
+    let (approval, action) =
+        resolve_approval_for_action(&state, &approval_id, ApprovalStatus::Approved)?;
+    if let Some(action) = action {
         emit_action_updated(&app, action);
     }
     emit_log(
@@ -161,11 +177,9 @@ pub fn approval_reject(
     state: State<'_, AppState>,
     approval_id: String,
 ) -> Result<ApprovalRequest, String> {
-    let approval = state
-        .approvals
-        .resolve(&approval_id, ApprovalStatus::Rejected)
-        .ok_or_else(|| "approval not found".to_string())?;
-    if let Some(action) = state.actions.reject_by_approval(&approval.id) {
+    let (approval, action) =
+        resolve_approval_for_action(&state, &approval_id, ApprovalStatus::Rejected)?;
+    if let Some(action) = action {
         emit_action_updated(&app, action);
     }
     emit_log(
@@ -175,4 +189,171 @@ pub fn approval_reject(
     );
     emit_approval_updated(&app, approval.clone());
     Ok(approval)
+}
+
+pub(crate) fn resolve_approval_for_action(
+    state: &State<'_, AppState>,
+    approval_id: &str,
+    status: ApprovalStatus,
+) -> Result<(ApprovalRequest, Option<Action>), String> {
+    validate_resolution_target(status)?;
+    let current = state
+        .approvals
+        .get(approval_id)
+        .ok_or_else(|| "approval not found".to_string())?;
+    if current.status != ApprovalStatus::Pending {
+        return Err(format!(
+            "approval is already {}",
+            approval_status_label(current.status)
+        ));
+    }
+
+    let action = match (current.action_id.as_deref(), status) {
+        (Some(action_id), ApprovalStatus::Approved) => {
+            Some(state.actions.approve_by_approval(action_id, approval_id)?)
+        }
+        (Some(action_id), ApprovalStatus::Rejected) => {
+            Some(state.actions.reject_by_approval(action_id, approval_id)?)
+        }
+        (Some(_), ApprovalStatus::Expired) => {
+            return Err("linked approval expiration is not implemented yet".to_string())
+        }
+        (None, _) => None,
+        (_, ApprovalStatus::Pending) => unreachable!("pending is not a resolution target"),
+    };
+
+    let approval = state.approvals.resolve(approval_id, status)?;
+    Ok((approval, action))
+}
+
+fn validate_resolution_target(status: ApprovalStatus) -> Result<(), String> {
+    if matches!(
+        status,
+        ApprovalStatus::Approved | ApprovalStatus::Rejected | ApprovalStatus::Expired
+    ) {
+        Ok(())
+    } else {
+        Err("approval can only resolve to approved, rejected, or expired".to_string())
+    }
+}
+
+fn approval_status_label(status: ApprovalStatus) -> &'static str {
+    match status {
+        ApprovalStatus::Pending => "pending",
+        ApprovalStatus::Approved => "approved",
+        ApprovalStatus::Rejected => "rejected",
+        ApprovalStatus::Expired => "expired",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::actions::{ActionCreateRequest, ActionKind, ActionManager, ActionStatus};
+
+    fn approval_payload(action_id: Option<String>) -> ApprovalCreateRequest {
+        ApprovalCreateRequest {
+            employee_id: "employee-1".to_string(),
+            action_id,
+            kind: ApprovalKind::ShellCommand,
+            title: "Approve command".to_string(),
+            description: "Approve test command".to_string(),
+            command: Some("pwd".to_string()),
+            path: None,
+            cwd: None,
+        }
+    }
+
+    fn action_payload() -> ActionCreateRequest {
+        ActionCreateRequest {
+            employee_id: "employee-1".to_string(),
+            kind: ActionKind::ShellCommand,
+            title: "Run command".to_string(),
+            description: "Run pwd".to_string(),
+            cwd: None,
+            command: Some("pwd".to_string()),
+            path: None,
+            contents: None,
+            timeout_secs: None,
+        }
+    }
+
+    #[test]
+    fn approving_pending_approval_works() {
+        let approvals = ApprovalManager::default();
+        let approval = approvals.create(approval_payload(None));
+
+        let updated = approvals
+            .resolve(&approval.id, ApprovalStatus::Approved)
+            .unwrap();
+
+        assert_eq!(updated.status, ApprovalStatus::Approved);
+        assert!(updated.resolved_at.is_some());
+    }
+
+    #[test]
+    fn approving_already_rejected_approval_fails() {
+        let approvals = ApprovalManager::default();
+        let approval = approvals.create(approval_payload(None));
+        approvals
+            .resolve(&approval.id, ApprovalStatus::Rejected)
+            .unwrap();
+
+        let error = approvals
+            .resolve(&approval.id, ApprovalStatus::Approved)
+            .unwrap_err();
+
+        assert!(error.contains("already rejected"));
+    }
+
+    #[test]
+    fn rejecting_already_approved_approval_fails() {
+        let approvals = ApprovalManager::default();
+        let approval = approvals.create(approval_payload(None));
+        approvals
+            .resolve(&approval.id, ApprovalStatus::Approved)
+            .unwrap();
+
+        let error = approvals
+            .resolve(&approval.id, ApprovalStatus::Rejected)
+            .unwrap_err();
+
+        assert!(error.contains("already approved"));
+    }
+
+    #[test]
+    fn linked_action_moves_from_pending_approval_to_approved() {
+        let actions = ActionManager::default();
+        let action = actions.create(action_payload()).unwrap();
+        let approvals = ApprovalManager::default();
+        let approval = approvals.create(approval_payload(Some(action.id.clone())));
+        actions.request_approval(&action.id, &approval.id).unwrap();
+        approvals
+            .resolve(&approval.id, ApprovalStatus::Approved)
+            .unwrap();
+
+        let updated = actions
+            .approve_by_approval(&action.id, &approval.id)
+            .unwrap();
+
+        assert_eq!(updated.status, ActionStatus::Approved);
+    }
+
+    #[test]
+    fn linked_action_moves_from_pending_approval_to_rejected() {
+        let actions = ActionManager::default();
+        let action = actions.create(action_payload()).unwrap();
+        let approvals = ApprovalManager::default();
+        let approval = approvals.create(approval_payload(Some(action.id.clone())));
+        actions.request_approval(&action.id, &approval.id).unwrap();
+        approvals
+            .resolve(&approval.id, ApprovalStatus::Rejected)
+            .unwrap();
+
+        let updated = actions
+            .reject_by_approval(&action.id, &approval.id)
+            .unwrap();
+
+        assert_eq!(updated.status, ActionStatus::Rejected);
+    }
 }

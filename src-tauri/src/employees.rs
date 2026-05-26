@@ -179,14 +179,19 @@ pub fn employee_remove(
     state: State<'_, AppState>,
     employee_id: String,
 ) -> Result<(), String> {
-    if let Some(employee) = state.employees.remove(&employee_id) {
-        if let Some(session_id) = employee.terminal_session_id {
+    let Some(employee) = state.employees.get(&employee_id) else {
+        return Ok(());
+    };
+    ensure_employee_can_remove(&employee)?;
+
+    if let Some(removed) = state.employees.remove(&employee_id) {
+        if let Some(session_id) = removed.terminal_session_id {
             let _ = state.terminal.kill_session(&session_id);
         }
         emit_log(
             &app,
             LogLevel::Info,
-            format!("removed employee {}", employee.name),
+            format!("removed employee {}", removed.name),
         );
         persist_or_log(&app, &state);
     }
@@ -347,6 +352,17 @@ fn persist_or_log(app: &AppHandle, state: &State<'_, AppState>) {
     }
 }
 
+fn ensure_employee_can_remove(employee: &Employee) -> Result<(), String> {
+    if employee.worktree_path.is_some() {
+        Err(
+            "employee has a worktree; remove or archive the worktree before deleting employee"
+                .to_string(),
+        )
+    } else {
+        Ok(())
+    }
+}
+
 fn default_role_policies() -> Vec<RolePolicy> {
     vec![
         RolePolicy {
@@ -393,4 +409,40 @@ fn default_role_policies() -> Vec<RolePolicy> {
             can_review: false,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_employee(worktree_path: Option<String>) -> Employee {
+        Employee {
+            id: "employee-1".to_string(),
+            name: "Employee 1".to_string(),
+            role: EmployeeRole::General,
+            status: EmployeeStatus::Idle,
+            cwd: "/tmp/workspace".to_string(),
+            worktree_path,
+            branch_name: None,
+            terminal_session_id: None,
+            current_command: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn employee_without_worktree_can_be_removed() {
+        assert!(ensure_employee_can_remove(&sample_employee(None)).is_ok());
+    }
+
+    #[test]
+    fn employee_with_worktree_cannot_be_removed() {
+        let error = ensure_employee_can_remove(&sample_employee(Some(
+            "/tmp/workspace/.slavey/worktrees/employee-1".to_string(),
+        )))
+        .unwrap_err();
+
+        assert!(error.contains("employee has a worktree"));
+    }
 }

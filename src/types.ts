@@ -82,6 +82,16 @@ export type WorktreeStatus = {
   changes: string[];
 };
 
+export type WorktreeReview = {
+  employeeId: string;
+  worktreePath: string;
+  branchName?: string | null;
+  status: string[];
+  unstagedDiff: string;
+  stagedDiff: string;
+  untrackedFiles: string[];
+};
+
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 
 export type ApprovalKind = "shell_command" | "file_write" | "git_operation";
@@ -135,6 +145,7 @@ export type Action = {
   command?: string | null;
   path?: string | null;
   contents?: string | null;
+  timeoutSecs: number;
   approvalId?: string | null;
   status: ActionStatus;
   output: string;

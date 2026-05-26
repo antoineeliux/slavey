@@ -18,6 +18,7 @@ import type {
   FsEntry,
   RolePolicy,
   TerminalDataPayload,
+  WorktreeReview,
   WorktreeStatus,
 } from "../types";
 
@@ -56,6 +57,7 @@ type CreateActionInput = {
   command?: string | null;
   path?: string | null;
   contents?: string | null;
+  timeoutSecs?: number | null;
 };
 
 type AppStore = {
@@ -69,6 +71,7 @@ type AppStore = {
   rolePolicies: RolePolicy[];
   worktreeStatuses: Record<string, WorktreeStatus>;
   worktreeDiffs: Record<string, string>;
+  worktreeReviews: Record<string, WorktreeReview>;
   recentFiles: string[];
   activeTab: AppTab;
   fileEntries: FsEntry[];
@@ -94,8 +97,10 @@ type AppStore = {
   approveAction: (actionId: string) => Promise<void>;
   rejectAction: (actionId: string) => Promise<void>;
   runAction: (actionId: string) => Promise<void>;
+  cancelAction: (actionId: string) => Promise<void>;
   loadWorktreeStatus: (employeeId: string) => Promise<void>;
   loadWorktreeDiff: (employeeId: string) => Promise<void>;
+  loadWorktreeReview: (employeeId: string) => Promise<void>;
   writeTerminal: (employeeId: string, sessionId: string, input: string) => Promise<void>;
   resizeTerminal: (employeeId: string, sessionId: string, cols: number, rows: number) => Promise<void>;
   appendTerminalData: (payload: TerminalDataPayload) => void;
@@ -121,6 +126,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   rolePolicies: [],
   worktreeStatuses: {},
   worktreeDiffs: {},
+  worktreeReviews: {},
   recentFiles: [],
   activeTab: "terminal",
   fileEntries: [],
@@ -273,7 +279,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set((state) => {
         const { [employeeId]: _status, ...worktreeStatuses } = state.worktreeStatuses;
         const { [employeeId]: _diff, ...worktreeDiffs } = state.worktreeDiffs;
-        return { worktreeStatuses, worktreeDiffs };
+        const { [employeeId]: _review, ...worktreeReviews } = state.worktreeReviews;
+        return { worktreeStatuses, worktreeDiffs, worktreeReviews };
       });
       await get().loadDir(employee.cwd);
     } catch (error) {
@@ -353,6 +360,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  cancelAction: async (actionId) => {
+    try {
+      const action = await invoke<Action>("action_cancel", { actionId });
+      get().upsertAction(action);
+    } catch (error) {
+      get().addLog(localLog("error", `cancel action failed: ${formatError(error)}`));
+    }
+  },
+
   loadWorktreeStatus: async (employeeId) => {
     try {
       const status = await invoke<WorktreeStatus>("git_worktree_status_for_employee", {
@@ -374,6 +390,19 @@ export const useAppStore = create<AppStore>((set, get) => ({
       }));
     } catch (error) {
       get().addLog(localLog("warn", `worktree diff failed: ${formatError(error)}`));
+    }
+  },
+
+  loadWorktreeReview: async (employeeId) => {
+    try {
+      const review = await invoke<WorktreeReview>("git_worktree_review_for_employee", {
+        employeeId,
+      });
+      set((state) => ({
+        worktreeReviews: { ...state.worktreeReviews, [employeeId]: review },
+      }));
+    } catch (error) {
+      get().addLog(localLog("warn", `worktree review failed: ${formatError(error)}`));
     }
   },
 

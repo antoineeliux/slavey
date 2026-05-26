@@ -124,6 +124,7 @@ pub fn run() {
             git::git_worktree_status_for_employee,
             git::git_worktree_remove_for_employee,
             git::git_worktree_diff_for_employee,
+            git::git_worktree_review_for_employee,
             terminal::terminal_write,
             terminal::terminal_resize,
             fs::fs_list_dir,

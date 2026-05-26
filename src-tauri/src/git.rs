@@ -26,6 +26,18 @@ pub struct WorktreeStatus {
     pub changes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeReview {
+    pub employee_id: String,
+    pub worktree_path: String,
+    pub branch_name: Option<String>,
+    pub status: Vec<String>,
+    pub unstaged_diff: String,
+    pub staged_diff: String,
+    pub untracked_files: Vec<String>,
+}
+
 #[tauri::command]
 pub fn git_is_repo(state: State<'_, AppState>, path: Option<String>) -> bool {
     let root = match path {
@@ -225,6 +237,33 @@ pub fn git_worktree_diff_for_employee(
     run_git(&path, &["diff"])
 }
 
+#[tauri::command]
+pub fn git_worktree_review_for_employee(
+    state: State<'_, AppState>,
+    employee_id: String,
+) -> Result<WorktreeReview, String> {
+    let employee = state
+        .employees
+        .get(&employee_id)
+        .ok_or_else(|| "employee not found".to_string())?;
+    let worktree_path = employee
+        .worktree_path
+        .ok_or_else(|| "employee has no worktree".to_string())?;
+    let path = resolve_existing_dir(&state.workspace_root, &worktree_path)?;
+    let status = parse_status_lines(&run_git(&path, &["status", "--porcelain"])?);
+    let untracked_files = parse_untracked_files(&status);
+
+    Ok(WorktreeReview {
+        employee_id,
+        worktree_path: path.to_string_lossy().to_string(),
+        branch_name: employee.branch_name,
+        status,
+        unstaged_diff: run_git(&path, &["diff"])?,
+        staged_diff: run_git(&path, &["diff", "--cached"])?,
+        untracked_files,
+    })
+}
+
 fn git_success(cwd: &Path, args: &[&str]) -> bool {
     Command::new("git")
         .arg("-C")
@@ -291,6 +330,14 @@ fn parse_status_lines(output: &str) -> Vec<String> {
         .collect()
 }
 
+fn parse_untracked_files(status: &[String]) -> Vec<String> {
+    status
+        .iter()
+        .filter_map(|line| line.strip_prefix("?? "))
+        .map(ToString::to_string)
+        .collect()
+}
+
 fn branch_name_for_employee(employee: &Employee) -> String {
     let sanitized = sanitize_branch_component(&employee.name);
     let fallback = employee.id.chars().take(8).collect::<String>();
@@ -325,7 +372,7 @@ fn path_to_str(path: &Path) -> Result<&str, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_status_lines;
+    use super::{parse_status_lines, parse_untracked_files};
 
     #[test]
     fn status_parser_detects_clean_output() {
@@ -337,5 +384,16 @@ mod tests {
     fn status_parser_keeps_dirty_lines() {
         let changes = parse_status_lines(" M src/main.rs\n?? new.txt\n");
         assert_eq!(changes, vec![" M src/main.rs", "?? new.txt"]);
+    }
+
+    #[test]
+    fn untracked_parser_extracts_only_untracked_paths() {
+        let changes =
+            parse_status_lines(" M src/main.rs\nA  staged.rs\n?? new.txt\n?? dir/file.rs\n");
+
+        assert_eq!(
+            parse_untracked_files(&changes),
+            vec!["new.txt".to_string(), "dir/file.rs".to_string()]
+        );
     }
 }

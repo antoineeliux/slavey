@@ -18,9 +18,7 @@ use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::{
-    approvals::{
-        resolve_approval_for_action, ApprovalCreateRequest, ApprovalKind, ApprovalStatus,
-    },
+    approvals::{resolve_approval_for_action, ApprovalCreateRequest, ApprovalKind, ApprovalStatus},
     employees::EmployeeManager,
     events::{emit_action_updated, emit_approval_updated, emit_log, now_ms, LogLevel},
     fs::{resolve_existing_dir, write_file_in_workspace},
@@ -162,11 +160,7 @@ impl ActionManager {
         })
     }
 
-    pub fn reject_by_approval(
-        &self,
-        action_id: &str,
-        approval_id: &str,
-    ) -> Result<Action, String> {
+    pub fn reject_by_approval(&self, action_id: &str, approval_id: &str) -> Result<Action, String> {
         self.transition(action_id, ActionStatus::Rejected, |action| {
             ensure_action_approval(action, approval_id)?;
             action.error = Some("approval rejected".to_string());
@@ -416,7 +410,10 @@ pub fn action_cancel(
     let updated = state.actions.cancel(&action_id)?;
     if action.status == ActionStatus::PendingApproval {
         if let Some(approval_id) = action.approval_id {
-            match state.approvals.resolve(&approval_id, ApprovalStatus::Rejected) {
+            match state
+                .approvals
+                .resolve(&approval_id, ApprovalStatus::Rejected)
+            {
                 Ok(approval) => emit_approval_updated(&app, approval),
                 Err(error) => emit_log(
                     &app,
@@ -506,9 +503,9 @@ fn ensure_action_approval(action: &Action, approval_id: &str) -> Result<(), Stri
 fn normalize_timeout_secs(timeout_secs: Option<u64>) -> Result<u64, String> {
     match timeout_secs {
         Some(0) => Err("timeoutSecs must be greater than zero".to_string()),
-        Some(timeout) if timeout > MAX_ACTION_TIMEOUT_SECS => Err(format!(
-            "timeoutSecs must be <= {MAX_ACTION_TIMEOUT_SECS}"
-        )),
+        Some(timeout) if timeout > MAX_ACTION_TIMEOUT_SECS => {
+            Err(format!("timeoutSecs must be <= {MAX_ACTION_TIMEOUT_SECS}"))
+        }
         Some(timeout) => Ok(timeout),
         None => Ok(DEFAULT_ACTION_TIMEOUT_SECS),
     }
@@ -629,7 +626,8 @@ fn run_shell_action(
                 .employees
                 .get(&action.employee_id)
                 .ok_or_else(|| ActionFailure::new("employee not found"))?;
-            resolve_existing_dir(&context.workspace_root, &employee.cwd).map_err(ActionFailure::from)?
+            resolve_existing_dir(&context.workspace_root, &employee.cwd)
+                .map_err(ActionFailure::from)?
         }
     };
     let command = action
@@ -726,7 +724,8 @@ fn run_file_write_action(context: &ActionRunContext, action: &Action) -> ActionE
         .as_deref()
         .ok_or_else(|| ActionFailure::new("file write action requires contents"))?;
     ensure_file_write_size(contents).map_err(ActionFailure::from)?;
-    write_file_in_workspace(&context.workspace_root, path, contents).map_err(ActionFailure::from)?;
+    write_file_in_workspace(&context.workspace_root, path, contents)
+        .map_err(ActionFailure::from)?;
     Ok(format!("wrote {path}"))
 }
 
