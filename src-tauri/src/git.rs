@@ -12,7 +12,7 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::{
-    employees::Employee,
+    employees::{resolve_employee_execution_dir, Employee},
     events::{emit_employee_updated, emit_log, LogLevel},
     fs::resolve_existing_dir,
     processes::{configure_process_group, terminate_process_tree},
@@ -150,7 +150,7 @@ pub fn git_worktree_status_for_employee(
         .employees
         .get(&employee_id)
         .ok_or_else(|| "employee not found".to_string())?;
-    let Some(worktree_path) = employee.worktree_path.clone() else {
+    if employee.worktree_path.is_none() {
         return Ok(WorktreeStatus {
             employee_id,
             has_worktree: false,
@@ -160,9 +160,9 @@ pub fn git_worktree_status_for_employee(
             dirty: false,
             changes: Vec::new(),
         });
-    };
+    }
 
-    let path = resolve_existing_dir(&state.workspace_root, &worktree_path)?;
+    let path = resolve_employee_execution_dir(&state.workspace_root, &employee, None)?;
     let is_repo = git_success(&path, &["rev-parse", "--show-toplevel"]);
     let changes = if is_repo {
         parse_status_lines(&run_git(&path, &["status", "--porcelain"])?)
@@ -192,11 +192,11 @@ pub fn git_worktree_remove_for_employee(
         .employees
         .get(&employee_id)
         .ok_or_else(|| "employee not found".to_string())?;
-    let Some(worktree_path) = employee.worktree_path else {
+    if employee.worktree_path.is_none() {
         return Ok(employee);
-    };
+    }
 
-    let path = resolve_existing_dir(&state.workspace_root, &worktree_path)?;
+    let path = resolve_employee_execution_dir(&state.workspace_root, &employee, None)?;
     let changes = parse_status_lines(&run_git(&path, &["status", "--porcelain"])?);
     if !changes.is_empty() {
         return Err(
@@ -234,14 +234,7 @@ pub fn git_worktree_diff_for_employee(
     state: State<'_, AppState>,
     employee_id: String,
 ) -> Result<String, String> {
-    let employee = state
-        .employees
-        .get(&employee_id)
-        .ok_or_else(|| "employee not found".to_string())?;
-    let worktree_path = employee
-        .worktree_path
-        .ok_or_else(|| "employee has no worktree".to_string())?;
-    let path = resolve_existing_dir(&state.workspace_root, &worktree_path)?;
+    let (path, _) = employee_worktree(&state, &employee_id)?;
     run_git(&path, &["diff"])
 }
 
@@ -254,10 +247,10 @@ pub fn git_worktree_review_for_employee(
         .employees
         .get(&employee_id)
         .ok_or_else(|| "employee not found".to_string())?;
-    let worktree_path = employee
-        .worktree_path
-        .ok_or_else(|| "employee has no worktree".to_string())?;
-    let path = resolve_existing_dir(&state.workspace_root, &worktree_path)?;
+    if employee.worktree_path.is_none() {
+        return Err("employee has no worktree".to_string());
+    }
+    let path = resolve_employee_execution_dir(&state.workspace_root, &employee, None)?;
     let status = parse_status_lines(&run_git(&path, &["status", "--porcelain"])?);
     let untracked_files = parse_untracked_files(&status);
 
@@ -334,11 +327,11 @@ fn employee_worktree(
         .employees
         .get(employee_id)
         .ok_or_else(|| "employee not found".to_string())?;
-    let worktree_path = employee
-        .worktree_path
-        .ok_or_else(|| "employee has no worktree".to_string())?;
+    if employee.worktree_path.is_none() {
+        return Err("employee has no worktree".to_string());
+    }
     Ok((
-        resolve_existing_dir(&state.workspace_root, &worktree_path)?,
+        resolve_employee_execution_dir(&state.workspace_root, &employee, None)?,
         employee.branch_name,
     ))
 }

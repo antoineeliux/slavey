@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -213,7 +217,7 @@ pub fn employee_start_terminal(
         return Ok(employee);
     }
 
-    let cwd = resolve_existing_dir(&state.workspace_root, &employee.cwd)?;
+    let cwd = resolve_employee_execution_dir(&state.workspace_root, &employee, None)?;
     let starting = state
         .employees
         .update(&employee_id, |employee| {
@@ -363,6 +367,43 @@ fn ensure_employee_can_remove(employee: &Employee) -> Result<(), String> {
     }
 }
 
+pub fn resolve_employee_execution_dir(
+    workspace_root: &Path,
+    employee: &Employee,
+    explicit_cwd: Option<&str>,
+) -> Result<PathBuf, String> {
+    let explicit_cwd = explicit_cwd.map(str::trim).filter(|cwd| !cwd.is_empty());
+
+    if let Some(worktree_path) = employee
+        .worktree_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        let worktree = resolve_existing_dir(workspace_root, worktree_path)
+            .map_err(|_| "employee worktree is not available".to_string())?;
+
+        if let Some(cwd) = explicit_cwd {
+            let resolved = resolve_existing_dir(workspace_root, cwd)?;
+            if resolved.starts_with(&worktree) {
+                return Ok(resolved);
+            }
+            return Err(
+                "employee has an isolated worktree; cwd must be inside the worktree".to_string(),
+            );
+        }
+
+        return Ok(worktree);
+    }
+
+    if let Some(cwd) = explicit_cwd {
+        return resolve_existing_dir(workspace_root, cwd);
+    }
+
+    resolve_existing_dir(workspace_root, &employee.cwd)
+        .or_else(|_| Ok(workspace_root.to_path_buf()))
+}
+
 fn default_role_policies() -> Vec<RolePolicy> {
     vec![
         RolePolicy {
@@ -414,6 +455,7 @@ fn default_role_policies() -> Vec<RolePolicy> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs as std_fs;
 
     fn sample_employee(worktree_path: Option<String>) -> Employee {
         Employee {
@@ -431,6 +473,20 @@ mod tests {
         }
     }
 
+    fn sample_employee_with_cwd(cwd: PathBuf, worktree_path: Option<PathBuf>) -> Employee {
+        let mut employee =
+            sample_employee(worktree_path.map(|path| path.to_string_lossy().to_string()));
+        employee.cwd = cwd.to_string_lossy().to_string();
+        employee
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("slavey-employee-{name}-{}", uuid::Uuid::new_v4()));
+        std_fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
+
     #[test]
     fn employee_without_worktree_can_be_removed() {
         assert!(ensure_employee_can_remove(&sample_employee(None)).is_ok());
@@ -444,5 +500,72 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("employee has a worktree"));
+    }
+
+    #[test]
+    fn execution_dir_without_worktree_uses_employee_cwd() {
+        let root = test_root("exec-cwd");
+        let cwd = root.join("project");
+        std_fs::create_dir_all(&cwd).unwrap();
+        let employee = sample_employee_with_cwd(cwd.clone(), None);
+
+        let resolved = resolve_employee_execution_dir(&root, &employee, None).unwrap();
+
+        assert_eq!(resolved, cwd);
+    }
+
+    #[test]
+    fn execution_dir_without_worktree_falls_back_to_workspace_root() {
+        let root = test_root("exec-root");
+        let employee = sample_employee_with_cwd(root.join("missing"), None);
+
+        let resolved = resolve_employee_execution_dir(&root, &employee, None).unwrap();
+
+        assert_eq!(resolved, root);
+    }
+
+    #[test]
+    fn execution_dir_with_worktree_defaults_to_worktree() {
+        let root = test_root("exec-worktree");
+        let cwd = root.join("project");
+        let worktree = root.join(".slavey").join("worktrees").join("employee-1");
+        std_fs::create_dir_all(&cwd).unwrap();
+        std_fs::create_dir_all(&worktree).unwrap();
+        let employee = sample_employee_with_cwd(cwd, Some(worktree.clone()));
+
+        let resolved = resolve_employee_execution_dir(&root, &employee, None).unwrap();
+
+        assert_eq!(resolved, worktree);
+    }
+
+    #[test]
+    fn execution_dir_with_worktree_accepts_explicit_cwd_inside_worktree() {
+        let root = test_root("exec-worktree-explicit");
+        let worktree = root.join(".slavey").join("worktrees").join("employee-1");
+        let nested = worktree.join("packages").join("app");
+        std_fs::create_dir_all(&nested).unwrap();
+        let employee = sample_employee_with_cwd(root.clone(), Some(worktree));
+
+        let resolved =
+            resolve_employee_execution_dir(&root, &employee, Some(nested.to_str().unwrap()))
+                .unwrap();
+
+        assert_eq!(resolved, nested);
+    }
+
+    #[test]
+    fn execution_dir_with_worktree_rejects_explicit_cwd_outside_worktree() {
+        let root = test_root("exec-worktree-reject");
+        let worktree = root.join(".slavey").join("worktrees").join("employee-1");
+        let outside = root.join("src");
+        std_fs::create_dir_all(&worktree).unwrap();
+        std_fs::create_dir_all(&outside).unwrap();
+        let employee = sample_employee_with_cwd(root.clone(), Some(worktree));
+
+        let error =
+            resolve_employee_execution_dir(&root, &employee, Some(outside.to_str().unwrap()))
+                .unwrap_err();
+
+        assert!(error.contains("cwd must be inside the worktree"));
     }
 }

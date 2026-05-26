@@ -19,11 +19,11 @@ use uuid::Uuid;
 
 use crate::{
     approvals::{resolve_approval_for_action, ApprovalCreateRequest, ApprovalKind, ApprovalStatus},
-    employees::EmployeeManager,
+    employees::{resolve_employee_execution_dir, EmployeeManager},
     events::{emit_action_updated, emit_approval_updated, emit_log, now_ms, LogLevel},
-    fs::{resolve_existing_dir, write_file_in_workspace},
+    fs::write_file_in_workspace,
     persistence::PersistenceManager,
-    processes::{configure_process_group, shell_command, terminate_process_tree},
+    processes::{configure_process_group, shell_command, terminate_process_tree, ProcessManager},
     AppState,
 };
 
@@ -407,6 +407,7 @@ pub fn action_run(
         employees: state.employees.clone(),
         approvals: state.approvals.clone(),
         actions: state.actions.clone(),
+        processes: state.processes.clone(),
         persistence: state.persistence.clone(),
     };
     let actions = state.actions.clone();
@@ -474,9 +475,10 @@ fn validate_action_payload(
     state: &State<'_, AppState>,
     payload: &ActionCreateRequest,
 ) -> Result<(), String> {
-    if state.employees.get(&payload.employee_id).is_none() {
-        return Err("employee not found".to_string());
-    }
+    let employee = state
+        .employees
+        .get(&payload.employee_id)
+        .ok_or_else(|| "employee not found".to_string())?;
     if payload.title.trim().is_empty() {
         return Err("action title is required".to_string());
     }
@@ -502,7 +504,7 @@ fn validate_action_payload(
     }
 
     if let Some(cwd) = payload.cwd.as_deref() {
-        resolve_existing_dir(&state.workspace_root, cwd)?;
+        resolve_employee_execution_dir(&state.workspace_root, &employee, Some(cwd))?;
     }
 
     Ok(())
@@ -582,6 +584,7 @@ struct ActionRunContext {
     employees: EmployeeManager,
     approvals: crate::approvals::ApprovalManager,
     actions: ActionManager,
+    processes: ProcessManager,
     persistence: PersistenceManager,
 }
 
@@ -678,6 +681,8 @@ fn persist_context_snapshot(context: &ActionRunContext) -> Result<(), String> {
         context.employees.list(),
         context.actions.list(),
         context.approvals.list(),
+        context.processes.list(),
+        context.processes.log_snapshots(),
     )
 }
 
@@ -696,19 +701,13 @@ fn run_shell_action(
     actions: &ActionManager,
     action: &Action,
 ) -> ActionExecutionResult {
-    let cwd = match action.cwd.as_deref() {
-        Some(cwd) if !cwd.trim().is_empty() => {
-            resolve_existing_dir(&context.workspace_root, cwd).map_err(ActionFailure::from)?
-        }
-        _ => {
-            let employee = context
-                .employees
-                .get(&action.employee_id)
-                .ok_or_else(|| ActionFailure::new("employee not found"))?;
-            resolve_existing_dir(&context.workspace_root, &employee.cwd)
-                .map_err(ActionFailure::from)?
-        }
-    };
+    let employee = context
+        .employees
+        .get(&action.employee_id)
+        .ok_or_else(|| ActionFailure::new("employee not found"))?;
+    let cwd =
+        resolve_employee_execution_dir(&context.workspace_root, &employee, action.cwd.as_deref())
+            .map_err(ActionFailure::from)?;
     let command = action
         .command
         .as_deref()

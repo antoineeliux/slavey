@@ -78,6 +78,9 @@ type AppStore = {
   worktreeStatuses: Record<string, WorktreeStatus>;
   worktreeDiffs: Record<string, string>;
   worktreeReviews: Record<string, WorktreeReview>;
+  worktreeChangedFiles: Record<string, string[]>;
+  worktreeFileDiffs: Record<string, string>;
+  selectedReviewFiles: Record<string, string | null>;
   recentFiles: string[];
   activeTab: AppTab;
   fileEntries: FsEntry[];
@@ -107,6 +110,11 @@ type AppStore = {
   loadWorktreeStatus: (employeeId: string) => Promise<void>;
   loadWorktreeDiff: (employeeId: string) => Promise<void>;
   loadWorktreeReview: (employeeId: string) => Promise<void>;
+  loadWorktreeChangedFiles: (employeeId: string) => Promise<void>;
+  loadWorktreeFileDiff: (employeeId: string, path: string) => Promise<void>;
+  stageWorktreeFile: (employeeId: string, path: string) => Promise<void>;
+  unstageWorktreeFile: (employeeId: string, path: string) => Promise<void>;
+  selectReviewFile: (employeeId: string, path: string | null) => void;
   spawnProcess: (employeeId: string | null, command: string, cwd: string, title?: string) => Promise<void>;
   killProcess: (processId: string) => Promise<void>;
   loadProcessLogs: (processId: string, offset?: number | null) => Promise<void>;
@@ -145,6 +153,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
   worktreeStatuses: {},
   worktreeDiffs: {},
   worktreeReviews: {},
+  worktreeChangedFiles: {},
+  worktreeFileDiffs: {},
+  selectedReviewFiles: {},
   recentFiles: [],
   activeTab: "terminal",
   fileEntries: [],
@@ -300,6 +311,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       });
       get().upsertEmployee(employee);
       await get().loadWorktreeStatus(employee.id);
+      await get().loadWorktreeChangedFiles(employee.id);
       await get().loadDir(employee.cwd);
     } catch (error) {
       get().addLog(localLog("error", `create worktree failed: ${formatError(error)}`));
@@ -316,7 +328,21 @@ export const useAppStore = create<AppStore>((set, get) => ({
         const { [employeeId]: _status, ...worktreeStatuses } = state.worktreeStatuses;
         const { [employeeId]: _diff, ...worktreeDiffs } = state.worktreeDiffs;
         const { [employeeId]: _review, ...worktreeReviews } = state.worktreeReviews;
-        return { worktreeStatuses, worktreeDiffs, worktreeReviews };
+        const { [employeeId]: _changed, ...worktreeChangedFiles } = state.worktreeChangedFiles;
+        const { [employeeId]: _selected, ...selectedReviewFiles } = state.selectedReviewFiles;
+        const worktreeFileDiffs = Object.fromEntries(
+          Object.entries(state.worktreeFileDiffs).filter(
+            ([key]) => !key.startsWith(`${employeeId}:`),
+          ),
+        );
+        return {
+          worktreeStatuses,
+          worktreeDiffs,
+          worktreeReviews,
+          worktreeChangedFiles,
+          selectedReviewFiles,
+          worktreeFileDiffs,
+        };
       });
       await get().loadDir(employee.cwd);
     } catch (error) {
@@ -439,6 +465,86 @@ export const useAppStore = create<AppStore>((set, get) => ({
       }));
     } catch (error) {
       get().addLog(localLog("warn", `worktree review failed: ${formatError(error)}`));
+    }
+  },
+
+  loadWorktreeChangedFiles: async (employeeId) => {
+    try {
+      const files = await invoke<string[]>("git_worktree_changed_files_for_employee", {
+        employeeId,
+      });
+      const selected = get().selectedReviewFiles[employeeId];
+      const nextSelected = selected && files.includes(selected) ? selected : files[0] ?? null;
+      set((state) => ({
+        worktreeChangedFiles: { ...state.worktreeChangedFiles, [employeeId]: files },
+        selectedReviewFiles: { ...state.selectedReviewFiles, [employeeId]: nextSelected },
+      }));
+      if (nextSelected) {
+        await get().loadWorktreeFileDiff(employeeId, nextSelected);
+      }
+    } catch (error) {
+      get().addLog(localLog("warn", `changed files failed: ${formatError(error)}`));
+    }
+  },
+
+  loadWorktreeFileDiff: async (employeeId, path) => {
+    try {
+      const diff = await invoke<string>("git_worktree_file_diff_for_employee", {
+        employeeId,
+        path,
+      });
+      set((state) => ({
+        selectedReviewFiles: { ...state.selectedReviewFiles, [employeeId]: path },
+        worktreeFileDiffs: {
+          ...state.worktreeFileDiffs,
+          [reviewFileKey(employeeId, path)]: diff,
+        },
+      }));
+    } catch (error) {
+      get().addLog(localLog("warn", `file diff failed: ${formatError(error)}`));
+    }
+  },
+
+  stageWorktreeFile: async (employeeId, path) => {
+    try {
+      const review = await invoke<WorktreeReview>("git_worktree_stage_file", {
+        employeeId,
+        path,
+      });
+      set((state) => ({
+        worktreeReviews: { ...state.worktreeReviews, [employeeId]: review },
+      }));
+      await get().loadWorktreeChangedFiles(employeeId);
+      await get().loadWorktreeStatus(employeeId);
+      await get().loadWorktreeFileDiff(employeeId, path);
+    } catch (error) {
+      get().addLog(localLog("error", `stage file failed: ${formatError(error)}`));
+    }
+  },
+
+  unstageWorktreeFile: async (employeeId, path) => {
+    try {
+      const review = await invoke<WorktreeReview>("git_worktree_unstage_file", {
+        employeeId,
+        path,
+      });
+      set((state) => ({
+        worktreeReviews: { ...state.worktreeReviews, [employeeId]: review },
+      }));
+      await get().loadWorktreeChangedFiles(employeeId);
+      await get().loadWorktreeStatus(employeeId);
+      await get().loadWorktreeFileDiff(employeeId, path);
+    } catch (error) {
+      get().addLog(localLog("error", `unstage file failed: ${formatError(error)}`));
+    }
+  },
+
+  selectReviewFile: (employeeId, path) => {
+    set((state) => ({
+      selectedReviewFiles: { ...state.selectedReviewFiles, [employeeId]: path },
+    }));
+    if (path) {
+      void get().loadWorktreeFileDiff(employeeId, path);
     }
   },
 
@@ -719,6 +825,10 @@ function parentDir(path: string): string | null {
     return null;
   }
   return trimmed.slice(0, index);
+}
+
+function reviewFileKey(employeeId: string, path: string): string {
+  return `${employeeId}:${path}`;
 }
 
 function appendBoundedTerminalBuffer(previous: string, chunk: string): string {

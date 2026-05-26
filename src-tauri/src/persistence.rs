@@ -15,6 +15,7 @@ use crate::{
     employees::{Employee, EmployeeStatus},
     events::now_ms,
     fs::resolve_existing_dir,
+    processes::{ManagedProcess, ProcessLogSnapshot},
     AppState,
 };
 
@@ -29,6 +30,10 @@ pub struct PersistentAppState {
     pub actions: Vec<Action>,
     #[serde(default)]
     pub approvals: Vec<ApprovalRequest>,
+    #[serde(default)]
+    pub processes: Vec<ManagedProcess>,
+    #[serde(default)]
+    pub process_logs: Vec<ProcessLogSnapshot>,
     #[serde(default)]
     pub selected_employee_id: Option<String>,
     #[serde(default)]
@@ -82,6 +87,8 @@ impl PersistenceManager {
         employees: Vec<Employee>,
         actions: Vec<Action>,
         approvals: Vec<ApprovalRequest>,
+        processes: Vec<ManagedProcess>,
+        process_logs: Vec<ProcessLogSnapshot>,
     ) -> PersistentAppState {
         let ui_state = self.ui_state.lock();
         PersistentAppState {
@@ -89,6 +96,8 @@ impl PersistenceManager {
             employees,
             actions,
             approvals,
+            processes,
+            process_logs,
             selected_employee_id: ui_state.selected_employee_id.clone(),
             active_tab: ui_state.active_tab.clone(),
             recent_files: ui_state.recent_files.clone(),
@@ -102,8 +111,17 @@ impl PersistenceManager {
         employees: Vec<Employee>,
         actions: Vec<Action>,
         approvals: Vec<ApprovalRequest>,
+        processes: Vec<ManagedProcess>,
+        process_logs: Vec<ProcessLogSnapshot>,
     ) -> Result<(), String> {
-        let snapshot = self.snapshot(workspace_root, employees, actions, approvals);
+        let snapshot = self.snapshot(
+            workspace_root,
+            employees,
+            actions,
+            approvals,
+            processes,
+            process_logs,
+        );
         if let Some(parent) = self.path.parent() {
             std_fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
@@ -224,6 +242,7 @@ pub fn app_state_save(
 mod tests {
     use super::*;
     use crate::actions::{restore_actions, Action, ActionKind, ActionStatus};
+    use crate::processes::{restore_managed_processes, ManagedProcess, ManagedProcessStatus};
 
     fn test_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -257,6 +276,20 @@ mod tests {
         }
     }
 
+    fn sample_process(status: ManagedProcessStatus) -> ManagedProcess {
+        ManagedProcess {
+            id: "process-1".to_string(),
+            employee_id: Some("employee-1".to_string()),
+            title: "Long process".to_string(),
+            command: "sleep 999".to_string(),
+            cwd: "/tmp".to_string(),
+            status,
+            exit_code: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
     #[test]
     fn save_and_load_valid_state() {
         let root = test_root("save-load");
@@ -264,7 +297,14 @@ mod tests {
         let manager = PersistenceManager::new(path.clone(), None);
 
         manager
-            .save(&root, Vec::new(), Vec::new(), Vec::new())
+            .save(
+                &root,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
             .unwrap();
         let loaded = load_from_disk(&path).unwrap().unwrap();
 
@@ -272,6 +312,8 @@ mod tests {
         assert!(loaded.employees.is_empty());
         assert!(loaded.actions.is_empty());
         assert!(loaded.approvals.is_empty());
+        assert!(loaded.processes.is_empty());
+        assert!(loaded.process_logs.is_empty());
     }
 
     #[test]
@@ -284,5 +326,13 @@ mod tests {
             Some("app restarted before action completed")
         );
         assert!(restored[0].finished_at.is_some());
+    }
+
+    #[test]
+    fn restore_running_processes_as_failed() {
+        let restored = restore_managed_processes(&[sample_process(ManagedProcessStatus::Running)]);
+
+        assert_eq!(restored[0].status, ManagedProcessStatus::Failed);
+        assert_eq!(restored[0].exit_code, None);
     }
 }

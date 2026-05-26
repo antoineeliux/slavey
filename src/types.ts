@@ -53,6 +53,8 @@ export type AppStateSnapshot = {
   employees: Employee[];
   actions?: Action[];
   approvals?: ApprovalRequest[];
+  processes?: ManagedProcess[];
+  processLogs?: ProcessLogSnapshot[];
   selectedEmployeeId?: string | null;
   activeTab?: AppTab | null;
   recentFiles: string[];
@@ -188,6 +190,13 @@ export type ProcessLogs = {
   nextOffset: number;
   contents: string;
   truncated: boolean;
+};
+
+export type ProcessLogSnapshot = {
+  processId: string;
+  baseOffset: number;
+  nextOffset: number;
+  contents: string;
 };
 
 export type ProcessUpdatedPayload = {

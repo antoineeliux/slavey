@@ -17,8 +17,12 @@ use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::{
+    actions::ActionManager,
+    approvals::ApprovalManager,
+    employees::{resolve_employee_execution_dir, EmployeeManager},
     events::{emit_log, emit_process_log, emit_process_updated, now_ms, LogLevel},
     fs::resolve_existing_dir,
+    persistence::PersistenceManager,
     AppState,
 };
 
@@ -64,6 +68,15 @@ pub struct ProcessLogs {
     pub next_offset: u64,
     pub contents: String,
     pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessLogSnapshot {
+    pub process_id: String,
+    pub base_offset: u64,
+    pub next_offset: u64,
+    pub contents: String,
 }
 
 struct RunningProcess {
@@ -112,6 +125,44 @@ impl ProcessManager {
         processes
     }
 
+    pub fn replace_all(&self, processes: Vec<ManagedProcess>, logs: Vec<ProcessLogSnapshot>) {
+        let mut restored_logs = restore_process_logs(&logs);
+        let restored_processes = restore_managed_processes(&processes);
+        for process in processes
+            .iter()
+            .filter(|process| process.status == ManagedProcessStatus::Running)
+        {
+            append_to_log_ring(
+                restored_logs.entry(process.id.clone()).or_default(),
+                b"app restarted before process completed\n",
+            );
+        }
+
+        let mut next_processes = HashMap::new();
+        for process in restored_processes {
+            next_processes.insert(process.id.clone(), process);
+        }
+        *self.processes.lock() = next_processes;
+        *self.logs.lock() = restored_logs;
+        self.running.lock().clear();
+    }
+
+    pub fn log_snapshots(&self) -> Vec<ProcessLogSnapshot> {
+        let mut snapshots = self
+            .logs
+            .lock()
+            .iter()
+            .map(|(process_id, ring)| ProcessLogSnapshot {
+                process_id: process_id.clone(),
+                base_offset: ring.base_offset,
+                next_offset: ring.next_offset,
+                contents: String::from_utf8_lossy(&ring.contents).to_string(),
+            })
+            .collect::<Vec<_>>();
+        snapshots.sort_by(|a, b| a.process_id.cmp(&b.process_id));
+        snapshots
+    }
+
     fn update_status(
         &self,
         process_id: &str,
@@ -129,13 +180,7 @@ impl ProcessManager {
     fn append_log(&self, process_id: &str, bytes: &[u8]) -> Option<ProcessLogs> {
         let mut logs = self.logs.lock();
         let ring = logs.entry(process_id.to_string()).or_default();
-        ring.contents.extend_from_slice(bytes);
-        ring.next_offset = ring.next_offset.saturating_add(bytes.len() as u64);
-        if ring.contents.len() > MAX_PROCESS_LOG_BYTES {
-            let overflow = ring.contents.len() - MAX_PROCESS_LOG_BYTES;
-            ring.contents.drain(..overflow);
-            ring.base_offset = ring.base_offset.saturating_add(overflow as u64);
-        }
+        append_to_log_ring(ring, bytes);
         Some(ProcessLogs {
             process_id: process_id.to_string(),
             base_offset: ring.base_offset,
@@ -189,6 +234,16 @@ impl ProcessManager {
     }
 }
 
+#[derive(Clone)]
+struct ProcessPersistContext {
+    workspace_root: PathBuf,
+    employees: EmployeeManager,
+    actions: ActionManager,
+    approvals: ApprovalManager,
+    processes: ProcessManager,
+    persistence: PersistenceManager,
+}
+
 #[tauri::command]
 pub fn process_spawn(
     app: AppHandle,
@@ -201,14 +256,26 @@ pub fn process_spawn(
     if payload.command.trim().is_empty() {
         return Err("process command is required".to_string());
     }
-    if let Some(employee_id) = payload.employee_id.as_deref() {
-        if state.employees.get(employee_id).is_none() {
-            return Err("employee not found".to_string());
-        }
-    }
+    let employee = match payload.employee_id.as_deref() {
+        Some(employee_id) => Some(
+            state
+                .employees
+                .get(employee_id)
+                .ok_or_else(|| "employee not found".to_string())?,
+        ),
+        None => None,
+    };
 
-    let cwd = match payload.cwd.as_deref() {
-        Some(cwd) if !cwd.trim().is_empty() => resolve_existing_dir(&state.workspace_root, cwd)?,
+    let cwd = match (payload.cwd.as_deref(), employee.as_ref()) {
+        (Some(cwd), Some(employee)) if !cwd.trim().is_empty() => {
+            resolve_employee_execution_dir(&state.workspace_root, employee, Some(cwd))?
+        }
+        (Some(cwd), None) if !cwd.trim().is_empty() => {
+            resolve_existing_dir(&state.workspace_root, cwd)?
+        }
+        (_, Some(employee)) => {
+            resolve_employee_execution_dir(&state.workspace_root, employee, None)?
+        }
         _ => state.workspace_root.clone(),
     };
 
@@ -240,23 +307,34 @@ pub fn process_spawn(
     state
         .processes
         .register_running(&process.id, Arc::clone(&child), Arc::clone(&killed));
+    let persist_context = ProcessPersistContext {
+        workspace_root: state.workspace_root.clone(),
+        employees: state.employees.clone(),
+        actions: state.actions.clone(),
+        approvals: state.approvals.clone(),
+        processes: state.processes.clone(),
+        persistence: state.persistence.clone(),
+    };
 
     spawn_log_reader(
         app.clone(),
         state.processes.clone(),
         process.id.clone(),
         stdout,
+        persist_context.clone(),
     );
     spawn_log_reader(
         app.clone(),
         state.processes.clone(),
         process.id.clone(),
         stderr,
+        persist_context.clone(),
     );
 
     let processes = state.processes.clone();
     let process_id = process.id.clone();
     let wait_app = app.clone();
+    let wait_persist_context = persist_context.clone();
     thread::spawn(move || {
         let status = child.lock().wait();
         processes.running.lock().remove(&process_id);
@@ -275,6 +353,7 @@ pub fn process_spawn(
         };
         if let Some(updated) = updated {
             emit_process_updated(&wait_app, updated);
+            persist_process_snapshot_or_log(&wait_app, &wait_persist_context);
         }
     });
 
@@ -284,6 +363,7 @@ pub fn process_spawn(
         LogLevel::Info,
         format!("spawned process {}", process.title),
     );
+    persist_or_log(&app, &state);
     Ok(process)
 }
 
@@ -317,11 +397,17 @@ pub fn process_kill(
         LogLevel::Info,
         format!("killed process {}", updated.title),
     );
+    persist_or_log(&app, &state);
     Ok(updated)
 }
 
-fn spawn_log_reader<R>(app: AppHandle, processes: ProcessManager, process_id: String, mut reader: R)
-where
+fn spawn_log_reader<R>(
+    app: AppHandle,
+    processes: ProcessManager,
+    process_id: String,
+    mut reader: R,
+    persist_context: ProcessPersistContext,
+) where
     R: Read + Send + 'static,
 {
     thread::spawn(move || {
@@ -337,7 +423,83 @@ where
                 Err(_) => break,
             }
         }
+        persist_process_snapshot_or_log(&app, &persist_context);
     });
+}
+
+pub fn restore_managed_processes(processes: &[ManagedProcess]) -> Vec<ManagedProcess> {
+    processes
+        .iter()
+        .cloned()
+        .map(|mut process| {
+            if process.status == ManagedProcessStatus::Running {
+                process.status = ManagedProcessStatus::Failed;
+                process.exit_code = None;
+                process.updated_at = now_ms();
+            }
+            process
+        })
+        .collect()
+}
+
+fn restore_process_logs(logs: &[ProcessLogSnapshot]) -> HashMap<String, LogRing> {
+    let mut restored = HashMap::new();
+    for log in logs {
+        let mut ring = LogRing {
+            base_offset: log.base_offset,
+            next_offset: log.base_offset,
+            contents: Vec::new(),
+        };
+        append_to_log_ring(&mut ring, log.contents.as_bytes());
+        if log.next_offset > ring.next_offset {
+            ring.next_offset = log.next_offset;
+            let expected_base = ring.next_offset.saturating_sub(ring.contents.len() as u64);
+            ring.base_offset = ring.base_offset.max(expected_base);
+        }
+        restored.insert(log.process_id.clone(), ring);
+    }
+    restored
+}
+
+fn append_to_log_ring(ring: &mut LogRing, bytes: &[u8]) {
+    ring.contents.extend_from_slice(bytes);
+    ring.next_offset = ring.next_offset.saturating_add(bytes.len() as u64);
+    if ring.contents.len() > MAX_PROCESS_LOG_BYTES {
+        let overflow = ring.contents.len() - MAX_PROCESS_LOG_BYTES;
+        ring.contents.drain(..overflow);
+        ring.base_offset = ring.base_offset.saturating_add(overflow as u64);
+    }
+}
+
+fn persist_process_snapshot_or_log(app: &AppHandle, context: &ProcessPersistContext) {
+    if let Err(error) = persist_process_snapshot(context) {
+        emit_log(
+            app,
+            LogLevel::Warn,
+            format!("failed to persist process state: {error}"),
+        );
+    }
+}
+
+fn persist_process_snapshot(context: &ProcessPersistContext) -> Result<(), String> {
+    context.persistence.save(
+        &context.workspace_root,
+        context.employees.list(),
+        context.actions.list(),
+        context.approvals.list(),
+        context.processes.list(),
+        context.processes.log_snapshots(),
+    )
+}
+
+fn persist_or_log(app: &AppHandle, state: &State<'_, AppState>) {
+    if let Err(error) = state.persist() {
+        emit_log(
+            app,
+            LogLevel::Warn,
+            format!("failed to persist app state: {error}"),
+        );
+    }
 }
 
 pub fn shell_command(command: &str) -> Command {
@@ -422,7 +584,10 @@ unsafe extern "C" {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{ManagedProcessStatus, ProcessManager, ProcessSpawnRequest, MAX_PROCESS_LOG_BYTES};
+    use super::{
+        ManagedProcessStatus, ProcessLogSnapshot, ProcessManager, ProcessSpawnRequest,
+        MAX_PROCESS_LOG_BYTES,
+    };
 
     #[cfg(unix)]
     #[test]
@@ -467,6 +632,50 @@ mod tests {
 
         manager.append_log(&process.id, &bytes);
         let logs = manager.logs_from(&process.id, Some(0)).unwrap();
+
+        assert!(logs.truncated);
+        assert_eq!(logs.contents.len(), MAX_PROCESS_LOG_BYTES);
+    }
+
+    #[test]
+    fn restore_running_process_as_failed_with_restart_log() {
+        let manager = ProcessManager::default();
+        let mut process = manager.create(
+            ProcessSpawnRequest {
+                employee_id: Some("employee-1".to_string()),
+                title: "Long task".to_string(),
+                command: "sleep 999".to_string(),
+                cwd: None,
+            },
+            PathBuf::from("/tmp"),
+        );
+        process.status = ManagedProcessStatus::Running;
+
+        manager.replace_all(vec![process.clone()], Vec::new());
+        let restored = manager.list();
+        let logs = manager.logs_from(&process.id, None).unwrap();
+
+        assert_eq!(restored[0].status, ManagedProcessStatus::Failed);
+        assert!(logs
+            .contents
+            .contains("app restarted before process completed"));
+    }
+
+    #[test]
+    fn restored_process_logs_remain_capped() {
+        let manager = ProcessManager::default();
+        let contents = "x".repeat(MAX_PROCESS_LOG_BYTES + 50);
+
+        manager.replace_all(
+            Vec::new(),
+            vec![ProcessLogSnapshot {
+                process_id: "process-1".to_string(),
+                base_offset: 0,
+                next_offset: contents.len() as u64,
+                contents,
+            }],
+        );
+        let logs = manager.logs_from("process-1", Some(0)).unwrap();
 
         assert!(logs.truncated);
         assert_eq!(logs.contents.len(), MAX_PROCESS_LOG_BYTES);

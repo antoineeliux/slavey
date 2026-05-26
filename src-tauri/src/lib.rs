@@ -36,6 +36,8 @@ impl AppState {
             self.employees.list(),
             self.actions.list(),
             self.approvals.list(),
+            self.processes.list(),
+            self.processes.log_snapshots(),
         )
     }
 
@@ -45,6 +47,8 @@ impl AppState {
             self.employees.list(),
             self.actions.list(),
             self.approvals.list(),
+            self.processes.list(),
+            self.processes.log_snapshots(),
         )
     }
 }
@@ -82,6 +86,7 @@ pub fn run() {
             let employees = EmployeeManager::default();
             let approvals = ApprovalManager::default();
             let actions = ActionManager::default();
+            let processes = ProcessManager::default();
             if let Some(persisted) = &persisted {
                 employees.replace_all(persistence::restore_employees(
                     &workspace_root,
@@ -89,6 +94,7 @@ pub fn run() {
                 ));
                 approvals.replace_all(persisted.approvals.clone());
                 actions.replace_all(restore_actions(&persisted.actions));
+                processes.replace_all(persisted.processes.clone(), persisted.process_logs.clone());
             }
             let persistence = PersistenceManager::new(persistence_path, persisted.as_ref());
             emit_log(
@@ -103,7 +109,7 @@ pub fn run() {
                 persistence,
                 approvals,
                 actions,
-                processes: ProcessManager::default(),
+                processes,
             });
             Ok(())
         })

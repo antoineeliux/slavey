@@ -15,7 +15,7 @@ import { EmployeeDashboard } from "./components/EmployeeDashboard";
 import { EditorPane } from "./components/EditorPane";
 import { TerminalPane } from "./components/TerminalPane";
 import { useAppStore } from "./store/appStore";
-import type { Action, ApprovalRequest } from "./types";
+import type { Action, ApprovalRequest, WorktreeReview } from "./types";
 
 export default function App() {
   const activeTab = useAppStore((state) => state.activeTab);
@@ -139,11 +139,15 @@ function EmployeeDetails() {
   const rolePolicies = useAppStore((state) => state.rolePolicies);
   const worktreeStatuses = useAppStore((state) => state.worktreeStatuses);
   const worktreeReviews = useAppStore((state) => state.worktreeReviews);
+  const worktreeChangedFiles = useAppStore((state) => state.worktreeChangedFiles);
+  const worktreeFileDiffs = useAppStore((state) => state.worktreeFileDiffs);
+  const selectedReviewFiles = useAppStore((state) => state.selectedReviewFiles);
   const createApproval = useAppStore((state) => state.createApproval);
   const createWorktree = useAppStore((state) => state.createWorktree);
   const removeWorktree = useAppStore((state) => state.removeWorktree);
   const loadWorktreeStatus = useAppStore((state) => state.loadWorktreeStatus);
   const loadWorktreeReview = useAppStore((state) => state.loadWorktreeReview);
+  const loadWorktreeChangedFiles = useAppStore((state) => state.loadWorktreeChangedFiles);
   const startTerminal = useAppStore((state) => state.startTerminal);
   const stopTerminal = useAppStore((state) => state.stopTerminal);
   const removeEmployee = useAppStore((state) => state.removeEmployee);
@@ -153,8 +157,15 @@ function EmployeeDetails() {
     if (selectedEmployee?.worktreePath) {
       void loadWorktreeStatus(selectedEmployee.id);
       void loadWorktreeReview(selectedEmployee.id);
+      void loadWorktreeChangedFiles(selectedEmployee.id);
     }
-  }, [loadWorktreeReview, loadWorktreeStatus, selectedEmployee?.id, selectedEmployee?.worktreePath]);
+  }, [
+    loadWorktreeChangedFiles,
+    loadWorktreeReview,
+    loadWorktreeStatus,
+    selectedEmployee?.id,
+    selectedEmployee?.worktreePath,
+  ]);
 
   if (!selectedEmployee) {
     return (
@@ -193,6 +204,10 @@ function EmployeeDetails() {
         {displayStatus.replace("_", " ")}
       </div>
       <dl className="detail-list">
+        <div>
+          <dt>Execution</dt>
+          <dd>{selectedEmployee.worktreePath ? "isolated worktree" : "root workspace"}</dd>
+        </div>
         <div>
           <dt>CWD</dt>
           <dd title={selectedEmployee.cwd}>{selectedEmployee.cwd}</dd>
@@ -298,6 +313,11 @@ function EmployeeDetails() {
           Remove
         </button>
       </div>
+      {selectedEmployee.worktreePath && worktreeStatus?.dirty ? (
+        <div className="inline-warning">
+          Worktree has uncommitted changes; removal is disabled until review is clean.
+        </div>
+      ) : null}
       <ApprovalPanel
         employeeId={selectedEmployee.id}
         approvals={employeeApprovals}
@@ -325,41 +345,111 @@ function EmployeeDetails() {
         }
       />
       {selectedEmployee.worktreePath ? (
-        <section className="review-panel">
-          <div className="section-heading">
-            <GitBranch size={15} />
-            Review
+        <ReviewPanel
+          employeeId={selectedEmployee.id}
+          review={worktreeReview}
+          changedFiles={worktreeChangedFiles[selectedEmployee.id] ?? []}
+          selectedFile={selectedReviewFiles[selectedEmployee.id] ?? null}
+          fileDiffs={worktreeFileDiffs}
+          onRefresh={() => {
+            void loadWorktreeStatus(selectedEmployee.id);
+            void loadWorktreeReview(selectedEmployee.id);
+            void loadWorktreeChangedFiles(selectedEmployee.id);
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function ReviewPanel({
+  employeeId,
+  review,
+  changedFiles,
+  selectedFile,
+  fileDiffs,
+  onRefresh,
+}: {
+  employeeId: string;
+  review?: WorktreeReview;
+  changedFiles: string[];
+  selectedFile: string | null;
+  fileDiffs: Record<string, string>;
+  onRefresh: () => void;
+}) {
+  const selectReviewFile = useAppStore((state) => state.selectReviewFile);
+  const stageWorktreeFile = useAppStore((state) => state.stageWorktreeFile);
+  const unstageWorktreeFile = useAppStore((state) => state.unstageWorktreeFile);
+  const selectedStatus = selectedFile ? statusForFile(review?.status ?? [], selectedFile) : null;
+  const fileDiff = selectedFile ? fileDiffs[reviewFileKey(employeeId, selectedFile)] ?? "" : "";
+  const canStage = Boolean(selectedFile);
+  const canUnstage = Boolean(selectedFile && selectedStatus && hasStagedChange(selectedStatus));
+
+  return (
+    <section className="review-panel">
+      <div className="section-heading">
+        <GitBranch size={15} />
+        Review
+        <button className="icon-button" title="Refresh review" onClick={onRefresh}>
+          <ListTree size={14} />
+        </button>
+      </div>
+      <div className="review-file-grid">
+        <div className="review-file-list">
+          {changedFiles.length === 0 ? (
+            <div className="empty-panel">No changed files.</div>
+          ) : (
+            changedFiles.map((file) => {
+              const status = statusForFile(review?.status ?? [], file);
+              return (
+                <button
+                  className={file === selectedFile ? "review-file active" : "review-file"}
+                  key={file}
+                  title={file}
+                  onClick={() => selectReviewFile(employeeId, file)}
+                >
+                  <span>{file}</span>
+                  <strong>{status ? statusLabel(status) : "changed"}</strong>
+                </button>
+              );
+            })
+          )}
+        </div>
+        <div className="review-file-detail">
+          <div className="approval-actions">
             <button
-              className="icon-button"
-              title="Refresh review"
-              onClick={() => void loadWorktreeReview(selectedEmployee.id)}
+              className="command-button compact"
+              disabled={!canStage}
+              onClick={() => selectedFile && void stageWorktreeFile(employeeId, selectedFile)}
             >
-              <ListTree size={14} />
+              Stage
+            </button>
+            <button
+              className="command-button compact"
+              disabled={!canUnstage}
+              onClick={() => selectedFile && void unstageWorktreeFile(employeeId, selectedFile)}
+            >
+              Unstage
             </button>
           </div>
           <ReviewBlock
-            title="Status"
-            value={worktreeReview?.status.join("\n") ?? ""}
-            empty="No status changes."
+            title={selectedFile ?? "Selected file"}
+            value={fileDiff}
+            empty={selectedFile ? "No file diff." : "Select a changed file."}
           />
-          <ReviewBlock
-            title="Untracked"
-            value={worktreeReview?.untrackedFiles.join("\n") ?? ""}
-            empty="No untracked files."
-          />
-          <ReviewBlock
-            title="Unstaged diff"
-            value={worktreeReview?.unstagedDiff ?? ""}
-            empty="No unstaged diff."
-          />
-          <ReviewBlock
-            title="Staged diff"
-            value={worktreeReview?.stagedDiff ?? ""}
-            empty="No staged diff."
-          />
-        </section>
-      ) : null}
-    </div>
+        </div>
+      </div>
+      <ReviewBlock
+        title="Status"
+        value={review?.status.join("\n") ?? ""}
+        empty="No status changes."
+      />
+      <ReviewBlock
+        title="Untracked"
+        value={review?.untrackedFiles.join("\n") ?? ""}
+        empty="No untracked files."
+      />
+    </section>
   );
 }
 
@@ -622,6 +712,52 @@ function ProcessPanel({
       )}
     </section>
   );
+}
+
+function reviewFileKey(employeeId: string, path: string): string {
+  return `${employeeId}:${path}`;
+}
+
+function statusForFile(statusLines: string[], file: string): string | null {
+  return (
+    statusLines.find((line) => statusPath(line) === file || statusPath(line)?.endsWith(`/${file}`)) ??
+    null
+  );
+}
+
+function statusPath(line: string): string | null {
+  if (line.length < 4) {
+    return null;
+  }
+  const rawPath = line.slice(3);
+  if (!rawPath.includes(" -> ")) {
+    return rawPath;
+  }
+  const parts = rawPath.split(" -> ");
+  return parts[parts.length - 1] ?? rawPath;
+}
+
+function hasStagedChange(statusLine: string): boolean {
+  const staged = statusLine[0];
+  return staged !== " " && staged !== "?";
+}
+
+function statusLabel(statusLine: string): string {
+  if (statusLine.startsWith("?? ")) {
+    return "untracked";
+  }
+  const staged = hasStagedChange(statusLine);
+  const unstaged = statusLine[1] !== " ";
+  if (staged && unstaged) {
+    return "staged + unstaged";
+  }
+  if (staged) {
+    return "staged";
+  }
+  if (unstaged) {
+    return "unstaged";
+  }
+  return "changed";
 }
 
 function nextEmployeeName(): string {

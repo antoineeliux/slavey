@@ -88,6 +88,7 @@ export function EmployeeDashboard() {
                 </div>
                 <div className="employee-meta">
                   <span>{employee.status.replace("_", " ")}</span>
+                  <span>{employee.worktreePath ? "worktree" : "root"}</span>
                   <span>{employee.currentCommand ?? "no command"}</span>
                 </div>
                 <p title={employee.cwd}>{employee.cwd}</p>

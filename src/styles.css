@@ -725,6 +725,16 @@ select:focus {
   font-weight: 800;
 }
 
+.inline-warning {
+  border: 1px solid #7e6627;
+  border-radius: 8px;
+  background: #211d13;
+  padding: 8px 10px;
+  color: #f2c14e;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .section-heading {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) 32px;
@@ -909,6 +919,52 @@ select:focus {
   display: grid;
   gap: 6px;
   min-width: 0;
+}
+
+.review-file-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+.review-file-list,
+.review-file-detail {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.review-file {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid #303644;
+  border-radius: 6px;
+  background: #171a21;
+  padding: 7px 8px;
+  color: #dfe4ec;
+  text-align: left;
+}
+
+.review-file.active,
+.review-file:hover {
+  border-color: #4ecdc4;
+}
+
+.review-file span {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-file strong {
+  color: #8e96a6;
+  font-size: 10px;
+  text-transform: uppercase;
 }
 
 .review-block strong {
