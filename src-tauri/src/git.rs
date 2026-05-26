@@ -77,6 +77,65 @@ pub struct WorktreeHandoffPreview {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeHandoffOperationState {
+    pub in_progress: bool,
+    pub operation: Option<String>,
+    pub head: Option<String>,
+    pub can_abort: bool,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeHandoffPreflight {
+    pub employee_id: String,
+    pub employee_branch: Option<String>,
+    pub main_branch: Option<String>,
+    pub ahead: Option<u32>,
+    pub behind: Option<u32>,
+    pub commits_to_apply: Vec<WorktreeCommit>,
+    pub employee_clean: bool,
+    pub main_clean: bool,
+    pub apply_strategy: String,
+    pub main_operation: WorktreeHandoffOperationState,
+    pub blockers: Vec<String>,
+    pub can_apply: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeHandoffApplyRequest {
+    pub employee_id: String,
+    pub confirmed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeHandoffApplyResult {
+    pub employee_id: String,
+    pub applied: bool,
+    pub strategy: String,
+    pub applied_commits: Vec<WorktreeCommit>,
+    pub conflict: bool,
+    pub error: Option<String>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeHandoffAbortResult {
+    pub employee_id: String,
+    pub aborted: bool,
+    pub operation: Option<String>,
+    pub stdout: String,
+    pub stderr: String,
+    pub message: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeCommitRequest {
@@ -422,8 +481,71 @@ pub fn git_worktree_handoff_preview_for_employee(
         ahead,
         behind,
         head,
-        message: "Handoff merge/apply is not implemented yet".to_string(),
+        message: "Handoff apply is available through preflight".to_string(),
     })
+}
+
+#[tauri::command]
+pub fn git_worktree_handoff_preflight_for_employee(
+    state: State<'_, AppState>,
+    employee_id: String,
+) -> Result<WorktreeHandoffPreflight, String> {
+    let (worktree, branch_name) = employee_worktree(&state, &employee_id)?;
+    handoff_preflight_for_paths(employee_id, &state.workspace_root, &worktree, branch_name)
+}
+
+#[tauri::command]
+pub fn git_worktree_apply_handoff_for_employee(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    payload: WorktreeHandoffApplyRequest,
+) -> Result<WorktreeHandoffApplyResult, String> {
+    if !payload.confirmed {
+        return Err("handoff apply requires explicit confirmation".to_string());
+    }
+
+    let (worktree, branch_name) = employee_worktree(&state, &payload.employee_id)?;
+    let result = apply_handoff_for_paths(
+        payload.employee_id.clone(),
+        &state.workspace_root,
+        &worktree,
+        branch_name,
+    )?;
+
+    if result.applied {
+        emit_log(
+            &app,
+            LogLevel::Info,
+            format!("applied {} handoff commit(s)", result.applied_commits.len()),
+        );
+    } else if result.conflict {
+        emit_log(
+            &app,
+            LogLevel::Warn,
+            "handoff cherry-pick stopped with conflicts; resolve or abort in main workspace",
+        );
+    } else if let Some(error) = &result.error {
+        emit_log(
+            &app,
+            LogLevel::Error,
+            format!("handoff apply failed: {error}"),
+        );
+    }
+
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn git_worktree_abort_handoff_for_employee(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    employee_id: String,
+) -> Result<WorktreeHandoffAbortResult, String> {
+    let result = abort_handoff_for_paths(employee_id, &state.workspace_root)?;
+    if result.aborted {
+        emit_log(&app, LogLevel::Info, "aborted main workspace cherry-pick");
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -494,6 +616,146 @@ fn employee_worktree(
         resolve_employee_execution_dir(&state.workspace_root, &employee, None)?,
         employee.branch_name,
     ))
+}
+
+fn handoff_preflight_for_paths(
+    employee_id: String,
+    workspace_root: &Path,
+    worktree: &Path,
+    employee_branch: Option<String>,
+) -> Result<WorktreeHandoffPreflight, String> {
+    let employee_branch = employee_branch.or_else(|| current_branch(worktree).ok().flatten());
+    let main_branch = current_branch(workspace_root).ok().flatten();
+    let main_head = git_head(workspace_root)?;
+    let employee_head = git_head(worktree)?;
+    let (behind, ahead) =
+        ahead_behind_between(workspace_root, &main_head, &employee_head).unwrap_or((None, None));
+    let commits_to_apply = git_commits_between(workspace_root, &main_head, &employee_head)?;
+    let employee_status = parse_status_lines(&run_git(worktree, &["status", "--porcelain"])?);
+    let main_status = parse_status_lines(&run_git(workspace_root, &["status", "--porcelain"])?);
+    let employee_clean = employee_worktree_is_clean(&employee_status);
+    let main_clean = !main_workspace_has_uncommitted_changes(&main_status);
+    let main_operation = handoff_operation_state(workspace_root);
+    let blockers = build_handoff_blockers(HandoffBlockerInput {
+        employee_branch: employee_branch.as_deref(),
+        main_branch: main_branch.as_deref(),
+        commits_to_apply: commits_to_apply.len(),
+        employee_clean,
+        main_clean,
+        main_operation: &main_operation,
+    });
+    let can_apply = blockers.is_empty();
+    let message = if can_apply {
+        format!("ready to cherry-pick {} commit(s)", commits_to_apply.len())
+    } else {
+        format!("blocked by {} condition(s)", blockers.len())
+    };
+
+    Ok(WorktreeHandoffPreflight {
+        employee_id,
+        employee_branch,
+        main_branch,
+        ahead,
+        behind,
+        commits_to_apply,
+        employee_clean,
+        main_clean,
+        apply_strategy: "cherry_pick".to_string(),
+        main_operation,
+        blockers,
+        can_apply,
+        message,
+    })
+}
+
+fn apply_handoff_for_paths(
+    employee_id: String,
+    workspace_root: &Path,
+    worktree: &Path,
+    employee_branch: Option<String>,
+) -> Result<WorktreeHandoffApplyResult, String> {
+    let preflight = handoff_preflight_for_paths(
+        employee_id.clone(),
+        workspace_root,
+        worktree,
+        employee_branch,
+    )?;
+    if !preflight.can_apply {
+        return Err(format!(
+            "handoff preflight blocked apply: {}",
+            preflight.blockers.join("; ")
+        ));
+    }
+
+    let mut args = vec!["cherry-pick".to_string(), "--no-edit".to_string()];
+    args.extend(
+        preflight
+            .commits_to_apply
+            .iter()
+            .map(|commit| commit.hash.clone()),
+    );
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = bounded_git_output(workspace_root, &arg_refs)?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if output.success {
+        return Ok(WorktreeHandoffApplyResult {
+            employee_id,
+            applied: true,
+            strategy: preflight.apply_strategy,
+            applied_commits: preflight.commits_to_apply,
+            conflict: false,
+            error: None,
+            stdout,
+            stderr,
+        });
+    }
+
+    let conflict = is_cherry_pick_conflict(&stdout, &stderr);
+    Ok(WorktreeHandoffApplyResult {
+        employee_id,
+        applied: false,
+        strategy: preflight.apply_strategy,
+        applied_commits: Vec::new(),
+        conflict,
+        error: Some(git_failure_message(&stdout, &stderr)),
+        stdout,
+        stderr,
+    })
+}
+
+fn abort_handoff_for_paths(
+    employee_id: String,
+    workspace_root: &Path,
+) -> Result<WorktreeHandoffAbortResult, String> {
+    let state = handoff_operation_state(workspace_root);
+    if state.operation.as_deref() != Some("cherry_pick") {
+        return Ok(WorktreeHandoffAbortResult {
+            employee_id,
+            aborted: false,
+            operation: state.operation,
+            stdout: String::new(),
+            stderr: String::new(),
+            message: "no cherry-pick handoff is in progress".to_string(),
+        });
+    }
+
+    let output = bounded_git_output(workspace_root, &["cherry-pick", "--abort"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if output.success {
+        Ok(WorktreeHandoffAbortResult {
+            employee_id,
+            aborted: true,
+            operation: Some("cherry_pick".to_string()),
+            stdout,
+            stderr,
+            message: "cherry-pick aborted".to_string(),
+        })
+    } else {
+        Err(git_failure_message(&stdout, &stderr))
+    }
 }
 
 fn git_success(cwd: &Path, args: &[&str]) -> bool {
@@ -736,6 +998,14 @@ fn parse_staged_files(status: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn main_workspace_has_uncommitted_changes(status: &[String]) -> bool {
+    !status.is_empty()
+}
+
+fn employee_worktree_is_clean(status: &[String]) -> bool {
+    status.is_empty()
+}
+
 fn has_staged_changes(status: &[String]) -> bool {
     status.iter().any(|line| has_staged_change_line(line))
 }
@@ -787,6 +1057,20 @@ fn git_log(cwd: &Path, limit: usize) -> Result<Vec<WorktreeCommit>, String> {
     let output = run_git(
         cwd,
         &["log", "-n", &limit, "--pretty=format:%H%x1f%h%x1f%ct%x1f%s"],
+    )?;
+    Ok(parse_commit_log(&output))
+}
+
+fn git_commits_between(cwd: &Path, base: &str, head: &str) -> Result<Vec<WorktreeCommit>, String> {
+    let range = format!("{base}..{head}");
+    let output = run_git(
+        cwd,
+        &[
+            "log",
+            "--reverse",
+            "--pretty=format:%H%x1f%h%x1f%ct%x1f%s",
+            &range,
+        ],
     )?;
     Ok(parse_commit_log(&output))
 }
@@ -847,9 +1131,14 @@ fn parse_commit_output(output: &str) -> Option<(String, String)> {
     Some((short_hash.to_string(), message.to_string()))
 }
 
+fn git_head(cwd: &Path) -> Result<String, String> {
+    let head = run_git(cwd, &["rev-parse", "--verify", "HEAD"])?;
+    non_empty_trimmed(head).ok_or_else(|| "git HEAD could not be resolved".to_string())
+}
+
 fn current_branch(cwd: &Path) -> Result<Option<String>, String> {
     let branch = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-    Ok(non_empty_trimmed(branch))
+    Ok(non_empty_trimmed(branch).filter(|branch| branch != "HEAD"))
 }
 
 fn upstream_branch(cwd: &Path) -> Result<Option<String>, String> {
@@ -873,11 +1162,139 @@ fn ahead_behind(cwd: &Path, base: &str) -> Result<(Option<u32>, Option<u32>), St
     Ok(parse_ahead_behind(&output))
 }
 
+fn ahead_behind_between(
+    cwd: &Path,
+    base: &str,
+    head: &str,
+) -> Result<(Option<u32>, Option<u32>), String> {
+    let range = format!("{base}...{head}");
+    let output = run_git(cwd, &["rev-list", "--left-right", "--count", &range])?;
+    Ok(parse_ahead_behind(&output))
+}
+
 fn parse_ahead_behind(output: &str) -> (Option<u32>, Option<u32>) {
     let mut parts = output.split_whitespace();
     let behind = parts.next().and_then(|value| value.parse::<u32>().ok());
     let ahead = parts.next().and_then(|value| value.parse::<u32>().ok());
     (behind, ahead)
+}
+
+struct HandoffBlockerInput<'a> {
+    employee_branch: Option<&'a str>,
+    main_branch: Option<&'a str>,
+    commits_to_apply: usize,
+    employee_clean: bool,
+    main_clean: bool,
+    main_operation: &'a WorktreeHandoffOperationState,
+}
+
+fn build_handoff_blockers(input: HandoffBlockerInput<'_>) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if input.employee_branch.is_none() {
+        blockers.push("employee worktree is not on a named branch".to_string());
+    }
+    if input.main_branch.is_none() {
+        blockers.push("main workspace is not on a named branch".to_string());
+    }
+    if input.commits_to_apply == 0 {
+        blockers.push("employee branch has no commits to apply".to_string());
+    }
+    if !input.employee_clean {
+        blockers.push("employee worktree has uncommitted changes".to_string());
+    }
+    if !input.main_clean {
+        blockers.push("main workspace has uncommitted changes".to_string());
+    }
+    if input.main_operation.in_progress {
+        let operation = input.main_operation.operation.as_deref().unwrap_or("git");
+        blockers.push(format!(
+            "main workspace has an in-progress {operation} operation"
+        ));
+    }
+    blockers
+}
+
+fn handoff_operation_state(cwd: &Path) -> WorktreeHandoffOperationState {
+    if let Some(head) = git_state_head(cwd, "CHERRY_PICK_HEAD") {
+        return WorktreeHandoffOperationState {
+            in_progress: true,
+            operation: Some("cherry_pick".to_string()),
+            head: Some(head),
+            can_abort: true,
+            message: Some("cherry-pick in progress".to_string()),
+        };
+    }
+    if let Some(head) = git_state_head(cwd, "MERGE_HEAD") {
+        return WorktreeHandoffOperationState {
+            in_progress: true,
+            operation: Some("merge".to_string()),
+            head: Some(head),
+            can_abort: false,
+            message: Some("merge in progress".to_string()),
+        };
+    }
+    if git_state_path(cwd, "rebase-merge")
+        .map(|path| path.exists())
+        .unwrap_or(false)
+        || git_state_path(cwd, "rebase-apply")
+            .map(|path| path.exists())
+            .unwrap_or(false)
+    {
+        return WorktreeHandoffOperationState {
+            in_progress: true,
+            operation: Some("rebase".to_string()),
+            head: None,
+            can_abort: false,
+            message: Some("rebase in progress".to_string()),
+        };
+    }
+
+    WorktreeHandoffOperationState {
+        in_progress: false,
+        operation: None,
+        head: None,
+        can_abort: false,
+        message: None,
+    }
+}
+
+fn git_state_head(cwd: &Path, name: &str) -> Option<String> {
+    let path = git_state_path(cwd, name)?;
+    std_fs::read_to_string(path)
+        .ok()
+        .and_then(non_empty_trimmed)
+}
+
+fn git_state_path(cwd: &Path, name: &str) -> Option<PathBuf> {
+    run_git(cwd, &["rev-parse", "--git-path", name])
+        .ok()
+        .and_then(non_empty_trimmed)
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                cwd.join(path)
+            }
+        })
+}
+
+fn is_cherry_pick_conflict(stdout: &str, stderr: &str) -> bool {
+    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    combined.contains("conflict")
+        || combined.contains("after resolving the conflicts")
+        || combined.contains("fix conflicts")
+}
+
+fn git_failure_message(stdout: &str, stderr: &str) -> String {
+    let stderr = stderr.trim();
+    let stdout = stdout.trim();
+    match (stderr.is_empty(), stdout.is_empty()) {
+        (false, false) => format!("{stderr}\n{stdout}"),
+        (false, true) => stderr.to_string(),
+        (true, false) => stdout.to_string(),
+        (true, true) => "git command failed".to_string(),
+    }
 }
 
 fn non_empty_trimmed(value: String) -> Option<String> {
@@ -1080,11 +1497,14 @@ mod tests {
     use std::{fs as std_fs, path::PathBuf};
 
     use super::{
-        append_git_output, has_staged_changes, has_unstaged_change_for_path, is_untracked_file,
+        append_git_output, build_handoff_blockers, employee_worktree_is_clean,
+        handoff_preflight_for_paths, has_staged_changes, has_unstaged_change_for_path,
+        is_cherry_pick_conflict, is_untracked_file, main_workspace_has_uncommitted_changes,
         parse_ahead_behind, parse_changed_files, parse_commit_log, parse_commit_output,
         parse_staged_files, parse_status_lines, parse_untracked_files, remove_untracked_file,
-        resolve_safe_worktree_relative_path, untracked_file_preview, validate_commit_message,
-        GitOutputChunk, MAX_GIT_OUTPUT_BYTES,
+        resolve_safe_worktree_relative_path, run_git, untracked_file_preview,
+        validate_commit_message, GitOutputChunk, HandoffBlockerInput,
+        WorktreeHandoffOperationState, MAX_GIT_OUTPUT_BYTES,
     };
 
     fn test_root(name: &str) -> PathBuf {
@@ -1190,8 +1610,133 @@ mod tests {
     }
 
     #[test]
+    fn commit_log_parser_extracts_commit_lists() {
+        let commits = parse_commit_log(
+            "abcdef123456\u{1f}abcdef1\u{1f}1710000000\u{1f}First\n\
+             bcdefa234567\u{1f}bcdefa2\u{1f}1710000001\u{1f}Second\n\
+             malformed\n",
+        );
+
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].short_hash, "abcdef1");
+        assert_eq!(commits[1].message, "Second");
+    }
+
+    #[test]
     fn ahead_behind_parser_reads_left_right_counts() {
         assert_eq!(parse_ahead_behind("2\t5\n"), (Some(2), Some(5)));
+    }
+
+    #[test]
+    fn dirty_detection_helpers_read_status_lines() {
+        let clean = parse_status_lines("");
+        let dirty = parse_status_lines(" M src/main.rs\n?? scratch.txt\n");
+
+        assert!(!main_workspace_has_uncommitted_changes(&clean));
+        assert!(main_workspace_has_uncommitted_changes(&dirty));
+        assert!(employee_worktree_is_clean(&clean));
+        assert!(!employee_worktree_is_clean(&dirty));
+    }
+
+    #[test]
+    fn preflight_blockers_report_unsafe_apply_conditions() {
+        let operation = WorktreeHandoffOperationState {
+            in_progress: true,
+            operation: Some("cherry_pick".to_string()),
+            head: Some("abc123".to_string()),
+            can_abort: true,
+            message: Some("cherry-pick in progress".to_string()),
+        };
+
+        let blockers = build_handoff_blockers(HandoffBlockerInput {
+            employee_branch: None,
+            main_branch: Some("main"),
+            commits_to_apply: 0,
+            employee_clean: false,
+            main_clean: false,
+            main_operation: &operation,
+        });
+
+        assert!(blockers
+            .iter()
+            .any(|blocker| blocker.contains("not on a named branch")));
+        assert!(blockers
+            .iter()
+            .any(|blocker| blocker.contains("no commits to apply")));
+        assert!(blockers
+            .iter()
+            .any(|blocker| blocker.contains("employee worktree has uncommitted changes")));
+        assert!(blockers
+            .iter()
+            .any(|blocker| blocker.contains("main workspace has uncommitted changes")));
+        assert!(blockers
+            .iter()
+            .any(|blocker| blocker.contains("in-progress cherry_pick")));
+    }
+
+    #[test]
+    fn cherry_pick_conflict_parser_detects_git_conflict_output() {
+        assert!(is_cherry_pick_conflict(
+            "CONFLICT (content): Merge conflict in src/lib.rs",
+            "error: could not apply abc123... Change file"
+        ));
+        assert!(is_cherry_pick_conflict(
+            "",
+            "hint: after resolving the conflicts, mark the corrected paths"
+        ));
+        assert!(!is_cherry_pick_conflict(
+            "",
+            "fatal: bad revision 'missing-branch'"
+        ));
+    }
+
+    #[test]
+    fn handoff_preflight_lists_employee_only_commits_in_temp_repo() {
+        let root = test_root("handoff-preflight-repo");
+        run_git(&root, &["init"]).unwrap();
+        run_git(&root, &["config", "user.name", "Slavey Test"]).unwrap();
+        run_git(&root, &["config", "user.email", "slavey@example.test"]).unwrap();
+        run_git(&root, &["checkout", "-B", "main"]).unwrap();
+        super::ensure_slavey_excluded(&root).unwrap();
+        std_fs::write(root.join("README.md"), "base\n").unwrap();
+        run_git(&root, &["add", "README.md"]).unwrap();
+        run_git(&root, &["commit", "-m", "Initial"]).unwrap();
+
+        let worktree = root.join(".slavey").join("worktrees").join("employee-1");
+        std_fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        run_git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "slavey/test",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        )
+        .unwrap();
+        std_fs::write(worktree.join("feature.txt"), "feature\n").unwrap();
+        run_git(&worktree, &["add", "feature.txt"]).unwrap();
+        run_git(&worktree, &["commit", "-m", "Add feature"]).unwrap();
+
+        let preflight = handoff_preflight_for_paths(
+            "employee-1".to_string(),
+            &root,
+            &worktree,
+            Some("slavey/test".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(preflight.employee_branch.as_deref(), Some("slavey/test"));
+        assert_eq!(preflight.main_branch.as_deref(), Some("main"));
+        assert_eq!(preflight.ahead, Some(1));
+        assert_eq!(preflight.behind, Some(0));
+        assert_eq!(preflight.commits_to_apply.len(), 1);
+        assert_eq!(preflight.commits_to_apply[0].message, "Add feature");
+        assert!(preflight.employee_clean);
+        assert!(preflight.main_clean);
+        assert!(preflight.can_apply);
     }
 
     #[test]

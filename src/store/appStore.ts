@@ -26,7 +26,8 @@ import type {
   TerminalSessionRecord,
   TerminalSessionUpdatedPayload,
   WorktreeCommit,
-  WorktreeHandoffPreview,
+  WorktreeHandoffApplyResult,
+  WorktreeHandoffPreflight,
   WorktreeReview,
   WorktreeStatus,
 } from "../types";
@@ -87,7 +88,8 @@ type AppStore = {
   worktreeDiffs: Record<string, string>;
   worktreeReviews: Record<string, WorktreeReview>;
   worktreeCommits: Record<string, WorktreeCommit[]>;
-  worktreeHandoffs: Record<string, WorktreeHandoffPreview>;
+  worktreeHandoffs: Record<string, WorktreeHandoffPreflight>;
+  worktreeHandoffResults: Record<string, WorktreeHandoffApplyResult>;
   worktreeChangedFiles: Record<string, string[]>;
   worktreeFileDiffs: Record<string, string>;
   selectedReviewFiles: Record<string, string | null>;
@@ -132,6 +134,8 @@ type AppStore = {
   discardWorktreeFile: (employeeId: string, path: string) => Promise<void>;
   deleteUntrackedWorktreeFile: (employeeId: string, path: string) => Promise<void>;
   commitWorktree: (employeeId: string, message: string) => Promise<void>;
+  applyWorktreeHandoff: (employeeId: string) => Promise<void>;
+  abortWorktreeHandoff: (employeeId: string) => Promise<void>;
   selectReviewFile: (employeeId: string, path: string | null) => void;
   spawnProcess: (employeeId: string | null, command: string, cwd: string, title?: string) => Promise<void>;
   killProcess: (processId: string) => Promise<void>;
@@ -177,6 +181,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   worktreeReviews: {},
   worktreeCommits: {},
   worktreeHandoffs: {},
+  worktreeHandoffResults: {},
   worktreeChangedFiles: {},
   worktreeFileDiffs: {},
   selectedReviewFiles: {},
@@ -401,6 +406,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
         const { [employeeId]: _review, ...worktreeReviews } = state.worktreeReviews;
         const { [employeeId]: _commits, ...worktreeCommits } = state.worktreeCommits;
         const { [employeeId]: _handoff, ...worktreeHandoffs } = state.worktreeHandoffs;
+        const { [employeeId]: _handoffResult, ...worktreeHandoffResults } =
+          state.worktreeHandoffResults;
         const { [employeeId]: _changed, ...worktreeChangedFiles } = state.worktreeChangedFiles;
         const { [employeeId]: _selected, ...selectedReviewFiles } = state.selectedReviewFiles;
         const worktreeFileDiffs = Object.fromEntries(
@@ -414,6 +421,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
           worktreeReviews,
           worktreeCommits,
           worktreeHandoffs,
+          worktreeHandoffResults,
           worktreeChangedFiles,
           selectedReviewFiles,
           worktreeFileDiffs,
@@ -559,15 +567,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   loadWorktreeHandoff: async (employeeId) => {
     try {
-      const handoff = await invoke<WorktreeHandoffPreview>(
-        "git_worktree_handoff_preview_for_employee",
+      const handoff = await invoke<WorktreeHandoffPreflight>(
+        "git_worktree_handoff_preflight_for_employee",
         { employeeId },
       );
       set((state) => ({
         worktreeHandoffs: { ...state.worktreeHandoffs, [employeeId]: handoff },
       }));
     } catch (error) {
-      get().addLog(localLog("warn", `handoff preview failed: ${formatError(error)}`));
+      get().addLog(localLog("warn", `handoff preflight failed: ${formatError(error)}`));
     }
   },
 
@@ -697,6 +705,56 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await get().loadWorktreeHandoff(employeeId);
     } catch (error) {
       get().addLog(localLog("error", `commit failed: ${formatError(error)}`));
+    }
+  },
+
+  applyWorktreeHandoff: async (employeeId) => {
+    try {
+      const result = await invoke<WorktreeHandoffApplyResult>(
+        "git_worktree_apply_handoff_for_employee",
+        {
+          payload: { employeeId, confirmed: true },
+        },
+      );
+      set((state) => ({
+        worktreeHandoffResults: { ...state.worktreeHandoffResults, [employeeId]: result },
+      }));
+      if (result.applied) {
+        get().addLog(
+          localLog("info", `applied ${result.appliedCommits.length} handoff commit(s)`),
+        );
+      } else if (result.conflict) {
+        get().addLog(localLog("warn", "handoff stopped with conflicts in main workspace"));
+      } else {
+        get().addLog(localLog("error", `handoff apply failed: ${result.error ?? "unknown error"}`));
+      }
+      await refreshWorktreeReviewForEmployee(get, employeeId);
+      await get().loadWorktreeCommits(employeeId);
+      await get().loadWorktreeHandoff(employeeId);
+    } catch (error) {
+      get().addLog(localLog("error", `handoff apply failed: ${formatError(error)}`));
+      await get().loadWorktreeHandoff(employeeId);
+    }
+  },
+
+  abortWorktreeHandoff: async (employeeId) => {
+    try {
+      const result = await invoke<{
+        employeeId: string;
+        aborted: boolean;
+        operation?: string | null;
+        stdout: string;
+        stderr: string;
+        message: string;
+      }>("git_worktree_abort_handoff_for_employee", { employeeId });
+      get().addLog(
+        localLog(result.aborted ? "info" : "warn", result.message || "handoff abort checked"),
+      );
+      await refreshWorktreeReviewForEmployee(get, employeeId);
+      await get().loadWorktreeHandoff(employeeId);
+    } catch (error) {
+      get().addLog(localLog("error", `handoff abort failed: ${formatError(error)}`));
+      await get().loadWorktreeHandoff(employeeId);
     }
   },
 

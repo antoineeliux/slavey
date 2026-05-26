@@ -827,6 +827,12 @@ select:focus {
   gap: 8px;
 }
 
+.handoff-commits,
+.handoff-blockers {
+  display: grid;
+  gap: 6px;
+}
+
 .process-list {
   display: grid;
   gap: 8px;
@@ -846,6 +852,8 @@ select:focus {
 
 .approval-item,
 .action-item,
+.handoff-commit,
+.handoff-result,
 .session-item,
 .process-item,
 .empty-panel {
@@ -874,6 +882,24 @@ select:focus {
 .process-item {
   display: grid;
   gap: 7px;
+}
+
+.handoff-commit {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  padding: 7px 8px;
+}
+
+.handoff-result {
+  display: grid;
+  gap: 4px;
+  border-color: #28765a;
+}
+
+.handoff-result.warning {
+  border-color: #7e6627;
 }
 
 .session-item {
@@ -914,6 +940,8 @@ select:focus {
 .approval-item code,
 .action-item p,
 .action-item code,
+.handoff-commit span,
+.handoff-result span,
 .session-item p,
 .session-item code,
 .process-item code {
@@ -926,6 +954,7 @@ select:focus {
 
 .approval-item code,
 .action-item code,
+.handoff-commit code,
 .session-item code,
 .process-item code {
   color: #f2c14e;

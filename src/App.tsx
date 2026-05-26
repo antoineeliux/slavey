@@ -22,7 +22,8 @@ import type {
   ApprovalRequest,
   TerminalSessionRecord,
   WorktreeCommit,
-  WorktreeHandoffPreview,
+  WorktreeHandoffApplyResult,
+  WorktreeHandoffPreflight,
   WorktreeReview,
 } from "./types";
 
@@ -153,6 +154,7 @@ function EmployeeDetails() {
   const worktreeReviews = useAppStore((state) => state.worktreeReviews);
   const worktreeCommits = useAppStore((state) => state.worktreeCommits);
   const worktreeHandoffs = useAppStore((state) => state.worktreeHandoffs);
+  const worktreeHandoffResults = useAppStore((state) => state.worktreeHandoffResults);
   const worktreeChangedFiles = useAppStore((state) => state.worktreeChangedFiles);
   const worktreeFileDiffs = useAppStore((state) => state.worktreeFileDiffs);
   const selectedReviewFiles = useAppStore((state) => state.selectedReviewFiles);
@@ -210,6 +212,7 @@ function EmployeeDetails() {
   const worktreeReview = worktreeReviews[selectedEmployee.id];
   const employeeCommits = worktreeCommits[selectedEmployee.id] ?? [];
   const handoff = worktreeHandoffs[selectedEmployee.id];
+  const handoffResult = worktreeHandoffResults[selectedEmployee.id];
   const employeeActions = actions.filter(
     (action) => action.employeeId === selectedEmployee.id,
   );
@@ -413,6 +416,7 @@ function EmployeeDetails() {
           fileDiffs={worktreeFileDiffs}
           commits={employeeCommits}
           handoff={handoff}
+          handoffResult={handoffResult}
           onRefresh={() => {
             void loadWorktreeStatus(selectedEmployee.id);
             void loadWorktreeReview(selectedEmployee.id);
@@ -470,6 +474,7 @@ function ReviewPanel({
   fileDiffs,
   commits,
   handoff,
+  handoffResult,
   onRefresh,
 }: {
   employeeId: string;
@@ -478,7 +483,8 @@ function ReviewPanel({
   selectedFile: string | null;
   fileDiffs: Record<string, string>;
   commits: WorktreeCommit[];
-  handoff?: WorktreeHandoffPreview;
+  handoff?: WorktreeHandoffPreflight;
+  handoffResult?: WorktreeHandoffApplyResult;
   onRefresh: () => void;
 }) {
   const [commitMessage, setCommitMessage] = useState("");
@@ -488,6 +494,8 @@ function ReviewPanel({
   const discardWorktreeFile = useAppStore((state) => state.discardWorktreeFile);
   const deleteUntrackedWorktreeFile = useAppStore((state) => state.deleteUntrackedWorktreeFile);
   const commitWorktree = useAppStore((state) => state.commitWorktree);
+  const applyWorktreeHandoff = useAppStore((state) => state.applyWorktreeHandoff);
+  const abortWorktreeHandoff = useAppStore((state) => state.abortWorktreeHandoff);
   const selectedStatus = selectedFile ? statusForFile(review?.status ?? [], selectedFile) : null;
   const fileDiff = selectedFile ? fileDiffs[reviewFileKey(employeeId, selectedFile)] ?? "" : "";
   const canStage = Boolean(selectedFile);
@@ -496,7 +504,10 @@ function ReviewPanel({
   const canDeleteUntracked = Boolean(selectedFile && selectedStatus?.startsWith("?? "));
   const hasStaged = (review?.status ?? []).some(hasStagedChange);
   const canCommit = hasStaged && commitMessage.trim().length > 0;
-  const latestCommit = commits[0] ?? handoff?.head ?? null;
+  const latestCommit = commits[0] ?? null;
+  const commitsToApply = handoff?.commitsToApply ?? [];
+  const canApplyHandoff = handoff?.canApply === true;
+  const canAbortHandoff = handoff?.mainOperation.canAbort === true;
 
   const runCommit = async () => {
     const message = commitMessage.trim();
@@ -505,6 +516,26 @@ function ReviewPanel({
     }
     await commitWorktree(employeeId, message);
     setCommitMessage("");
+  };
+
+  const runApplyHandoff = () => {
+    if (!handoff?.canApply) {
+      return;
+    }
+    const targetBranch = handoff.mainBranch ?? "main workspace";
+    const confirmed = window.confirm(
+      `Apply ${commitsToApply.length} commit(s) to ${targetBranch} with cherry-pick?\n\nThis will not push or remove the employee worktree.`,
+    );
+    if (confirmed) {
+      void applyWorktreeHandoff(employeeId);
+    }
+  };
+
+  const runAbortHandoff = () => {
+    const confirmed = window.confirm("Abort the in-progress cherry-pick in the main workspace?");
+    if (confirmed) {
+      void abortWorktreeHandoff(employeeId);
+    }
   };
 
   return (
@@ -621,21 +652,79 @@ function ReviewPanel({
         </div>
         <div className="policy-grid">
           <span>Branch</span>
-          <strong title={handoff?.currentBranch ?? review?.branchName ?? ""}>
-            {handoff?.currentBranch ?? review?.branchName ?? "unknown"}
+          <strong title={handoff?.employeeBranch ?? review?.branchName ?? ""}>
+            {handoff?.employeeBranch ?? review?.branchName ?? "unknown"}
           </strong>
-          <span>Base</span>
-          <strong title={handoff?.baseBranch ?? ""}>{handoff?.baseBranch ?? "unknown"}</strong>
+          <span>Main</span>
+          <strong title={handoff?.mainBranch ?? ""}>{handoff?.mainBranch ?? "unknown"}</strong>
+          <span>Strategy</span>
+          <strong>{handoff ? formatStrategy(handoff.applyStrategy) : "unknown"}</strong>
           <span>Ahead</span>
           <strong>{handoff?.ahead ?? "unknown"}</strong>
           <span>Behind</span>
           <strong>{handoff?.behind ?? "unknown"}</strong>
+          <span>Employee</span>
+          <strong>{handoff ? (handoff.employeeClean ? "clean" : "dirty") : "unknown"}</strong>
+          <span>Main clean</span>
+          <strong>{handoff ? (handoff.mainClean ? "clean" : "dirty") : "unknown"}</strong>
+          <span>State</span>
+          <strong>{handoff?.mainOperation.message ?? "ready"}</strong>
           <span>Latest</span>
           <strong title={latestCommit?.message ?? ""}>
             {latestCommit ? `${latestCommit.shortHash} ${latestCommit.message}` : "none"}
           </strong>
-          <span>Merge</span>
-          <strong>{handoff?.message ?? "handoff not implemented yet"}</strong>
+          <span>Apply</span>
+          <strong>{handoff?.message ?? "preflight pending"}</strong>
+        </div>
+        <div className="handoff-commits">
+          {commitsToApply.length === 0 ? (
+            <div className="empty-panel">No commits to apply.</div>
+          ) : (
+            commitsToApply.map((commit) => (
+              <div className="handoff-commit" key={commit.hash}>
+                <code>{commit.shortHash}</code>
+                <span title={commit.message}>{commit.message}</span>
+              </div>
+            ))
+          )}
+        </div>
+        {handoff?.blockers.length ? (
+          <div className="handoff-blockers">
+            {handoff.blockers.map((blocker) => (
+              <div className="inline-warning" key={blocker}>
+                {blocker}
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {handoffResult ? (
+          <div className={handoffResult.applied ? "handoff-result" : "handoff-result warning"}>
+            <strong>
+              {handoffResult.applied
+                ? `Applied ${handoffResult.appliedCommits.length} commit(s)`
+                : handoffResult.conflict
+                  ? "Stopped with conflicts"
+                  : "Apply failed"}
+            </strong>
+            {handoffResult.error ? <span title={handoffResult.error}>{handoffResult.error}</span> : null}
+          </div>
+        ) : null}
+        <div className="approval-actions">
+          <button
+            className="command-button primary compact"
+            disabled={!canApplyHandoff}
+            onClick={runApplyHandoff}
+            title={handoff?.blockers.join("; ") || "Apply handoff"}
+          >
+            <Check size={14} />
+            Apply
+          </button>
+          {canAbortHandoff ? (
+            <button className="command-button compact danger" onClick={runAbortHandoff}>
+              <X size={14} />
+              Abort
+            </button>
+          ) : null}
         </div>
       </div>
     </section>
@@ -976,5 +1065,9 @@ function formatTimestamp(timestamp: number): string {
 }
 
 function formatLabel(value: string): string {
+  return value.replaceAll("_", " ");
+}
+
+function formatStrategy(value: string): string {
   return value.replaceAll("_", " ");
 }

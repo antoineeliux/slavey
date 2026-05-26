@@ -141,6 +141,41 @@ export type WorktreeHandoffPreview = {
   message: string;
 };
 
+export type WorktreeHandoffOperationState = {
+  inProgress: boolean;
+  operation?: string | null;
+  head?: string | null;
+  canAbort: boolean;
+  message?: string | null;
+};
+
+export type WorktreeHandoffPreflight = {
+  employeeId: string;
+  employeeBranch?: string | null;
+  mainBranch?: string | null;
+  ahead?: number | null;
+  behind?: number | null;
+  commitsToApply: WorktreeCommit[];
+  employeeClean: boolean;
+  mainClean: boolean;
+  applyStrategy: "cherry_pick" | string;
+  mainOperation: WorktreeHandoffOperationState;
+  blockers: string[];
+  canApply: boolean;
+  message: string;
+};
+
+export type WorktreeHandoffApplyResult = {
+  employeeId: string;
+  applied: boolean;
+  strategy: string;
+  appliedCommits: WorktreeCommit[];
+  conflict: boolean;
+  error?: string | null;
+  stdout: string;
+  stderr: string;
+};
+
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 
 export type ApprovalKind = "shell_command" | "file_write" | "git_operation";
