@@ -17,6 +17,9 @@ export function TerminalPane() {
   const writeTerminal = useAppStore((state) => state.writeTerminal);
   const resizeTerminal = useAppStore((state) => state.resizeTerminal);
   const startTerminal = useAppStore((state) => state.startTerminal);
+  const startCodexTerminal = useAppStore((state) => state.startCodexTerminal);
+  const settings = useAppStore((state) => state.settings);
+  const codexCliStatus = useAppStore((state) => state.codexCliStatus);
   const sessionId = selectedEmployee?.terminalSessionId ?? null;
   const buffer = useMemo(
     () => (sessionId ? terminalBuffers[sessionId] ?? "" : ""),
@@ -122,6 +125,16 @@ export function TerminalPane() {
     void resizeTerminal(selectedEmployee.id, sessionId, terminal.cols, terminal.rows);
   }, [resizeTerminal, selectedEmployee?.id, sessionId]);
 
+  const defaultProfile = settings.defaultTerminalProfile;
+  const defaultTerminalDisabled =
+    !selectedEmployee ||
+    Boolean(sessionId) ||
+    (defaultProfile === "codex" && codexCliStatus?.available !== true);
+  const defaultTerminalTitle =
+    defaultProfile === "codex" && codexCliStatus?.available === false
+      ? codexCliStatus.message
+      : `Start ${defaultProfile}`;
+
   return (
     <div className="terminal-pane">
       <div className="pane-toolbar">
@@ -131,11 +144,21 @@ export function TerminalPane() {
         </div>
         <button
           className="command-button compact"
-          disabled={!selectedEmployee || Boolean(sessionId)}
-          onClick={() => selectedEmployee && void startTerminal(selectedEmployee.id)}
+          disabled={defaultTerminalDisabled}
+          title={defaultTerminalTitle}
+          onClick={() => {
+            if (!selectedEmployee) {
+              return;
+            }
+            if (defaultProfile === "codex") {
+              void startCodexTerminal(selectedEmployee.id);
+            } else {
+              void startTerminal(selectedEmployee.id);
+            }
+          }}
         >
           <Play size={14} />
-          Start shell
+          Start {defaultProfile}
         </button>
       </div>
       <div className="terminal-host" ref={hostRef} />

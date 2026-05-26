@@ -16,9 +16,63 @@ use crate::{
     events::now_ms,
     fs::resolve_existing_dir,
     processes::{ManagedProcess, ProcessLogSnapshot},
-    terminal::TerminalSessionRecord,
+    terminal::{TerminalLaunchProfile, TerminalSessionRecord},
     AppState,
 };
+
+pub const DEFAULT_MAX_TERMINAL_BUFFER_CHARS: usize = 250_000;
+const MIN_TERMINAL_BUFFER_CHARS: usize = 20_000;
+const MAX_TERMINAL_BUFFER_CHARS: usize = 2_000_000;
+const MAX_RECENT_WORKSPACES: usize = 10;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    #[serde(default = "default_terminal_profile")]
+    pub default_terminal_profile: TerminalLaunchProfile,
+    #[serde(default = "default_true")]
+    pub require_confirmation_discard: bool,
+    #[serde(default = "default_true")]
+    pub require_confirmation_delete: bool,
+    #[serde(default = "default_true")]
+    pub require_confirmation_handoff_apply: bool,
+    #[serde(default = "default_max_terminal_buffer_chars")]
+    pub max_terminal_buffer_chars: usize,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            default_terminal_profile: default_terminal_profile(),
+            require_confirmation_discard: true,
+            require_confirmation_delete: true,
+            require_confirmation_handoff_apply: true,
+            max_terminal_buffer_chars: DEFAULT_MAX_TERMINAL_BUFFER_CHARS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettingsUpdateRequest {
+    pub default_terminal_profile: Option<TerminalLaunchProfile>,
+    pub require_confirmation_discard: Option<bool>,
+    pub require_confirmation_delete: Option<bool>,
+    pub require_confirmation_handoff_apply: Option<bool>,
+    pub max_terminal_buffer_chars: Option<usize>,
+}
+
+fn default_terminal_profile() -> TerminalLaunchProfile {
+    TerminalLaunchProfile::Shell
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_terminal_buffer_chars() -> usize {
+    DEFAULT_MAX_TERMINAL_BUFFER_CHARS
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +98,10 @@ pub struct PersistentAppState {
     #[serde(default)]
     pub recent_files: Vec<String>,
     #[serde(default)]
+    pub recent_workspaces: Vec<String>,
+    #[serde(default)]
+    pub settings: AppSettings,
+    #[serde(default)]
     pub updated_at: u64,
 }
 
@@ -60,6 +118,8 @@ struct PersistentUiState {
     selected_employee_id: Option<String>,
     active_tab: Option<String>,
     recent_files: Vec<String>,
+    recent_workspaces: Vec<String>,
+    settings: AppSettings,
 }
 
 #[derive(Clone)]
@@ -75,6 +135,8 @@ impl PersistenceManager {
                 selected_employee_id: state.selected_employee_id.clone(),
                 active_tab: state.active_tab.clone(),
                 recent_files: state.recent_files.clone(),
+                recent_workspaces: state.recent_workspaces.clone(),
+                settings: normalize_settings(state.settings.clone()),
             })
             .unwrap_or_default();
 
@@ -106,6 +168,8 @@ impl PersistenceManager {
             selected_employee_id: ui_state.selected_employee_id.clone(),
             active_tab: ui_state.active_tab.clone(),
             recent_files: ui_state.recent_files.clone(),
+            recent_workspaces: ui_state.recent_workspaces.clone(),
+            settings: ui_state.settings.clone(),
             updated_at: now_ms(),
         }
     }
@@ -143,6 +207,80 @@ impl PersistenceManager {
         ui_state.active_tab = request.active_tab;
         ui_state.recent_files = request.recent_files;
     }
+
+    pub fn reset_workspace_bound_ui(&self) {
+        let mut ui_state = self.ui_state.lock();
+        ui_state.selected_employee_id = None;
+        ui_state.active_tab = Some("terminal".to_string());
+        ui_state.recent_files.clear();
+    }
+
+    pub fn settings(&self) -> AppSettings {
+        self.ui_state.lock().settings.clone()
+    }
+
+    pub fn update_settings(
+        &self,
+        request: AppSettingsUpdateRequest,
+    ) -> Result<AppSettings, String> {
+        let mut ui_state = self.ui_state.lock();
+        let mut settings = ui_state.settings.clone();
+        if let Some(profile) = request.default_terminal_profile {
+            settings.default_terminal_profile = profile;
+        }
+        if let Some(value) = request.require_confirmation_discard {
+            settings.require_confirmation_discard = value;
+        }
+        if let Some(value) = request.require_confirmation_delete {
+            settings.require_confirmation_delete = value;
+        }
+        if let Some(value) = request.require_confirmation_handoff_apply {
+            settings.require_confirmation_handoff_apply = value;
+        }
+        if let Some(value) = request.max_terminal_buffer_chars {
+            settings.max_terminal_buffer_chars = validate_terminal_buffer_size(value)?;
+        }
+        ui_state.settings = settings;
+        Ok(ui_state.settings.clone())
+    }
+
+    pub fn recent_workspaces(&self) -> Vec<String> {
+        self.ui_state.lock().recent_workspaces.clone()
+    }
+
+    pub fn note_recent_workspace(&self, workspace_root: &Path) -> Vec<String> {
+        let path = workspace_root.to_string_lossy().to_string();
+        let mut ui_state = self.ui_state.lock();
+        ui_state.recent_workspaces.retain(|item| item != &path);
+        ui_state.recent_workspaces.insert(0, path);
+        ui_state.recent_workspaces.truncate(MAX_RECENT_WORKSPACES);
+        ui_state.recent_workspaces.clone()
+    }
+
+    pub fn clear_recent_workspaces(&self) -> Vec<String> {
+        let mut ui_state = self.ui_state.lock();
+        ui_state.recent_workspaces.clear();
+        Vec::new()
+    }
+}
+
+fn validate_terminal_buffer_size(value: usize) -> Result<usize, String> {
+    if !(MIN_TERMINAL_BUFFER_CHARS..=MAX_TERMINAL_BUFFER_CHARS).contains(&value) {
+        Err(format!(
+            "maxTerminalBufferChars must be between {MIN_TERMINAL_BUFFER_CHARS} and {MAX_TERMINAL_BUFFER_CHARS}"
+        ))
+    } else {
+        Ok(value)
+    }
+}
+
+fn normalize_settings(mut settings: AppSettings) -> AppSettings {
+    if let Ok(size) = validate_terminal_buffer_size(settings.max_terminal_buffer_chars) {
+        settings.max_terminal_buffer_chars = size;
+    } else {
+        settings.max_terminal_buffer_chars = DEFAULT_MAX_TERMINAL_BUFFER_CHARS;
+    }
+    settings
 }
 
 fn atomic_write_json(path: &Path, contents: &[u8]) -> Result<(), String> {
@@ -245,6 +383,21 @@ pub fn app_state_save(
     Ok(state.snapshot())
 }
 
+#[tauri::command]
+pub fn settings_get(state: State<'_, AppState>) -> AppSettings {
+    state.persistence.settings()
+}
+
+#[tauri::command]
+pub fn settings_update(
+    state: State<'_, AppState>,
+    payload: AppSettingsUpdateRequest,
+) -> Result<AppSettings, String> {
+    let settings = state.persistence.update_settings(payload)?;
+    state.persist()?;
+    Ok(settings)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +476,64 @@ mod tests {
         assert!(loaded.approvals.is_empty());
         assert!(loaded.processes.is_empty());
         assert!(loaded.process_logs.is_empty());
+    }
+
+    #[test]
+    fn settings_default_and_restore() {
+        let root = test_root("settings");
+        let path = root.join("state.json");
+        let manager = PersistenceManager::new(path.clone(), None);
+
+        assert_eq!(manager.settings(), AppSettings::default());
+
+        let updated = manager
+            .update_settings(AppSettingsUpdateRequest {
+                default_terminal_profile: Some(crate::terminal::TerminalLaunchProfile::Codex),
+                require_confirmation_discard: Some(false),
+                require_confirmation_delete: Some(false),
+                require_confirmation_handoff_apply: Some(true),
+                max_terminal_buffer_chars: Some(100_000),
+            })
+            .unwrap();
+        assert_eq!(
+            updated.default_terminal_profile,
+            crate::terminal::TerminalLaunchProfile::Codex
+        );
+        assert!(!updated.require_confirmation_discard);
+        assert!(!updated.require_confirmation_delete);
+        assert!(updated.require_confirmation_handoff_apply);
+        assert_eq!(updated.max_terminal_buffer_chars, 100_000);
+
+        manager
+            .save(
+                &root,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
+        let loaded = load_from_disk(&path).unwrap().unwrap();
+        let restored = PersistenceManager::new(path, Some(&loaded));
+
+        assert_eq!(restored.settings(), updated);
+    }
+
+    #[test]
+    fn invalid_terminal_buffer_setting_is_rejected() {
+        let root = test_root("settings-invalid");
+        let manager = PersistenceManager::new(root.join("state.json"), None);
+
+        let error = manager
+            .update_settings(AppSettingsUpdateRequest {
+                max_terminal_buffer_chars: Some(10),
+                ..AppSettingsUpdateRequest::default()
+            })
+            .unwrap_err();
+
+        assert!(error.contains("maxTerminalBufferChars"));
     }
 
     #[test]

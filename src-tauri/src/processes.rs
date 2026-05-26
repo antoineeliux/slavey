@@ -23,8 +23,9 @@ use crate::{
     events::{emit_log, emit_process_log, emit_process_updated, now_ms, LogLevel},
     fs::resolve_existing_dir,
     persistence::PersistenceManager,
+    read_workspace_root,
     terminal::TerminalSessionStore,
-    AppState,
+    AppState, WorkspaceRootHandle,
 };
 
 const MAX_PROCESS_LOG_BYTES: usize = 1024 * 1024;
@@ -154,6 +155,15 @@ impl ProcessManager {
         processes
     }
 
+    pub fn has_running(&self) -> bool {
+        !self.running.lock().is_empty()
+            || self
+                .processes
+                .lock()
+                .values()
+                .any(|process| process.status == ManagedProcessStatus::Running)
+    }
+
     pub fn replace_all(&self, processes: Vec<ManagedProcess>, logs: Vec<ProcessLogSnapshot>) {
         let mut restored_logs = restore_process_logs(&logs);
         let restored_processes = restore_managed_processes(&processes);
@@ -174,6 +184,12 @@ impl ProcessManager {
         *self.processes.lock() = next_processes;
         *self.logs.lock() = restored_logs;
         self.running.lock().clear();
+    }
+
+    pub fn clear(&self) {
+        self.processes.lock().clear();
+        self.running.lock().clear();
+        self.logs.lock().clear();
     }
 
     pub fn log_snapshots(&self) -> Vec<ProcessLogSnapshot> {
@@ -265,7 +281,7 @@ impl ProcessManager {
 
 #[derive(Clone)]
 struct ProcessPersistContext {
-    workspace_root: PathBuf,
+    workspace_root: WorkspaceRootHandle,
     employees: EmployeeManager,
     actions: ActionManager,
     approvals: ApprovalManager,
@@ -296,17 +312,14 @@ pub fn process_spawn(
         None => None,
     };
 
+    let workspace_root = state.workspace_root();
     let cwd = match (payload.cwd.as_deref(), employee.as_ref()) {
         (Some(cwd), Some(employee)) if !cwd.trim().is_empty() => {
-            resolve_employee_execution_dir(&state.workspace_root, employee, Some(cwd))?
+            resolve_employee_execution_dir(&workspace_root, employee, Some(cwd))?
         }
-        (Some(cwd), None) if !cwd.trim().is_empty() => {
-            resolve_existing_dir(&state.workspace_root, cwd)?
-        }
-        (_, Some(employee)) => {
-            resolve_employee_execution_dir(&state.workspace_root, employee, None)?
-        }
-        _ => state.workspace_root.clone(),
+        (Some(cwd), None) if !cwd.trim().is_empty() => resolve_existing_dir(&workspace_root, cwd)?,
+        (_, Some(employee)) => resolve_employee_execution_dir(&workspace_root, employee, None)?,
+        _ => workspace_root.clone(),
     };
 
     let mut command = shell_command(&payload.command);
@@ -338,7 +351,7 @@ pub fn process_spawn(
         .processes
         .register_running(&process.id, Arc::clone(&child), Arc::clone(&killed));
     let persist_context = ProcessPersistContext {
-        workspace_root: state.workspace_root.clone(),
+        workspace_root: state.workspace_root_handle(),
         employees: state.employees.clone(),
         actions: state.actions.clone(),
         approvals: state.approvals.clone(),
@@ -518,8 +531,9 @@ fn persist_process_snapshot_or_log(app: &AppHandle, context: &ProcessPersistCont
 }
 
 fn persist_process_snapshot(context: &ProcessPersistContext) -> Result<(), String> {
+    let workspace_root = read_workspace_root(&context.workspace_root);
     context.persistence.save(
-        &context.workspace_root,
+        &workspace_root,
         context.employees.list(),
         context.terminal_sessions.list(),
         context.actions.list(),

@@ -24,8 +24,9 @@ use crate::{
     fs::write_file_in_workspace,
     persistence::PersistenceManager,
     processes::{configure_process_group, shell_command, terminate_process_tree, ProcessManager},
+    read_workspace_root,
     terminal::TerminalSessionStore,
-    AppState,
+    AppState, WorkspaceRootHandle,
 };
 
 pub const DEFAULT_ACTION_TIMEOUT_SECS: u64 = 120;
@@ -138,6 +139,15 @@ impl ActionManager {
         let mut actions = self.actions.lock().values().cloned().collect::<Vec<_>>();
         actions.sort_by_key(|action| action.created_at);
         actions
+    }
+
+    pub fn has_running(&self) -> bool {
+        !self.running.lock().is_empty()
+            || self
+                .actions
+                .lock()
+                .values()
+                .any(|action| action.status == ActionStatus::Running)
     }
 
     pub fn replace_all(&self, actions: Vec<Action>) {
@@ -403,8 +413,10 @@ pub fn action_run(
     let running = state.actions.start_running(&action_id)?;
     emit_action_updated(&app, running.clone());
 
+    let workspace_root = state.workspace_root();
     let context = ActionRunContext {
-        workspace_root: state.workspace_root.clone(),
+        execution_root: workspace_root,
+        workspace_root: state.workspace_root_handle(),
         employees: state.employees.clone(),
         approvals: state.approvals.clone(),
         actions: state.actions.clone(),
@@ -506,7 +518,8 @@ fn validate_action_payload(
     }
 
     if let Some(cwd) = payload.cwd.as_deref() {
-        resolve_employee_execution_dir(&state.workspace_root, &employee, Some(cwd))?;
+        let workspace_root = state.workspace_root();
+        resolve_employee_execution_dir(&workspace_root, &employee, Some(cwd))?;
     }
 
     Ok(())
@@ -582,7 +595,8 @@ fn action_status_label(status: ActionStatus) -> &'static str {
 }
 
 struct ActionRunContext {
-    workspace_root: PathBuf,
+    execution_root: PathBuf,
+    workspace_root: WorkspaceRootHandle,
     employees: EmployeeManager,
     approvals: crate::approvals::ApprovalManager,
     actions: ActionManager,
@@ -680,8 +694,9 @@ fn finish_background_action(
 }
 
 fn persist_context_snapshot(context: &ActionRunContext) -> Result<(), String> {
+    let workspace_root = read_workspace_root(&context.workspace_root);
     context.persistence.save(
-        &context.workspace_root,
+        &workspace_root,
         context.employees.list(),
         context.terminal_sessions.list(),
         context.actions.list(),
@@ -711,7 +726,7 @@ fn run_shell_action(
         .get(&action.employee_id)
         .ok_or_else(|| ActionFailure::new("employee not found"))?;
     let cwd =
-        resolve_employee_execution_dir(&context.workspace_root, &employee, action.cwd.as_deref())
+        resolve_employee_execution_dir(&context.execution_root, &employee, action.cwd.as_deref())
             .map_err(ActionFailure::from)?;
     let command = action
         .command
@@ -827,7 +842,7 @@ fn resolve_file_write_action_root(
         .employees
         .get(&action.employee_id)
         .ok_or_else(|| ActionFailure::new("employee not found"))?;
-    resolve_employee_execution_dir(&context.workspace_root, &employee, action.cwd.as_deref())
+    resolve_employee_execution_dir(&context.execution_root, &employee, action.cwd.as_deref())
         .map_err(ActionFailure::from)
 }
 
@@ -924,12 +939,13 @@ impl From<ActionKind> for ApprovalKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs as std_fs, path::Path};
+    use std::{fs as std_fs, path::Path, sync::Arc};
 
     use crate::{
         approvals::ApprovalManager,
         employees::{EmployeeManager, EmployeeRole},
     };
+    use parking_lot::RwLock;
 
     fn sample_action_request() -> ActionCreateRequest {
         ActionCreateRequest {
@@ -969,7 +985,8 @@ mod tests {
 
         (
             ActionRunContext {
-                workspace_root: root.to_path_buf(),
+                execution_root: root.to_path_buf(),
+                workspace_root: Arc::new(RwLock::new(root.to_path_buf())),
                 employees,
                 approvals: ApprovalManager::default(),
                 actions: ActionManager::default(),

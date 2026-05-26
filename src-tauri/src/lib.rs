@@ -7,20 +7,24 @@ mod git;
 mod persistence;
 mod processes;
 mod terminal;
+mod workspace;
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use actions::{restore_actions, ActionManager};
 use approvals::ApprovalManager;
 use employees::EmployeeManager;
 use events::{emit_log, LogLevel};
+use parking_lot::RwLock;
 use persistence::PersistenceManager;
 use processes::ProcessManager;
 use tauri::Manager;
 use terminal::{TerminalManager, TerminalSessionStore};
 
+pub type WorkspaceRootHandle = Arc<RwLock<PathBuf>>;
+
 pub struct AppState {
-    pub workspace_root: PathBuf,
+    workspace_root: WorkspaceRootHandle,
     pub employees: EmployeeManager,
     pub terminal: TerminalManager,
     pub terminal_sessions: TerminalSessionStore,
@@ -31,9 +35,22 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn workspace_root(&self) -> PathBuf {
+        self.workspace_root.read().clone()
+    }
+
+    pub fn workspace_root_handle(&self) -> WorkspaceRootHandle {
+        Arc::clone(&self.workspace_root)
+    }
+
+    pub fn set_workspace_root(&self, workspace_root: PathBuf) {
+        *self.workspace_root.write() = workspace_root;
+    }
+
     pub fn persist(&self) -> Result<(), String> {
+        let workspace_root = self.workspace_root();
         self.persistence.save(
-            &self.workspace_root,
+            &workspace_root,
             self.employees.list(),
             self.terminal_sessions.list(),
             self.actions.list(),
@@ -44,8 +61,9 @@ impl AppState {
     }
 
     pub fn snapshot(&self) -> persistence::PersistentAppState {
+        let workspace_root = self.workspace_root();
         self.persistence.snapshot(
-            &self.workspace_root,
+            &workspace_root,
             self.employees.list(),
             self.terminal_sessions.list(),
             self.actions.list(),
@@ -59,6 +77,7 @@ impl AppState {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let persistence_path = app
                 .path()
@@ -110,7 +129,7 @@ pub fn run() {
                 format!("workspace root set to {}", workspace_root.display()),
             );
             let state = AppState {
-                workspace_root,
+                workspace_root: Arc::new(RwLock::new(workspace_root)),
                 employees,
                 terminal: TerminalManager::default(),
                 terminal_sessions,
@@ -179,6 +198,12 @@ pub fn run() {
             terminal::terminal_resize,
             terminal::terminal_session_list,
             terminal::codex_cli_status,
+            workspace::workspace_info,
+            workspace::workspace_set_root,
+            workspace::workspace_recent_list,
+            workspace::workspace_recent_clear,
+            persistence::settings_get,
+            persistence::settings_update,
             fs::fs_list_dir,
             fs::fs_list_files,
             fs::fs_search,
@@ -206,7 +231,7 @@ fn resolve_workspace_root(persisted_workspace: Option<PathBuf>) -> PathBuf {
         }
     }
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = default_workspace_root();
     let candidate = if cwd.file_name().is_some_and(|name| name == "src-tauri") {
         cwd.parent()
             .map(PathBuf::from)
@@ -218,6 +243,21 @@ fn resolve_workspace_root(persisted_workspace: Option<PathBuf>) -> PathBuf {
     canonicalize_or_original(candidate)
 }
 
+fn default_workspace_root() -> PathBuf {
+    home_dir().unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+}
+
 fn canonicalize_or_original(path: PathBuf) -> PathBuf {
     path.canonicalize().unwrap_or(path)
+}
+
+pub fn read_workspace_root(handle: &WorkspaceRootHandle) -> PathBuf {
+    handle.read().clone()
 }

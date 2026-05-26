@@ -136,6 +136,13 @@ impl TerminalSessionStore {
         records
     }
 
+    pub fn has_running(&self) -> bool {
+        self.records
+            .lock()
+            .values()
+            .any(|record| record.status == TerminalSessionStatus::Running)
+    }
+
     pub fn replace_all(&self, records: Vec<TerminalSessionRecord>) {
         let mut next = HashMap::new();
         for record in records {
@@ -364,6 +371,14 @@ impl TerminalManager {
             .kill()
             .context("failed to kill PTY process")?;
         Ok(())
+    }
+
+    pub fn has_active_sessions(&self) -> bool {
+        !self.sessions.lock().is_empty()
+    }
+
+    pub fn clear_inactive_sessions(&self) {
+        self.sessions.lock().clear();
     }
 }
 

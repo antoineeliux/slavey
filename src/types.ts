@@ -79,6 +79,8 @@ export type AppStateSnapshot = {
   selectedEmployeeId?: string | null;
   activeTab?: AppTab | null;
   recentFiles: string[];
+  recentWorkspaces?: string[];
+  settings?: AppSettings;
   updatedAt: number;
 };
 
@@ -101,7 +103,38 @@ export type FilePayload = {
   contents: string;
 };
 
-export type AppTab = "terminal" | "editor";
+export type AppTab = "terminal" | "editor" | "settings";
+
+export type AppSettings = {
+  defaultTerminalProfile: TerminalSessionProfile;
+  requireConfirmationDiscard: boolean;
+  requireConfirmationDelete: boolean;
+  requireConfirmationHandoffApply: boolean;
+  maxTerminalBufferChars: number;
+};
+
+export type AppSettingsUpdate = Partial<AppSettings>;
+
+export type WorkspaceInfo = {
+  workspaceRoot: string;
+  recentWorkspaces: string[];
+  settings: AppSettings;
+  repoHealth: RepoHealth;
+  switchBlockers: string[];
+};
+
+export type RepoHealth = {
+  isExistingDirectory: boolean;
+  isGitRepo: boolean;
+  repoRoot?: string | null;
+  currentBranch?: string | null;
+  dirty: boolean;
+  gitUserNameConfigured: boolean;
+  gitUserEmailConfigured: boolean;
+  worktreeSupported: boolean;
+  worktreeSupportMessage: string;
+  codexCliStatus: CodexCliStatus;
+};
 
 export type WorktreeStatus = {
   employeeId: string;

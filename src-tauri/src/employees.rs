@@ -16,8 +16,9 @@ use crate::{
     fs::resolve_existing_dir,
     persistence::PersistenceManager,
     processes::ProcessManager,
+    read_workspace_root,
     terminal::{TerminalLaunchProfile, TerminalSessionStore, DEFAULT_PTY_SIZE},
-    AppState,
+    AppState, WorkspaceRootHandle,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,7 +85,7 @@ pub struct EmployeeManager {
 
 #[derive(Clone)]
 struct TerminalPersistContext {
-    workspace_root: PathBuf,
+    workspace_root: WorkspaceRootHandle,
     employees: EmployeeManager,
     terminal_sessions: TerminalSessionStore,
     actions: ActionManager,
@@ -165,9 +166,10 @@ pub fn employee_create(
         return Err("employee name is required".to_string());
     }
 
+    let workspace_root = state.workspace_root();
     let cwd = match payload.cwd {
-        Some(cwd) if !cwd.trim().is_empty() => resolve_existing_dir(&state.workspace_root, &cwd)?,
-        _ => state.workspace_root.clone(),
+        Some(cwd) if !cwd.trim().is_empty() => resolve_existing_dir(&workspace_root, &cwd)?,
+        _ => workspace_root,
     };
 
     let employee = state.employees.create(name.to_string(), payload.role, cwd);
@@ -252,7 +254,8 @@ fn start_terminal_with_profile(
         return Ok(employee);
     }
 
-    let cwd = resolve_employee_execution_dir(&state.workspace_root, &employee, None)?;
+    let workspace_root = state.workspace_root();
+    let cwd = resolve_employee_execution_dir(&workspace_root, &employee, None)?;
     let record_cwd = cwd.to_string_lossy().to_string();
     let starting = state
         .employees
@@ -275,7 +278,7 @@ fn start_terminal_with_profile(
     let exit_employee_id = employee_id.clone();
     let exit_session_id = session_id.clone();
     let exit_persist_context = TerminalPersistContext {
-        workspace_root: state.workspace_root.clone(),
+        workspace_root: state.workspace_root_handle(),
         employees: state.employees.clone(),
         terminal_sessions: state.terminal_sessions.clone(),
         actions: state.actions.clone(),
@@ -441,8 +444,9 @@ fn persist_terminal_snapshot_or_log(app: &AppHandle, context: &TerminalPersistCo
 }
 
 fn persist_terminal_snapshot(context: &TerminalPersistContext) -> Result<(), String> {
+    let workspace_root = read_workspace_root(&context.workspace_root);
     context.persistence.save(
-        &context.workspace_root,
+        &workspace_root,
         context.employees.list(),
         context.terminal_sessions.list(),
         context.actions.list(),

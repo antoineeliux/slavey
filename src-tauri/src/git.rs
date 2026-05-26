@@ -145,14 +145,15 @@ pub struct WorktreeCommitRequest {
 
 #[tauri::command]
 pub fn git_is_repo(state: State<'_, AppState>, path: Option<String>) -> bool {
+    let workspace_root = state.workspace_root();
     let root = match path {
         Some(path) if !path.trim().is_empty() => {
-            match resolve_existing_dir(&state.workspace_root, &path) {
+            match resolve_existing_dir(&workspace_root, &path) {
                 Ok(path) => path,
                 Err(_) => return false,
             }
         }
-        _ => state.workspace_root.clone(),
+        _ => workspace_root,
     };
 
     git_success(&root, &["rev-parse", "--show-toplevel"])
@@ -164,7 +165,8 @@ pub fn git_worktree_create_for_employee(
     state: State<'_, AppState>,
     employee_id: String,
 ) -> Result<Employee, String> {
-    if !git_success(&state.workspace_root, &["rev-parse", "--show-toplevel"]) {
+    let workspace_root = state.workspace_root();
+    if !git_success(&workspace_root, &["rev-parse", "--show-toplevel"]) {
         return Err("workspace root is not a git repository".to_string());
     }
 
@@ -176,9 +178,9 @@ pub fn git_worktree_create_for_employee(
         return Err("employee already has a worktree".to_string());
     }
 
-    let worktree_root = state.workspace_root.join(".slavey").join("worktrees");
+    let worktree_root = workspace_root.join(".slavey").join("worktrees");
     std_fs::create_dir_all(&worktree_root).map_err(|error| error.to_string())?;
-    if ensure_slavey_excluded(&state.workspace_root)? {
+    if ensure_slavey_excluded(&workspace_root)? {
         emit_log(&app, LogLevel::Info, "added .slavey/ to .git/info/exclude");
     }
 
@@ -192,7 +194,7 @@ pub fn git_worktree_create_for_employee(
 
     let branch_name = branch_name_for_employee(&employee);
     if git_success(
-        &state.workspace_root,
+        &workspace_root,
         &[
             "show-ref",
             "--verify",
@@ -204,7 +206,7 @@ pub fn git_worktree_create_for_employee(
     }
 
     run_git(
-        &state.workspace_root,
+        &workspace_root,
         &[
             "worktree",
             "add",
@@ -259,7 +261,8 @@ pub fn git_worktree_status_for_employee(
         });
     }
 
-    let path = resolve_employee_execution_dir(&state.workspace_root, &employee, None)?;
+    let workspace_root = state.workspace_root();
+    let path = resolve_employee_execution_dir(&workspace_root, &employee, None)?;
     let is_repo = git_success(&path, &["rev-parse", "--show-toplevel"]);
     let changes = if is_repo {
         parse_status_lines(&run_git(&path, &["status", "--porcelain"])?)
@@ -293,7 +296,8 @@ pub fn git_worktree_remove_for_employee(
         return Ok(employee);
     }
 
-    let path = resolve_employee_execution_dir(&state.workspace_root, &employee, None)?;
+    let workspace_root = state.workspace_root();
+    let path = resolve_employee_execution_dir(&workspace_root, &employee, None)?;
     let changes = parse_status_lines(&run_git(&path, &["status", "--porcelain"])?);
     if !changes.is_empty() {
         return Err(
@@ -303,7 +307,7 @@ pub fn git_worktree_remove_for_employee(
 
     // TODO: add a deliberate force-remove path behind a git_operation approval.
     run_git(
-        &state.workspace_root,
+        &workspace_root,
         &["worktree", "remove", path_to_str(&path)?],
     )?;
 
@@ -312,7 +316,7 @@ pub fn git_worktree_remove_for_employee(
         .update(&employee_id, |employee| {
             employee.worktree_path = None;
             employee.branch_name = None;
-            employee.cwd = state.workspace_root.to_string_lossy().to_string();
+            employee.cwd = workspace_root.to_string_lossy().to_string();
         })
         .ok_or_else(|| "employee not found".to_string())?;
     state.persist()?;
@@ -347,7 +351,8 @@ pub fn git_worktree_review_for_employee(
     if employee.worktree_path.is_none() {
         return Err("employee has no worktree".to_string());
     }
-    let path = resolve_employee_execution_dir(&state.workspace_root, &employee, None)?;
+    let workspace_root = state.workspace_root();
+    let path = resolve_employee_execution_dir(&workspace_root, &employee, None)?;
     let status = parse_status_lines(&run_git(&path, &["status", "--porcelain"])?);
     let untracked_files = parse_untracked_files(&status);
 
@@ -458,9 +463,10 @@ pub fn git_worktree_handoff_preview_for_employee(
     let (worktree, branch_name) = employee_worktree(&state, &employee_id)?;
     let worktree_branch = branch_name.or_else(|| current_branch(&worktree).ok().flatten());
     let upstream_branch = upstream_branch(&worktree).ok().flatten();
+    let workspace_root = state.workspace_root();
     let base_branch = upstream_branch
         .clone()
-        .or_else(|| current_branch(&state.workspace_root).ok().flatten());
+        .or_else(|| current_branch(&workspace_root).ok().flatten());
     let (behind, ahead) = base_branch
         .as_deref()
         .and_then(|base| ahead_behind(&worktree, base).ok())
@@ -491,7 +497,8 @@ pub fn git_worktree_handoff_preflight_for_employee(
     employee_id: String,
 ) -> Result<WorktreeHandoffPreflight, String> {
     let (worktree, branch_name) = employee_worktree(&state, &employee_id)?;
-    handoff_preflight_for_paths(employee_id, &state.workspace_root, &worktree, branch_name)
+    let workspace_root = state.workspace_root();
+    handoff_preflight_for_paths(employee_id, &workspace_root, &worktree, branch_name)
 }
 
 #[tauri::command]
@@ -505,9 +512,10 @@ pub fn git_worktree_apply_handoff_for_employee(
     }
 
     let (worktree, branch_name) = employee_worktree(&state, &payload.employee_id)?;
+    let workspace_root = state.workspace_root();
     let result = apply_handoff_for_paths(
         payload.employee_id.clone(),
-        &state.workspace_root,
+        &workspace_root,
         &worktree,
         branch_name,
     )?;
@@ -541,7 +549,8 @@ pub fn git_worktree_abort_handoff_for_employee(
     state: State<'_, AppState>,
     employee_id: String,
 ) -> Result<WorktreeHandoffAbortResult, String> {
-    let result = abort_handoff_for_paths(employee_id, &state.workspace_root)?;
+    let workspace_root = state.workspace_root();
+    let result = abort_handoff_for_paths(employee_id, &workspace_root)?;
     if result.aborted {
         emit_log(&app, LogLevel::Info, "aborted main workspace cherry-pick");
     }
@@ -612,8 +621,9 @@ fn employee_worktree(
     if employee.worktree_path.is_none() {
         return Err("employee has no worktree".to_string());
     }
+    let workspace_root = state.workspace_root();
     Ok((
-        resolve_employee_execution_dir(&state.workspace_root, &employee, None)?,
+        resolve_employee_execution_dir(&workspace_root, &employee, None)?,
         employee.branch_name,
     ))
 }
@@ -758,13 +768,13 @@ fn abort_handoff_for_paths(
     }
 }
 
-fn git_success(cwd: &Path, args: &[&str]) -> bool {
+pub(crate) fn git_success(cwd: &Path, args: &[&str]) -> bool {
     bounded_git_output(cwd, args)
         .map(|output| output.success)
         .unwrap_or(false)
 }
 
-fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let output = bounded_git_output(cwd, args)?;
 
     if output.success {
@@ -959,7 +969,7 @@ fn ensure_slavey_excluded(repo_root: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-fn parse_status_lines(output: &str) -> Vec<String> {
+pub(crate) fn parse_status_lines(output: &str) -> Vec<String> {
     output
         .lines()
         .map(str::trim_end)
@@ -1136,7 +1146,7 @@ fn git_head(cwd: &Path) -> Result<String, String> {
     non_empty_trimmed(head).ok_or_else(|| "git HEAD could not be resolved".to_string())
 }
 
-fn current_branch(cwd: &Path) -> Result<Option<String>, String> {
+pub(crate) fn current_branch(cwd: &Path) -> Result<Option<String>, String> {
     let branch = run_git(cwd, &["rev-parse", "--abbrev-ref", "HEAD"])?;
     Ok(non_empty_trimmed(branch).filter(|branch| branch != "HEAD"))
 }

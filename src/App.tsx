@@ -1,13 +1,16 @@
 import { useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   Check,
   Code2,
   FileCode2,
+  FolderOpen,
   GitBranch,
   History,
   ListTree,
   Plus,
   RefreshCw,
+  Settings2,
   ShieldQuestion,
   TerminalSquare,
   X,
@@ -19,7 +22,9 @@ import { TerminalPane } from "./components/TerminalPane";
 import { useAppStore } from "./store/appStore";
 import type {
   Action,
+  AppSettings,
   ApprovalRequest,
+  RepoHealth,
   TerminalSessionRecord,
   WorktreeCommit,
   WorktreeHandoffApplyResult,
@@ -108,9 +113,22 @@ export default function App() {
             <FileCode2 size={16} />
             Editor
           </button>
+          <button
+            className={activeTab === "settings" ? "tab active" : "tab"}
+            onClick={() => setActiveTab("settings")}
+          >
+            <Settings2 size={16} />
+            Settings
+          </button>
         </div>
         <section className="workspace-panel">
-          {activeTab === "terminal" ? <TerminalPane /> : <EditorPane />}
+          {activeTab === "terminal" ? (
+            <TerminalPane />
+          ) : activeTab === "editor" ? (
+            <EditorPane />
+          ) : (
+            <SettingsPane />
+          )}
         </section>
       </main>
 
@@ -141,6 +159,232 @@ export default function App() {
   );
 }
 
+function SettingsPane() {
+  const workspaceRoot = useAppStore((state) => state.workspaceRoot);
+  const workspaceInfo = useAppStore((state) => state.workspaceInfo);
+  const recentWorkspaces = useAppStore((state) => state.recentWorkspaces);
+  const settings = useAppStore((state) => state.settings);
+  const workspaceLoading = useAppStore((state) => state.workspaceLoading);
+  const setWorkspaceRoot = useAppStore((state) => state.setWorkspaceRoot);
+  const loadWorkspaceInfo = useAppStore((state) => state.loadWorkspaceInfo);
+  const clearRecentWorkspaces = useAppStore((state) => state.clearRecentWorkspaces);
+  const updateSettings = useAppStore((state) => state.updateSettings);
+  const addLog = useAppStore((state) => state.addLog);
+  const [pathInput, setPathInput] = useState(workspaceRoot ?? "");
+
+  useEffect(() => {
+    setPathInput(workspaceRoot ?? "");
+  }, [workspaceRoot]);
+
+  const health = workspaceInfo?.repoHealth ?? null;
+
+  const pickWorkspace = async () => {
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected === "string") {
+        await setWorkspaceRoot(selected);
+      }
+    } catch (error) {
+      addLog({
+        id: crypto.randomUUID(),
+        level: "warn",
+        message: `workspace picker failed: ${String(error)}`,
+        timestamp: Date.now(),
+      });
+    }
+  };
+
+  return (
+    <div className="settings-pane">
+      <section className="workspace-settings-panel">
+        <div className="pane-toolbar settings-toolbar">
+          <div className="toolbar-title">
+            <Settings2 size={16} />
+            Workspace
+          </div>
+          <button
+            className="icon-button"
+            disabled={workspaceLoading}
+            title="Refresh workspace health"
+            onClick={() => void loadWorkspaceInfo()}
+          >
+            <RefreshCw size={14} />
+          </button>
+        </div>
+        <div className="settings-content">
+          <div className="workspace-open-row">
+            <button
+              className="command-button primary"
+              disabled={workspaceLoading}
+              onClick={() => void pickWorkspace()}
+            >
+              <FolderOpen size={15} />
+              Open workspace
+            </button>
+            <input
+              value={pathInput}
+              onChange={(event) => setPathInput(event.target.value)}
+              placeholder="/absolute/path/to/repo"
+              aria-label="Workspace path"
+            />
+            <button
+              className="command-button"
+              disabled={workspaceLoading || pathInput.trim().length === 0}
+              onClick={() => void setWorkspaceRoot(pathInput)}
+            >
+              Open
+            </button>
+          </div>
+
+          <div className="settings-grid">
+            <span>Current root</span>
+            <strong title={workspaceRoot ?? ""}>{workspaceRoot ?? "none"}</strong>
+            <span>Directory</span>
+            <strong>{health?.isExistingDirectory ? "exists" : "missing"}</strong>
+            <span>Git repo</span>
+            <strong>{health?.isGitRepo ? "available" : "unavailable"}</strong>
+            <span>Repo root</span>
+            <strong title={health?.repoRoot ?? ""}>{health?.repoRoot ?? "none"}</strong>
+            <span>Branch</span>
+            <strong>{health?.currentBranch ?? "detached or unknown"}</strong>
+            <span>Status</span>
+            <strong>{health ? (health.dirty ? "dirty" : "clean") : "unknown"}</strong>
+            <span>Git identity</span>
+            <strong>{identityLabel(health)}</strong>
+            <span>Worktrees</span>
+            <strong title={health?.worktreeSupportMessage ?? ""}>
+              {health?.worktreeSupported ? "available" : "unavailable"}
+            </strong>
+            <span>Codex CLI</span>
+            <strong title={health?.codexCliStatus.message ?? ""}>
+              {health ? codexStatusLabel(health.codexCliStatus, false) : "unknown"}
+            </strong>
+          </div>
+
+          {workspaceInfo?.switchBlockers.length ? (
+            <div className="handoff-blockers">
+              {workspaceInfo.switchBlockers.map((blocker) => (
+                <div className="inline-warning" key={blocker}>
+                  {blocker}
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          <section className="settings-section">
+            <div className="section-heading compact-heading">
+              <History size={15} />
+              Recent
+            </div>
+            <div className="recent-workspace-list">
+              {recentWorkspaces.length === 0 ? (
+                <div className="empty-panel">No recent workspaces.</div>
+              ) : (
+                recentWorkspaces.map((recent) => (
+                  <button
+                    className="recent-workspace"
+                    key={recent}
+                    disabled={workspaceLoading || recent === workspaceRoot}
+                    title={recent}
+                    onClick={() => void setWorkspaceRoot(recent)}
+                  >
+                    <span>{recent}</span>
+                  </button>
+                ))
+              )}
+            </div>
+            <button
+              className="command-button compact"
+              disabled={recentWorkspaces.length === 0}
+              onClick={() => void clearRecentWorkspaces()}
+            >
+              Clear recent
+            </button>
+          </section>
+
+          <SettingsForm settings={settings} onChange={updateSettings} />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function SettingsForm({
+  settings,
+  onChange,
+}: {
+  settings: AppSettings;
+  onChange: (settings: Partial<AppSettings>) => Promise<void>;
+}) {
+  return (
+    <section className="settings-section">
+      <div className="section-heading compact-heading">
+        <Settings2 size={15} />
+        Safety
+      </div>
+      <div className="settings-form">
+        <label>
+          <span>Default terminal</span>
+          <select
+            value={settings.defaultTerminalProfile}
+            onChange={(event) =>
+              void onChange({
+                defaultTerminalProfile: event.target.value as AppSettings["defaultTerminalProfile"],
+              })
+            }
+          >
+            <option value="shell">shell</option>
+            <option value="codex">codex</option>
+          </select>
+        </label>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={settings.requireConfirmationDiscard}
+            onChange={(event) =>
+              void onChange({ requireConfirmationDiscard: event.target.checked })
+            }
+          />
+          <span>Confirm discard</span>
+        </label>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={settings.requireConfirmationDelete}
+            onChange={(event) =>
+              void onChange({ requireConfirmationDelete: event.target.checked })
+            }
+          />
+          <span>Confirm delete</span>
+        </label>
+        <label className="checkbox-row">
+          <input
+            type="checkbox"
+            checked={settings.requireConfirmationHandoffApply}
+            onChange={(event) =>
+              void onChange({ requireConfirmationHandoffApply: event.target.checked })
+            }
+          />
+          <span>Confirm handoff apply</span>
+        </label>
+        <label>
+          <span>Terminal buffer</span>
+          <input
+            type="number"
+            min={20000}
+            max={2000000}
+            step={10000}
+            value={settings.maxTerminalBufferChars}
+            onChange={(event) =>
+              void onChange({ maxTerminalBufferChars: Number(event.target.value) })
+            }
+          />
+        </label>
+      </div>
+    </section>
+  );
+}
+
 function EmployeeDetails() {
   const selectedEmployee = useAppStore((state) => state.selectedEmployee());
   const approvals = useAppStore((state) => state.approvals);
@@ -149,6 +393,7 @@ function EmployeeDetails() {
   const terminalSessions = useAppStore((state) => state.terminalSessions);
   const codexCliStatus = useAppStore((state) => state.codexCliStatus);
   const codexCliStatusLoading = useAppStore((state) => state.codexCliStatusLoading);
+  const workspaceInfo = useAppStore((state) => state.workspaceInfo);
   const rolePolicies = useAppStore((state) => state.rolePolicies);
   const worktreeStatuses = useAppStore((state) => state.worktreeStatuses);
   const worktreeReviews = useAppStore((state) => state.worktreeReviews);
@@ -209,6 +454,11 @@ function EmployeeDetails() {
   const displayStatus =
     pendingApprovals.length > 0 ? "waiting_approval" : selectedEmployee.status;
   const worktreeStatus = worktreeStatuses[selectedEmployee.id];
+  const repoHealth = workspaceInfo?.repoHealth ?? null;
+  const worktreeDisabledReason = worktreeCreateDisabledReason(
+    selectedEmployee.worktreePath,
+    repoHealth,
+  );
   const worktreeReview = worktreeReviews[selectedEmployee.id];
   const employeeCommits = worktreeCommits[selectedEmployee.id] ?? [];
   const handoff = worktreeHandoffs[selectedEmployee.id];
@@ -341,8 +591,9 @@ function EmployeeDetails() {
         </button>
         <button
           className="command-button"
-          disabled={Boolean(selectedEmployee.worktreePath)}
+          disabled={Boolean(worktreeDisabledReason)}
           onClick={() => void createWorktree(selectedEmployee.id)}
+          title={worktreeDisabledReason ?? "Create isolated worktree"}
         >
           <GitBranch size={14} />
           Worktree
@@ -374,6 +625,9 @@ function EmployeeDetails() {
       </div>
       {codexCliStatus?.available === false ? (
         <div className="inline-warning">{codexCliStatus.message}</div>
+      ) : null}
+      {worktreeDisabledReason && !selectedEmployee.worktreePath ? (
+        <div className="inline-warning">{worktreeDisabledReason}</div>
       ) : null}
       {selectedEmployee.worktreePath && worktreeStatus?.dirty ? (
         <div className="inline-warning">
@@ -417,6 +671,7 @@ function EmployeeDetails() {
           commits={employeeCommits}
           handoff={handoff}
           handoffResult={handoffResult}
+          repoHealth={repoHealth}
           onRefresh={() => {
             void loadWorktreeStatus(selectedEmployee.id);
             void loadWorktreeReview(selectedEmployee.id);
@@ -475,6 +730,7 @@ function ReviewPanel({
   commits,
   handoff,
   handoffResult,
+  repoHealth,
   onRefresh,
 }: {
   employeeId: string;
@@ -485,8 +741,10 @@ function ReviewPanel({
   commits: WorktreeCommit[];
   handoff?: WorktreeHandoffPreflight;
   handoffResult?: WorktreeHandoffApplyResult;
+  repoHealth: RepoHealth | null;
   onRefresh: () => void;
 }) {
+  const settings = useAppStore((state) => state.settings);
   const [commitMessage, setCommitMessage] = useState("");
   const selectReviewFile = useAppStore((state) => state.selectReviewFile);
   const stageWorktreeFile = useAppStore((state) => state.stageWorktreeFile);
@@ -506,7 +764,8 @@ function ReviewPanel({
   const canCommit = hasStaged && commitMessage.trim().length > 0;
   const latestCommit = commits[0] ?? null;
   const commitsToApply = handoff?.commitsToApply ?? [];
-  const canApplyHandoff = handoff?.canApply === true;
+  const handoffDisabledReason = handoffApplyDisabledReason(repoHealth, handoff);
+  const canApplyHandoff = handoff?.canApply === true && !handoffDisabledReason;
   const canAbortHandoff = handoff?.mainOperation.canAbort === true;
 
   const runCommit = async () => {
@@ -519,13 +778,15 @@ function ReviewPanel({
   };
 
   const runApplyHandoff = () => {
-    if (!handoff?.canApply) {
+    if (!handoff?.canApply || handoffDisabledReason) {
       return;
     }
     const targetBranch = handoff.mainBranch ?? "main workspace";
-    const confirmed = window.confirm(
-      `Apply ${commitsToApply.length} commit(s) to ${targetBranch} with cherry-pick?\n\nThis will not push or remove the employee worktree.`,
-    );
+    const confirmed =
+      !settings.requireConfirmationHandoffApply ||
+      window.confirm(
+        `Apply ${commitsToApply.length} commit(s) to ${targetBranch} with cherry-pick?\n\nThis will not push or remove the employee worktree.`,
+      );
     if (confirmed) {
       void applyWorktreeHandoff(employeeId);
     }
@@ -590,7 +851,8 @@ function ReviewPanel({
               onClick={() => {
                 if (
                   selectedFile &&
-                  window.confirm(`Discard unstaged changes in ${selectedFile}?`)
+                  (!settings.requireConfirmationDiscard ||
+                    window.confirm(`Discard unstaged changes in ${selectedFile}?`))
                 ) {
                   void discardWorktreeFile(employeeId, selectedFile);
                 }
@@ -604,7 +866,8 @@ function ReviewPanel({
               onClick={() => {
                 if (
                   selectedFile &&
-                  window.confirm(`Delete untracked file ${selectedFile}?`)
+                  (!settings.requireConfirmationDelete ||
+                    window.confirm(`Delete untracked file ${selectedFile}?`))
                 ) {
                   void deleteUntrackedWorktreeFile(employeeId, selectedFile);
                 }
@@ -697,6 +960,9 @@ function ReviewPanel({
             ))}
           </div>
         ) : null}
+        {handoffDisabledReason ? (
+          <div className="inline-warning">{handoffDisabledReason}</div>
+        ) : null}
         {handoffResult ? (
           <div className={handoffResult.applied ? "handoff-result" : "handoff-result warning"}>
             <strong>
@@ -714,7 +980,7 @@ function ReviewPanel({
             className="command-button primary compact"
             disabled={!canApplyHandoff}
             onClick={runApplyHandoff}
-            title={handoff?.blockers.join("; ") || "Apply handoff"}
+            title={handoffDisabledReason || handoff?.blockers.join("; ") || "Apply handoff"}
           >
             <Check size={14} />
             Apply
@@ -1058,6 +1324,59 @@ function codexStatusLabel(
     return "unavailable";
   }
   return status.version ?? "available";
+}
+
+function identityLabel(health: RepoHealth | null): string {
+  if (!health?.isGitRepo) {
+    return "unavailable";
+  }
+  if (health.gitUserNameConfigured && health.gitUserEmailConfigured) {
+    return "configured";
+  }
+  if (!health.gitUserNameConfigured && !health.gitUserEmailConfigured) {
+    return "missing name and email";
+  }
+  return health.gitUserNameConfigured ? "missing email" : "missing name";
+}
+
+function worktreeCreateDisabledReason(
+  worktreePath: string | null | undefined,
+  health: RepoHealth | null,
+): string | null {
+  if (worktreePath) {
+    return "Employee already has a worktree";
+  }
+  return repoCapabilityDisabledReason(health);
+}
+
+function handoffApplyDisabledReason(
+  health: RepoHealth | null,
+  handoff: WorktreeHandoffPreflight | undefined,
+): string | null {
+  const repoReason = repoCapabilityDisabledReason(health);
+  if (repoReason) {
+    return repoReason;
+  }
+  if (!handoff) {
+    return "Handoff preflight is not loaded";
+  }
+  return null;
+}
+
+function repoCapabilityDisabledReason(health: RepoHealth | null): string | null {
+  if (!health) {
+    return "Workspace health is not loaded";
+  }
+  if (!health.isGitRepo) {
+    return "Open a git repository workspace to use worktrees";
+  }
+  if (!health.gitUserNameConfigured || !health.gitUserEmailConfigured) {
+    return `Configure git user.name and user.email for this workspace (${identityLabel(health)})`;
+  }
+  if (!health.worktreeSupported) {
+    return health.worktreeSupportMessage;
+  }
+  return null;
 }
 
 function formatTimestamp(timestamp: number): string {

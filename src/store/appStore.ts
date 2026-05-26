@@ -7,6 +7,8 @@ import type {
   ActionKind,
   ActionUpdatedPayload,
   AppLog,
+  AppSettings,
+  AppSettingsUpdate,
   AppStateSnapshot,
   AppTab,
   ApprovalRequest,
@@ -30,10 +32,18 @@ import type {
   WorktreeHandoffPreflight,
   WorktreeReview,
   WorktreeStatus,
+  WorkspaceInfo,
 } from "../types";
 
 const MAX_TERMINAL_BUFFER_CHARS = 250_000;
 const TERMINAL_TRUNCATION_MARKER = "\n[... earlier output truncated ...]\n";
+const DEFAULT_SETTINGS: AppSettings = {
+  defaultTerminalProfile: "shell",
+  requireConfirmationDiscard: true,
+  requireConfirmationDelete: true,
+  requireConfirmationHandoffApply: true,
+  maxTerminalBufferChars: MAX_TERMINAL_BUFFER_CHARS,
+};
 
 type OpenFile = {
   path: string;
@@ -74,6 +84,10 @@ type AppStore = {
   employees: Employee[];
   selectedEmployeeId: string | null;
   workspaceRoot: string | null;
+  workspaceInfo: WorkspaceInfo | null;
+  recentWorkspaces: string[];
+  settings: AppSettings;
+  workspaceLoading: boolean;
   terminalBuffers: Record<string, string>;
   terminalSessions: TerminalSessionRecord[];
   logs: AppLog[];
@@ -103,6 +117,10 @@ type AppStore = {
   selectedEmployee: () => Employee | null;
   bootstrap: () => Promise<void>;
   connectEvents: () => Promise<UnlistenFn[]>;
+  loadWorkspaceInfo: () => Promise<void>;
+  setWorkspaceRoot: (path: string) => Promise<void>;
+  clearRecentWorkspaces: () => Promise<void>;
+  updateSettings: (settings: AppSettingsUpdate) => Promise<void>;
   createEmployee: (input: CreateEmployeeInput) => Promise<void>;
   removeEmployee: (employeeId: string) => Promise<void>;
   selectEmployee: (employeeId: string) => Promise<void>;
@@ -166,6 +184,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
   employees: [],
   selectedEmployeeId: null,
   workspaceRoot: null,
+  workspaceInfo: null,
+  recentWorkspaces: [],
+  settings: DEFAULT_SETTINGS,
+  workspaceLoading: false,
   terminalBuffers: {},
   terminalSessions: [],
   logs: [],
@@ -205,10 +227,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
   bootstrap: async () => {
     try {
       const snapshot = await invoke<AppStateSnapshot>("app_state_load");
+      const workspaceInfo = await invoke<WorkspaceInfo>("workspace_info");
       const approvals = await invoke<ApprovalRequest[]>("approval_list");
       const actions = await invoke<Action[]>("action_list");
       const processes = await invoke<ManagedProcess[]>("process_list");
       const rolePolicies = await invoke<RolePolicy[]>("employee_role_policies");
+      const workspaceRoot = workspaceInfo.workspaceRoot || snapshot.workspaceRoot;
+      const settings = normalizeSettings(workspaceInfo.settings ?? snapshot.settings);
       const selectedEmployeeId =
         snapshot.selectedEmployeeId &&
         snapshot.employees.some((employee) => employee.id === snapshot.selectedEmployeeId)
@@ -218,7 +243,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
         employees: snapshot.employees,
         terminalSessions: snapshot.terminalSessions ?? [],
         selectedEmployeeId,
-        workspaceRoot: snapshot.workspaceRoot,
+        workspaceRoot,
+        workspaceInfo,
+        recentWorkspaces: workspaceInfo.recentWorkspaces ?? snapshot.recentWorkspaces ?? [],
+        settings,
+        codexCliStatus: workspaceInfo.repoHealth.codexCliStatus,
         activeTab: snapshot.activeTab ?? "terminal",
         recentFiles: snapshot.recentFiles ?? [],
         approvals,
@@ -229,7 +258,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       });
       void get().loadCodexCliStatus();
       const selected = snapshot.employees.find((employee) => employee.id === selectedEmployeeId);
-      const targetDir = selected?.cwd ?? snapshot.workspaceRoot;
+      const targetDir = selected?.cwd ?? workspaceRoot;
       if (targetDir) {
         await get().loadDir(targetDir);
       }
@@ -280,6 +309,71 @@ export const useAppStore = create<AppStore>((set, get) => ({
       processLogUnlisten,
       logUnlisten,
     ];
+  },
+
+  loadWorkspaceInfo: async () => {
+    set({ workspaceLoading: true });
+    try {
+      const workspaceInfo = await invoke<WorkspaceInfo>("workspace_info");
+      set({
+        workspaceInfo,
+        workspaceRoot: workspaceInfo.workspaceRoot,
+        recentWorkspaces: workspaceInfo.recentWorkspaces,
+        settings: normalizeSettings(workspaceInfo.settings),
+        codexCliStatus: workspaceInfo.repoHealth.codexCliStatus,
+        workspaceLoading: false,
+      });
+    } catch (error) {
+      set({ workspaceLoading: false });
+      get().addLog(localLog("warn", `workspace info failed: ${formatError(error)}`));
+    }
+  },
+
+  setWorkspaceRoot: async (path) => {
+    const trimmed = path.trim();
+    if (!trimmed) {
+      get().addLog(localLog("warn", "workspace path is required"));
+      return;
+    }
+    set({ workspaceLoading: true });
+    try {
+      const workspaceInfo = await invoke<WorkspaceInfo>("workspace_set_root", { path: trimmed });
+      resetWorkspaceFrontendState(set, workspaceInfo);
+      await get().loadDir(workspaceInfo.workspaceRoot);
+    } catch (error) {
+      set({ workspaceLoading: false });
+      get().addLog(localLog("error", `open workspace failed: ${formatError(error)}`));
+    }
+  },
+
+  clearRecentWorkspaces: async () => {
+    try {
+      const recentWorkspaces = await invoke<string[]>("workspace_recent_clear");
+      set((state) => ({
+        recentWorkspaces,
+        workspaceInfo: state.workspaceInfo
+          ? { ...state.workspaceInfo, recentWorkspaces }
+          : state.workspaceInfo,
+      }));
+    } catch (error) {
+      get().addLog(localLog("warn", `clear recent workspaces failed: ${formatError(error)}`));
+    }
+  },
+
+  updateSettings: async (settingsUpdate) => {
+    try {
+      const settings = normalizeSettings(
+        await invoke<AppSettings>("settings_update", { payload: settingsUpdate }),
+      );
+      set((state) => ({
+        settings,
+        workspaceInfo: state.workspaceInfo
+          ? { ...state.workspaceInfo, settings }
+          : state.workspaceInfo,
+      }));
+    } catch (error) {
+      get().addLog(localLog("error", `update settings failed: ${formatError(error)}`));
+    }
   },
 
   createEmployee: async (input) => {
@@ -357,16 +451,32 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set({ codexCliStatus: null, codexCliStatusLoading: true });
     try {
       const codexCliStatus = await invoke<CodexCliStatus>("codex_cli_status");
-      set({ codexCliStatus, codexCliStatusLoading: false });
+      set((state) => ({
+        codexCliStatus,
+        codexCliStatusLoading: false,
+        workspaceInfo: state.workspaceInfo
+          ? {
+              ...state.workspaceInfo,
+              repoHealth: { ...state.workspaceInfo.repoHealth, codexCliStatus },
+            }
+          : state.workspaceInfo,
+      }));
     } catch (error) {
-      set({
-        codexCliStatus: {
+      const codexCliStatus = {
           available: false,
           version: null,
           message: `Codex status failed: ${formatError(error)}`,
-        },
+      };
+      set((state) => ({
+        codexCliStatus,
         codexCliStatusLoading: false,
-      });
+        workspaceInfo: state.workspaceInfo
+          ? {
+              ...state.workspaceInfo,
+              repoHealth: { ...state.workspaceInfo.repoHealth, codexCliStatus },
+            }
+          : state.workspaceInfo,
+      }));
       get().addLog(localLog("warn", `Codex status failed: ${formatError(error)}`));
     }
   },
@@ -906,7 +1016,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set((state) => ({
       terminalBuffers: {
         ...state.terminalBuffers,
-        [sessionId]: appendBoundedTerminalBuffer(state.terminalBuffers[sessionId] ?? "", data),
+        [sessionId]: appendBoundedTerminalBuffer(
+          state.terminalBuffers[sessionId] ?? "",
+          data,
+          state.settings.maxTerminalBufferChars,
+        ),
       },
     }));
   },
@@ -1072,6 +1186,46 @@ function reviewFileKey(employeeId: string, path: string): string {
   return `${employeeId}:${path}`;
 }
 
+function resetWorkspaceFrontendState(
+  setState: (
+    partial:
+      | Partial<AppStore>
+      | ((state: AppStore) => Partial<AppStore>),
+  ) => void,
+  workspaceInfo: WorkspaceInfo,
+): void {
+  setState({
+    employees: [],
+    selectedEmployeeId: null,
+    workspaceRoot: workspaceInfo.workspaceRoot,
+    workspaceInfo,
+    recentWorkspaces: workspaceInfo.recentWorkspaces,
+    settings: normalizeSettings(workspaceInfo.settings),
+    workspaceLoading: false,
+    terminalBuffers: {},
+    terminalSessions: [],
+    approvals: [],
+    actions: [],
+    processes: [],
+    processLogs: {},
+    codexCliStatus: workspaceInfo.repoHealth.codexCliStatus,
+    worktreeStatuses: {},
+    worktreeDiffs: {},
+    worktreeReviews: {},
+    worktreeCommits: {},
+    worktreeHandoffs: {},
+    worktreeHandoffResults: {},
+    worktreeChangedFiles: {},
+    worktreeFileDiffs: {},
+    selectedReviewFiles: {},
+    recentFiles: [],
+    activeTab: "terminal",
+    fileEntries: [],
+    currentDir: workspaceInfo.workspaceRoot,
+    openFile: null,
+  });
+}
+
 async function refreshWorktreeReviewForEmployee(
   get: () => AppStore,
   employeeId: string,
@@ -1088,12 +1242,28 @@ async function refreshWorktreeReviewForEmployee(
   ]);
 }
 
-function appendBoundedTerminalBuffer(previous: string, chunk: string): string {
+function normalizeSettings(settings?: AppSettings | null): AppSettings {
+  return {
+    ...DEFAULT_SETTINGS,
+    ...settings,
+    maxTerminalBufferChars:
+      typeof settings?.maxTerminalBufferChars === "number"
+        ? settings.maxTerminalBufferChars
+        : DEFAULT_SETTINGS.maxTerminalBufferChars,
+  };
+}
+
+function appendBoundedTerminalBuffer(
+  previous: string,
+  chunk: string,
+  maxChars: number,
+): string {
   const next = `${previous}${chunk}`;
-  if (next.length <= MAX_TERMINAL_BUFFER_CHARS) {
+  const limit = Math.max(TERMINAL_TRUNCATION_MARKER.length + 1, maxChars);
+  if (next.length <= limit) {
     return next;
   }
 
-  const tailLength = MAX_TERMINAL_BUFFER_CHARS - TERMINAL_TRUNCATION_MARKER.length;
+  const tailLength = limit - TERMINAL_TRUNCATION_MARKER.length;
   return `${TERMINAL_TRUNCATION_MARKER}${next.slice(-tailLength)}`;
 }

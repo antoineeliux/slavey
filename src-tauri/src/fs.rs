@@ -46,11 +46,10 @@ pub fn fs_list_dir(
     state: State<'_, AppState>,
     path: Option<String>,
 ) -> Result<Vec<FsEntry>, String> {
+    let workspace_root = state.workspace_root();
     let dir = match path {
-        Some(path) if !path.trim().is_empty() => {
-            resolve_existing_dir(&state.workspace_root, &path)?
-        }
-        _ => state.workspace_root.clone(),
+        Some(path) if !path.trim().is_empty() => resolve_existing_dir(&workspace_root, &path)?,
+        _ => workspace_root.clone(),
     };
 
     let mut entries = Vec::new();
@@ -68,7 +67,7 @@ pub fn fs_list_dir(
                 Ok(resolved) => resolved,
                 Err(_) => continue,
             };
-            if ensure_inside_workspace(&state.workspace_root, &resolved).is_err()
+            if ensure_inside_workspace(&workspace_root, &resolved).is_err()
                 || is_sensitive_path(&resolved)
             {
                 continue;
@@ -113,7 +112,8 @@ pub fn fs_list_dir(
 
 #[tauri::command]
 pub fn fs_read_file(state: State<'_, AppState>, path: String) -> Result<FilePayload, String> {
-    let file = resolve_existing_file(&state.workspace_root, &path)?;
+    let workspace_root = state.workspace_root();
+    let file = resolve_existing_file(&workspace_root, &path)?;
     let contents = std_fs::read_to_string(&file).map_err(|error| error.to_string())?;
     Ok(FilePayload {
         path: file.to_string_lossy().to_string(),
@@ -127,7 +127,8 @@ pub fn fs_write_file(
     path: String,
     contents: String,
 ) -> Result<(), String> {
-    write_file_in_workspace(&state.workspace_root, &path, &contents)
+    let workspace_root = state.workspace_root();
+    write_file_in_workspace(&workspace_root, &path, &contents)
 }
 
 #[tauri::command]
@@ -137,10 +138,11 @@ pub fn fs_list_files(
     limit: Option<usize>,
     max_depth: Option<usize>,
 ) -> Result<Vec<FsEntry>, String> {
-    let root = resolve_scan_root(&state.workspace_root, root.as_deref())?;
+    let workspace_root = state.workspace_root();
+    let root = resolve_scan_root(&workspace_root, root.as_deref())?;
     let mut files = Vec::new();
     scan_files(
-        &state.workspace_root,
+        &workspace_root,
         &root,
         0,
         clamp_depth(max_depth),
@@ -161,10 +163,11 @@ pub fn fs_search(
     if query.is_empty() {
         return Ok(Vec::new());
     }
-    let root = resolve_scan_root(&state.workspace_root, root.as_deref())?;
+    let workspace_root = state.workspace_root();
+    let root = resolve_scan_root(&workspace_root, root.as_deref())?;
     let mut files = Vec::new();
     scan_files(
-        &state.workspace_root,
+        &workspace_root,
         &root,
         0,
         DEFAULT_SCAN_DEPTH,
@@ -195,10 +198,11 @@ pub fn fs_grep(
         return Ok(Vec::new());
     }
     let limit = clamp_limit(limit);
-    let root = resolve_scan_root(&state.workspace_root, root.as_deref())?;
+    let workspace_root = state.workspace_root();
+    let root = resolve_scan_root(&workspace_root, root.as_deref())?;
     let mut files = Vec::new();
     scan_files(
-        &state.workspace_root,
+        &workspace_root,
         &root,
         0,
         DEFAULT_SCAN_DEPTH,
@@ -246,10 +250,11 @@ pub fn fs_glob(
     if pattern.is_empty() {
         return Ok(Vec::new());
     }
-    let root = resolve_scan_root(&state.workspace_root, root.as_deref())?;
+    let workspace_root = state.workspace_root();
+    let root = resolve_scan_root(&workspace_root, root.as_deref())?;
     let mut files = Vec::new();
     scan_files(
-        &state.workspace_root,
+        &workspace_root,
         &root,
         0,
         DEFAULT_SCAN_DEPTH,
@@ -274,7 +279,8 @@ pub fn fs_create_file(
     path: String,
     contents: Option<String>,
 ) -> Result<FilePayload, String> {
-    let file = resolve_new_file(&state.workspace_root, &path)?;
+    let workspace_root = state.workspace_root();
+    let file = resolve_new_file(&workspace_root, &path)?;
     let contents = contents.unwrap_or_default();
     let mut handle = std_fs::OpenOptions::new()
         .write(true)
@@ -292,22 +298,25 @@ pub fn fs_create_file(
 
 #[tauri::command]
 pub fn fs_create_dir(state: State<'_, AppState>, path: String) -> Result<FsEntry, String> {
-    let dir = resolve_new_path(&state.workspace_root, &path)?;
+    let workspace_root = state.workspace_root();
+    let dir = resolve_new_path(&workspace_root, &path)?;
     std_fs::create_dir(&dir).map_err(|error| error.to_string())?;
     fs_entry_for_path(&dir)
 }
 
 #[tauri::command]
 pub fn fs_rename(state: State<'_, AppState>, from: String, to: String) -> Result<FsEntry, String> {
-    let source = resolve_existing_path(&state.workspace_root, &from)?;
-    let target = resolve_new_path(&state.workspace_root, &to)?;
+    let workspace_root = state.workspace_root();
+    let source = resolve_existing_path(&workspace_root, &from)?;
+    let target = resolve_new_path(&workspace_root, &to)?;
     std_fs::rename(&source, &target).map_err(|error| error.to_string())?;
     fs_entry_for_path(&target)
 }
 
 #[tauri::command]
 pub fn fs_delete(state: State<'_, AppState>, path: String) -> Result<(), String> {
-    delete_path_in_workspace(&state.workspace_root, &path)
+    let workspace_root = state.workspace_root();
+    delete_path_in_workspace(&workspace_root, &path)
 }
 
 fn delete_path_in_workspace(root: &Path, path: &str) -> Result<(), String> {
