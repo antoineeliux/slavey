@@ -136,6 +136,7 @@ function EmployeeDetails() {
   const approvals = useAppStore((state) => state.approvals);
   const actions = useAppStore((state) => state.actions);
   const processes = useAppStore((state) => state.processes);
+  const codexCliStatus = useAppStore((state) => state.codexCliStatus);
   const rolePolicies = useAppStore((state) => state.rolePolicies);
   const worktreeStatuses = useAppStore((state) => state.worktreeStatuses);
   const worktreeReviews = useAppStore((state) => state.worktreeReviews);
@@ -149,6 +150,7 @@ function EmployeeDetails() {
   const loadWorktreeReview = useAppStore((state) => state.loadWorktreeReview);
   const loadWorktreeChangedFiles = useAppStore((state) => state.loadWorktreeChangedFiles);
   const startTerminal = useAppStore((state) => state.startTerminal);
+  const startCodexTerminal = useAppStore((state) => state.startCodexTerminal);
   const stopTerminal = useAppStore((state) => state.stopTerminal);
   const removeEmployee = useAppStore((state) => state.removeEmployee);
   const spawnProcess = useAppStore((state) => state.spawnProcess);
@@ -241,6 +243,16 @@ function EmployeeDetails() {
           <dd>{selectedEmployee.currentCommand ?? "none"}</dd>
         </div>
         <div>
+          <dt>Codex CLI</dt>
+          <dd title={codexCliStatus?.message ?? "Checking Codex CLI"}>
+            {codexCliStatus
+              ? codexCliStatus.available
+                ? codexCliStatus.version ?? "available"
+                : "unavailable"
+              : "checking"}
+          </dd>
+        </div>
+        <div>
           <dt>Updated</dt>
           <dd>{new Date(selectedEmployee.updatedAt).toLocaleTimeString()}</dd>
         </div>
@@ -272,6 +284,14 @@ function EmployeeDetails() {
           onClick={() => void startTerminal(selectedEmployee.id)}
         >
           Start shell
+        </button>
+        <button
+          className="command-button primary"
+          disabled={Boolean(selectedEmployee.terminalSessionId) || codexCliStatus?.available !== true}
+          onClick={() => void startCodexTerminal(selectedEmployee.id)}
+          title={codexCliStatus?.available === false ? codexCliStatus.message : "Start Codex"}
+        >
+          Start Codex
         </button>
         <button
           className="command-button"
@@ -313,6 +333,9 @@ function EmployeeDetails() {
           Remove
         </button>
       </div>
+      {codexCliStatus?.available === false ? (
+        <div className="inline-warning">{codexCliStatus.message}</div>
+      ) : null}
       {selectedEmployee.worktreePath && worktreeStatus?.dirty ? (
         <div className="inline-warning">
           Worktree has uncommitted changes; removal is disabled until review is clean.

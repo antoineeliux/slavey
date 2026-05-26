@@ -13,7 +13,7 @@ use crate::{
     actions::ActionKind,
     events::{emit_employee_updated, emit_log, now_ms, LogLevel},
     fs::resolve_existing_dir,
-    terminal::DEFAULT_PTY_SIZE,
+    terminal::{TerminalLaunchProfile, DEFAULT_PTY_SIZE},
     AppState,
 };
 
@@ -208,6 +208,24 @@ pub fn employee_start_terminal(
     state: State<'_, AppState>,
     employee_id: String,
 ) -> Result<Employee, String> {
+    start_terminal_with_profile(app, state, employee_id, TerminalLaunchProfile::Shell)
+}
+
+#[tauri::command]
+pub fn employee_start_codex_terminal(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    employee_id: String,
+) -> Result<Employee, String> {
+    start_terminal_with_profile(app, state, employee_id, TerminalLaunchProfile::Codex)
+}
+
+fn start_terminal_with_profile(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    employee_id: String,
+    profile: TerminalLaunchProfile,
+) -> Result<Employee, String> {
     let employee = state
         .employees
         .get(&employee_id)
@@ -221,8 +239,7 @@ pub fn employee_start_terminal(
     let starting = state
         .employees
         .update(&employee_id, |employee| {
-            employee.status = EmployeeStatus::Starting;
-            employee.current_command = Some("shell".to_string());
+            mark_terminal_starting(employee, profile);
         })
         .ok_or_else(|| "employee not found".to_string())?;
     emit_employee_updated(&app, starting);
@@ -233,12 +250,13 @@ pub fn employee_start_terminal(
     let exit_employee_id = employee_id.clone();
     let exit_session_id = session_id.clone();
 
-    let launch_result = state.terminal.create_shell_session(
+    let launch_result = state.terminal.create_profile_session(
         app.clone(),
         employee_id.clone(),
         session_id.clone(),
         cwd,
         DEFAULT_PTY_SIZE,
+        profile,
         move |exit_code| {
             let next_status = if exit_code == 0 {
                 EmployeeStatus::Done
@@ -282,7 +300,10 @@ pub fn employee_start_terminal(
         emit_log(
             &app,
             LogLevel::Error,
-            format!("failed to start terminal: {error}"),
+            format!(
+                "failed to start {} terminal: {error}",
+                profile.current_command()
+            ),
         );
         return Err(error.to_string());
     }
@@ -290,16 +311,18 @@ pub fn employee_start_terminal(
     let running = state
         .employees
         .update(&employee_id, |employee| {
-            employee.status = EmployeeStatus::Running;
-            employee.terminal_session_id = Some(session_id.clone());
-            employee.current_command = Some("shell".to_string());
+            mark_terminal_running(employee, &session_id, profile);
         })
         .ok_or_else(|| "employee not found".to_string())?;
 
     emit_log(
         &app,
         LogLevel::Info,
-        format!("started terminal for {}", running.name),
+        format!(
+            "started {} terminal for {}",
+            profile.current_command(),
+            running.name
+        ),
     );
     emit_employee_updated(&app, running.clone());
     persist_or_log(&app, &state);
@@ -365,6 +388,21 @@ fn ensure_employee_can_remove(employee: &Employee) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+fn mark_terminal_starting(employee: &mut Employee, profile: TerminalLaunchProfile) {
+    employee.status = EmployeeStatus::Starting;
+    employee.current_command = Some(profile.current_command().to_string());
+}
+
+fn mark_terminal_running(
+    employee: &mut Employee,
+    session_id: &str,
+    profile: TerminalLaunchProfile,
+) {
+    employee.status = EmployeeStatus::Running;
+    employee.terminal_session_id = Some(session_id.to_string());
+    employee.current_command = Some(profile.current_command().to_string());
 }
 
 pub fn resolve_employee_execution_dir(
@@ -500,6 +538,27 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("employee has a worktree"));
+    }
+
+    #[test]
+    fn shell_starting_state_sets_shell_current_command() {
+        let mut employee = sample_employee(None);
+
+        mark_terminal_starting(&mut employee, TerminalLaunchProfile::Shell);
+
+        assert_eq!(employee.status, EmployeeStatus::Starting);
+        assert_eq!(employee.current_command.as_deref(), Some("shell"));
+    }
+
+    #[test]
+    fn codex_running_state_sets_codex_current_command() {
+        let mut employee = sample_employee(None);
+
+        mark_terminal_running(&mut employee, "term-1", TerminalLaunchProfile::Codex);
+
+        assert_eq!(employee.status, EmployeeStatus::Running);
+        assert_eq!(employee.terminal_session_id.as_deref(), Some("term-1"));
+        assert_eq!(employee.current_command.as_deref(), Some("codex"));
     }
 
     #[test]

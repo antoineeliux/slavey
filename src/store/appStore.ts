@@ -11,6 +11,7 @@ import type {
   AppTab,
   ApprovalRequest,
   ApprovalUpdatedPayload,
+  CodexCliStatus,
   Employee,
   EmployeeRole,
   EmployeeUpdatedPayload,
@@ -74,6 +75,7 @@ type AppStore = {
   actions: Action[];
   processes: ManagedProcess[];
   processLogs: Record<string, ProcessLogs>;
+  codexCliStatus: CodexCliStatus | null;
   rolePolicies: RolePolicy[];
   worktreeStatuses: Record<string, WorktreeStatus>;
   worktreeDiffs: Record<string, string>;
@@ -95,7 +97,9 @@ type AppStore = {
   removeEmployee: (employeeId: string) => Promise<void>;
   selectEmployee: (employeeId: string) => Promise<void>;
   startTerminal: (employeeId: string) => Promise<void>;
+  startCodexTerminal: (employeeId: string) => Promise<void>;
   stopTerminal: (employeeId: string) => Promise<void>;
+  loadCodexCliStatus: () => Promise<void>;
   createWorktree: (employeeId: string) => Promise<void>;
   removeWorktree: (employeeId: string) => Promise<void>;
   createApproval: (input: CreateApprovalInput) => Promise<void>;
@@ -149,6 +153,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   actions: [],
   processes: [],
   processLogs: {},
+  codexCliStatus: null,
   rolePolicies: [],
   worktreeStatuses: {},
   worktreeDiffs: {},
@@ -180,6 +185,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const actions = await invoke<Action[]>("action_list");
       const processes = await invoke<ManagedProcess[]>("process_list");
       const rolePolicies = await invoke<RolePolicy[]>("employee_role_policies");
+      const codexCliStatus = await invoke<CodexCliStatus>("codex_cli_status");
       const selectedEmployeeId =
         snapshot.selectedEmployeeId &&
         snapshot.employees.some((employee) => employee.id === snapshot.selectedEmployeeId)
@@ -194,6 +200,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         approvals,
         actions,
         processes,
+        codexCliStatus,
         rolePolicies,
         backendReady: true,
       });
@@ -295,12 +302,31 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  startCodexTerminal: async (employeeId) => {
+    try {
+      const employee = await invoke<Employee>("employee_start_codex_terminal", { employeeId });
+      get().upsertEmployee(employee);
+    } catch (error) {
+      get().addLog(localLog("error", `start Codex failed: ${formatError(error)}`));
+      void get().loadCodexCliStatus();
+    }
+  },
+
   stopTerminal: async (employeeId) => {
     try {
       const employee = await invoke<Employee>("employee_stop_terminal", { employeeId });
       get().upsertEmployee(employee);
     } catch (error) {
       get().addLog(localLog("error", `stop terminal failed: ${formatError(error)}`));
+    }
+  },
+
+  loadCodexCliStatus: async () => {
+    try {
+      const codexCliStatus = await invoke<CodexCliStatus>("codex_cli_status");
+      set({ codexCliStatus });
+    } catch (error) {
+      get().addLog(localLog("warn", `Codex status failed: ${formatError(error)}`));
     }
   },
 

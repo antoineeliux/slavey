@@ -202,3 +202,9 @@ export type ProcessLogSnapshot = {
 export type ProcessUpdatedPayload = {
   process: ManagedProcess;
 };
+
+export type CodexCliStatus = {
+  available: boolean;
+  version?: string | null;
+  message: string;
+};

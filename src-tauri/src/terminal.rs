@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     io::{Read, Write},
     path::PathBuf,
+    process::{Command as ProcessCommand, Stdio},
     sync::Arc,
     thread,
 };
@@ -9,6 +10,7 @@ use std::{
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::{
@@ -35,6 +37,36 @@ pub struct TerminalManager {
     sessions: Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalLaunchProfile {
+    Shell,
+    Codex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalCommandSpec {
+    pub program: String,
+    pub args: Vec<String>,
+    pub command_label: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexCliStatus {
+    pub available: bool,
+    pub version: Option<String>,
+    pub message: String,
+}
+
+impl TerminalLaunchProfile {
+    pub fn current_command(self) -> &'static str {
+        match self {
+            TerminalLaunchProfile::Shell => "shell",
+            TerminalLaunchProfile::Codex => "codex",
+        }
+    }
+}
+
 impl TerminalManager {
     pub fn create_shell_session<F>(
         &self,
@@ -48,16 +80,40 @@ impl TerminalManager {
     where
         F: FnOnce(u32) + Send + 'static,
     {
+        self.create_profile_session(
+            app,
+            employee_id,
+            session_id,
+            cwd,
+            size,
+            TerminalLaunchProfile::Shell,
+            on_exit,
+        )
+    }
+
+    pub fn create_profile_session<F>(
+        &self,
+        app: AppHandle,
+        employee_id: String,
+        session_id: String,
+        cwd: PathBuf,
+        size: PtySize,
+        profile: TerminalLaunchProfile,
+        on_exit: F,
+    ) -> Result<()>
+    where
+        F: FnOnce(u32) + Send + 'static,
+    {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(size).context("failed to open PTY")?;
-        let shell = default_shell();
-        let mut command = CommandBuilder::new(shell);
+        let spec = terminal_command_spec(profile);
+        let mut command = command_builder_from_spec(&spec);
         command.cwd(cwd);
 
         let mut child = pair
             .slave
             .spawn_command(command)
-            .context("failed to spawn shell")?;
+            .with_context(|| format!("failed to spawn {} terminal", spec.command_label))?;
         let killer = child.clone_killer();
         let reader = pair
             .master
@@ -159,6 +215,29 @@ impl TerminalManager {
     }
 }
 
+pub fn terminal_command_spec(profile: TerminalLaunchProfile) -> TerminalCommandSpec {
+    match profile {
+        TerminalLaunchProfile::Shell => TerminalCommandSpec {
+            program: default_shell(),
+            args: Vec::new(),
+            command_label: "shell",
+        },
+        TerminalLaunchProfile::Codex => TerminalCommandSpec {
+            program: "codex".to_string(),
+            args: vec!["--no-alt-screen".to_string()],
+            command_label: "codex",
+        },
+    }
+}
+
+fn command_builder_from_spec(spec: &TerminalCommandSpec) -> CommandBuilder {
+    let mut command = CommandBuilder::new(&spec.program);
+    for arg in &spec.args {
+        command.arg(arg.as_str());
+    }
+    command
+}
+
 fn ensure_session_owner(session_employee_id: &str, requested_employee_id: &str) -> Result<()> {
     if session_employee_id == requested_employee_id {
         Ok(())
@@ -207,6 +286,59 @@ fn default_shell() -> String {
     }
 }
 
+pub fn codex_cli_status_impl() -> CodexCliStatus {
+    match ProcessCommand::new("codex")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let version =
+                first_output_line(&output.stdout).or_else(|| first_output_line(&output.stderr));
+            CodexCliStatus {
+                available: true,
+                version: version.clone(),
+                message: version.unwrap_or_else(|| "Codex CLI is available".to_string()),
+            }
+        }
+        Ok(output) => {
+            let message = first_output_line(&output.stderr)
+                .or_else(|| first_output_line(&output.stdout))
+                .unwrap_or_else(|| "Codex CLI did not report a version".to_string());
+            CodexCliStatus {
+                available: false,
+                version: None,
+                message,
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => CodexCliStatus {
+            available: false,
+            version: None,
+            message: "Codex CLI not found on PATH".to_string(),
+        },
+        Err(error) => CodexCliStatus {
+            available: false,
+            version: None,
+            message: format!("failed to check Codex CLI: {error}"),
+        },
+    }
+}
+
+fn first_output_line(bytes: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(ToString::to_string)
+}
+
+#[tauri::command]
+pub fn codex_cli_status() -> CodexCliStatus {
+    codex_cli_status_impl()
+}
+
 #[tauri::command]
 pub fn terminal_write(
     state: State<'_, AppState>,
@@ -236,7 +368,7 @@ pub fn terminal_resize(
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_session_owner;
+    use super::{ensure_session_owner, terminal_command_spec, TerminalLaunchProfile};
 
     #[test]
     fn accepts_matching_terminal_owner() {
@@ -246,5 +378,23 @@ mod tests {
     #[test]
     fn rejects_mismatched_terminal_owner() {
         assert!(ensure_session_owner("employee-1", "employee-2").is_err());
+    }
+
+    #[test]
+    fn shell_profile_uses_default_shell_without_extra_args() {
+        let spec = terminal_command_spec(TerminalLaunchProfile::Shell);
+
+        assert!(!spec.program.is_empty());
+        assert!(spec.args.is_empty());
+        assert_eq!(spec.command_label, "shell");
+    }
+
+    #[test]
+    fn codex_profile_uses_no_alt_screen() {
+        let spec = terminal_command_spec(TerminalLaunchProfile::Codex);
+
+        assert_eq!(spec.program, "codex");
+        assert_eq!(spec.args, vec!["--no-alt-screen"]);
+        assert_eq!(spec.command_label, "codex");
     }
 }
