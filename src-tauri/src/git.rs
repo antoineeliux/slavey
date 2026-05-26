@@ -21,6 +21,7 @@ use crate::{
 
 const GIT_COMMAND_TIMEOUT_SECS: u64 = 30;
 const MAX_GIT_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_UNTRACKED_PREVIEW_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -285,8 +286,12 @@ pub fn git_worktree_file_diff_for_employee(
     let relative = resolve_worktree_relative_path(&worktree, &path)?;
     let staged = run_git(&worktree, &["diff", "--cached", "--", &relative])?;
     let unstaged = run_git(&worktree, &["diff", "--", &relative])?;
+    let status = parse_status_lines(&run_git(&worktree, &["status", "--porcelain"])?);
     Ok(
         match (staged.trim().is_empty(), unstaged.trim().is_empty()) {
+            (true, true) if is_untracked_file(&status, &relative) => {
+                untracked_file_preview(&worktree, &relative)?
+            }
             (true, true) => String::new(),
             (false, true) => format!("staged diff\n{staged}"),
             (true, false) => format!("unstaged diff\n{unstaged}"),
@@ -554,6 +559,13 @@ fn parse_untracked_files(status: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn is_untracked_file(status: &[String], path: &str) -> bool {
+    let normalized_path = normalize_git_path(path);
+    parse_untracked_files(status)
+        .iter()
+        .any(|untracked| normalize_git_path(untracked) == normalized_path)
+}
+
 fn parse_changed_files(status: &[String]) -> Vec<String> {
     status
         .iter()
@@ -625,6 +637,48 @@ fn resolve_worktree_relative_path(worktree: &Path, input: &str) -> Result<String
     .map(ToString::to_string)
 }
 
+fn untracked_file_preview(worktree: &Path, relative: &str) -> Result<String, String> {
+    let path = worktree.join(relative);
+    let resolved = path.canonicalize().map_err(|error| error.to_string())?;
+    ensure_path_inside(worktree, &resolved)?;
+    let metadata = std_fs::metadata(&resolved).map_err(|error| error.to_string())?;
+    let header = format!("untracked file preview\npath: {relative}\nstatus: untracked\n\n");
+
+    if !metadata.is_file() {
+        return Ok(format!("{header}[untracked path is not a regular file]"));
+    }
+
+    if metadata.len() > MAX_UNTRACKED_PREVIEW_BYTES as u64 {
+        return Ok(format!(
+            "{header}[file is too large to preview: {} bytes]",
+            metadata.len()
+        ));
+    }
+
+    let mut file = std_fs::File::open(&resolved).map_err(|error| error.to_string())?;
+    let mut contents = Vec::new();
+    file.by_ref()
+        .take((MAX_UNTRACKED_PREVIEW_BYTES + 1) as u64)
+        .read_to_end(&mut contents)
+        .map_err(|error| error.to_string())?;
+
+    if contents.iter().any(|byte| *byte == 0) {
+        return Ok(format!("{header}[binary file omitted from preview]"));
+    }
+
+    if contents.len() > MAX_UNTRACKED_PREVIEW_BYTES {
+        contents.truncate(MAX_UNTRACKED_PREVIEW_BYTES);
+        return Ok(format!(
+            "{}{} \n[preview truncated at {} bytes]",
+            header,
+            String::from_utf8_lossy(&contents),
+            MAX_UNTRACKED_PREVIEW_BYTES
+        ));
+    }
+
+    Ok(format!("{header}{}", String::from_utf8_lossy(&contents)))
+}
+
 fn ensure_path_inside(root: &Path, path: &Path) -> Result<(), String> {
     let root = root.canonicalize().map_err(|error| error.to_string())?;
     if path.starts_with(root) {
@@ -632,6 +686,10 @@ fn ensure_path_inside(root: &Path, path: &Path) -> Result<(), String> {
     } else {
         Err("path is outside the worktree".to_string())
     }
+}
+
+fn normalize_git_path(path: &str) -> String {
+    path.replace('\\', "/")
 }
 
 fn branch_name_for_employee(employee: &Employee) -> String {
@@ -668,10 +726,18 @@ fn path_to_str(path: &Path) -> Result<&str, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs as std_fs, path::PathBuf};
+
     use super::{
-        append_git_output, parse_changed_files, parse_status_lines, parse_untracked_files,
-        GitOutputChunk, MAX_GIT_OUTPUT_BYTES,
+        append_git_output, is_untracked_file, parse_changed_files, parse_status_lines,
+        parse_untracked_files, untracked_file_preview, GitOutputChunk, MAX_GIT_OUTPUT_BYTES,
     };
+
+    fn test_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("slavey-git-{name}-{}", uuid::Uuid::new_v4()));
+        std_fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
 
     #[test]
     fn status_parser_detects_clean_output() {
@@ -694,6 +760,15 @@ mod tests {
             parse_untracked_files(&changes),
             vec!["new.txt".to_string(), "dir/file.rs".to_string()]
         );
+    }
+
+    #[test]
+    fn untracked_matcher_handles_git_path_separators() {
+        let changes = parse_status_lines("?? dir/file.rs\n");
+
+        assert!(is_untracked_file(&changes, "dir/file.rs"));
+        assert!(is_untracked_file(&changes, "dir\\file.rs"));
+        assert!(!is_untracked_file(&changes, "other.rs"));
     }
 
     #[test]
@@ -751,5 +826,42 @@ mod tests {
         assert_eq!(stdout, b"out");
         assert_eq!(stderr, b"err");
         assert_eq!(total, 6);
+    }
+
+    #[test]
+    fn untracked_preview_includes_bounded_text_content() {
+        let root = test_root("untracked-preview");
+        std_fs::write(root.join("new.txt"), "hello\nworld\n").unwrap();
+
+        let preview = untracked_file_preview(&root, "new.txt").unwrap();
+
+        assert!(preview.contains("untracked file preview"));
+        assert!(preview.contains("path: new.txt"));
+        assert!(preview.contains("hello\nworld"));
+    }
+
+    #[test]
+    fn untracked_preview_rejects_paths_outside_worktree() {
+        let root = test_root("untracked-preview-outside");
+        let outside = root
+            .parent()
+            .unwrap()
+            .join(format!("slavey-git-outside-{}.txt", uuid::Uuid::new_v4()));
+        std_fs::write(&outside, "outside").unwrap();
+
+        let error = untracked_file_preview(&root, outside.to_str().unwrap()).unwrap_err();
+
+        assert!(error.contains("outside the worktree"));
+        let _ = std_fs::remove_file(outside);
+    }
+
+    #[test]
+    fn untracked_preview_omits_binary_content() {
+        let root = test_root("untracked-preview-binary");
+        std_fs::write(root.join("binary.bin"), b"abc\0def").unwrap();
+
+        let preview = untracked_file_preview(&root, "binary.bin").unwrap();
+
+        assert!(preview.contains("binary file omitted"));
     }
 }

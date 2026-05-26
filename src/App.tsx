@@ -500,7 +500,7 @@ function ActionPanel({
               kind: "file_write",
               title: "Write action test file",
               description: "Write a timestamped file through the safe action runner.",
-              path: ".slavey/action-test.txt",
+              path: "action-test.txt",
               contents: `Action test ${new Date().toISOString()}\n`,
               cwd,
             })

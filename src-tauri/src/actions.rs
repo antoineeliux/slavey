@@ -588,6 +588,7 @@ struct ActionRunContext {
     persistence: PersistenceManager,
 }
 
+#[derive(Debug)]
 struct ActionFailure {
     message: String,
     output: String,
@@ -809,9 +810,21 @@ fn run_file_write_action(context: &ActionRunContext, action: &Action) -> ActionE
         .as_deref()
         .ok_or_else(|| ActionFailure::new("file write action requires contents"))?;
     ensure_file_write_size(contents).map_err(ActionFailure::from)?;
-    write_file_in_workspace(&context.workspace_root, path, contents)
-        .map_err(ActionFailure::from)?;
+    let root = resolve_file_write_action_root(context, action)?;
+    write_file_in_workspace(&root, path, contents).map_err(ActionFailure::from)?;
     Ok(format!("wrote {path}"))
+}
+
+fn resolve_file_write_action_root(
+    context: &ActionRunContext,
+    action: &Action,
+) -> Result<PathBuf, ActionFailure> {
+    let employee = context
+        .employees
+        .get(&action.employee_id)
+        .ok_or_else(|| ActionFailure::new("employee not found"))?;
+    resolve_employee_execution_dir(&context.workspace_root, &employee, action.cwd.as_deref())
+        .map_err(ActionFailure::from)
 }
 
 fn spawn_pipe_reader<R>(mut reader: R, sender: SyncSender<Vec<u8>>)
@@ -907,6 +920,12 @@ impl From<ActionKind> for ApprovalKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs as std_fs, path::Path};
+
+    use crate::{
+        approvals::ApprovalManager,
+        employees::{EmployeeManager, EmployeeRole},
+    };
 
     fn sample_action_request() -> ActionCreateRequest {
         ActionCreateRequest {
@@ -919,6 +938,64 @@ mod tests {
             path: None,
             contents: None,
             timeout_secs: None,
+        }
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("slavey-actions-{name}-{}", uuid::Uuid::new_v4()));
+        std_fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    fn test_context(root: &Path, worktree: Option<&Path>) -> (ActionRunContext, String) {
+        let employees = EmployeeManager::default();
+        let employee = employees.create(
+            "Employee".to_string(),
+            EmployeeRole::General,
+            root.to_path_buf(),
+        );
+        if let Some(worktree) = worktree {
+            employees.update(&employee.id, |employee| {
+                let worktree = worktree.to_string_lossy().to_string();
+                employee.worktree_path = Some(worktree.clone());
+                employee.cwd = worktree;
+            });
+        }
+
+        (
+            ActionRunContext {
+                workspace_root: root.to_path_buf(),
+                employees,
+                approvals: ApprovalManager::default(),
+                actions: ActionManager::default(),
+                processes: ProcessManager::default(),
+                persistence: PersistenceManager::new(root.join("state.json"), None),
+            },
+            employee.id,
+        )
+    }
+
+    fn file_write_action(employee_id: String, path: impl Into<String>) -> Action {
+        Action {
+            id: "action-1".to_string(),
+            employee_id,
+            kind: ActionKind::FileWrite,
+            title: "Write file".to_string(),
+            description: "Test write".to_string(),
+            cwd: None,
+            command: None,
+            path: Some(path.into()),
+            contents: Some("written by action".to_string()),
+            timeout_secs: DEFAULT_ACTION_TIMEOUT_SECS,
+            approval_id: None,
+            status: ActionStatus::Approved,
+            output: String::new(),
+            error: None,
+            created_at: 1,
+            updated_at: 1,
+            started_at: None,
+            finished_at: None,
         }
     }
 
@@ -980,6 +1057,78 @@ mod tests {
         let contents = "x".repeat(MAX_FILE_WRITE_CONTENT_BYTES + 1);
 
         assert!(ensure_file_write_size(&contents).is_err());
+    }
+
+    #[test]
+    fn file_write_action_with_worktree_writes_inside_worktree_by_default() {
+        let root = test_root("worktree-default");
+        let worktree = root.join(".slavey").join("worktrees").join("employee-1");
+        std_fs::create_dir_all(&worktree).unwrap();
+        let (context, employee_id) = test_context(&root, Some(&worktree));
+        let action = file_write_action(employee_id, "notes.txt");
+
+        run_file_write_action(&context, &action).unwrap();
+
+        assert_eq!(
+            std_fs::read_to_string(worktree.join("notes.txt")).unwrap(),
+            "written by action"
+        );
+        assert!(!root.join("notes.txt").exists());
+    }
+
+    #[test]
+    fn file_write_action_with_worktree_rejects_absolute_path_outside_worktree() {
+        let root = test_root("worktree-absolute-outside");
+        let worktree = root.join(".slavey").join("worktrees").join("employee-1");
+        std_fs::create_dir_all(&worktree).unwrap();
+        let (context, employee_id) = test_context(&root, Some(&worktree));
+        let action = file_write_action(employee_id, root.join("outside.txt").to_string_lossy());
+
+        let error = run_file_write_action(&context, &action).unwrap_err();
+
+        assert!(error.message.contains("outside the workspace"));
+        assert!(!root.join("outside.txt").exists());
+    }
+
+    #[test]
+    fn file_write_action_with_worktree_rejects_relative_path_outside_worktree() {
+        let root = test_root("worktree-relative-outside");
+        let worktree = root.join(".slavey").join("worktrees").join("employee-1");
+        std_fs::create_dir_all(&worktree).unwrap();
+        let (context, employee_id) = test_context(&root, Some(&worktree));
+        let action = file_write_action(employee_id, "../../outside.txt");
+
+        let error = run_file_write_action(&context, &action).unwrap_err();
+
+        assert!(error.message.contains("outside the workspace"));
+    }
+
+    #[test]
+    fn file_write_action_without_worktree_writes_inside_workspace() {
+        let root = test_root("workspace-default");
+        let (context, employee_id) = test_context(&root, None);
+        let action = file_write_action(employee_id, "notes.txt");
+
+        run_file_write_action(&context, &action).unwrap();
+
+        assert_eq!(
+            std_fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "written by action"
+        );
+    }
+
+    #[test]
+    fn file_write_action_sensitive_paths_remain_blocked() {
+        let root = test_root("sensitive");
+        let worktree = root.join(".slavey").join("worktrees").join("employee-1");
+        std_fs::create_dir_all(&worktree).unwrap();
+        let (context, employee_id) = test_context(&root, Some(&worktree));
+        let action = file_write_action(employee_id, ".env");
+
+        let error = run_file_write_action(&context, &action).unwrap_err();
+
+        assert!(error.message.contains("blocked"));
+        assert!(!worktree.join(".env").exists());
     }
 
     #[test]

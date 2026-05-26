@@ -8,7 +8,7 @@ use std::{
         Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use parking_lot::Mutex;
@@ -27,6 +27,7 @@ use crate::{
 };
 
 const MAX_PROCESS_LOG_BYTES: usize = 1024 * 1024;
+const PROCESS_LOG_PERSIST_INTERVAL_MS: u64 = 2_000;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -89,6 +90,33 @@ struct LogRing {
     base_offset: u64,
     next_offset: u64,
     contents: Vec<u8>,
+}
+
+struct PersistThrottle {
+    interval: Duration,
+    last_persisted_at: Instant,
+}
+
+impl PersistThrottle {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last_persisted_at: Instant::now(),
+        }
+    }
+
+    fn should_persist(&mut self) -> bool {
+        self.should_persist_at(Instant::now())
+    }
+
+    fn should_persist_at(&mut self, now: Instant) -> bool {
+        if now.duration_since(self.last_persisted_at) >= self.interval {
+            self.last_persisted_at = now;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -412,12 +440,17 @@ fn spawn_log_reader<R>(
 {
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
+        let mut persist_throttle =
+            PersistThrottle::new(Duration::from_millis(PROCESS_LOG_PERSIST_INTERVAL_MS));
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(read) => {
                     if let Some(payload) = processes.append_log(&process_id, &buffer[..read]) {
                         emit_process_log(&app, payload);
+                        if persist_throttle.should_persist() {
+                            persist_process_snapshot_or_log(&app, &persist_context);
+                        }
                     }
                 }
                 Err(_) => break,
@@ -582,11 +615,14 @@ unsafe extern "C" {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        path::PathBuf,
+        time::{Duration, Instant},
+    };
 
     use super::{
-        ManagedProcessStatus, ProcessLogSnapshot, ProcessManager, ProcessSpawnRequest,
-        MAX_PROCESS_LOG_BYTES,
+        ManagedProcessStatus, PersistThrottle, ProcessLogSnapshot, ProcessManager,
+        ProcessSpawnRequest, MAX_PROCESS_LOG_BYTES,
     };
 
     #[cfg(unix)]
@@ -679,5 +715,42 @@ mod tests {
 
         assert!(logs.truncated);
         assert_eq!(logs.contents.len(), MAX_PROCESS_LOG_BYTES);
+    }
+
+    #[test]
+    fn log_snapshots_are_capped() {
+        let manager = ProcessManager::default();
+        let process = manager.create(
+            ProcessSpawnRequest {
+                employee_id: None,
+                title: "Logs".to_string(),
+                command: "echo ok".to_string(),
+                cwd: None,
+            },
+            PathBuf::from("/tmp"),
+        );
+        manager.append_log(&process.id, &vec![b'x'; MAX_PROCESS_LOG_BYTES + 128]);
+
+        let snapshots = manager.log_snapshots();
+
+        assert_eq!(snapshots[0].contents.len(), MAX_PROCESS_LOG_BYTES);
+        assert_eq!(
+            snapshots[0].next_offset,
+            (MAX_PROCESS_LOG_BYTES + 128) as u64
+        );
+    }
+
+    #[test]
+    fn persist_throttle_waits_for_interval() {
+        let start = Instant::now();
+        let mut throttle = PersistThrottle {
+            interval: Duration::from_secs(2),
+            last_persisted_at: start,
+        };
+
+        assert!(!throttle.should_persist_at(start + Duration::from_millis(500)));
+        assert!(throttle.should_persist_at(start + Duration::from_secs(2)));
+        assert!(!throttle.should_persist_at(start + Duration::from_secs(3)));
+        assert!(throttle.should_persist_at(start + Duration::from_secs(4)));
     }
 }
