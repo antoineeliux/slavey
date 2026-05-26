@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     io::Read,
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError},
@@ -22,6 +22,8 @@ use crate::{
     employees::EmployeeManager,
     events::{emit_action_updated, emit_approval_updated, emit_log, now_ms, LogLevel},
     fs::{resolve_existing_dir, write_file_in_workspace},
+    persistence::PersistenceManager,
+    processes::{configure_process_group, shell_command, terminate_process_tree},
     AppState,
 };
 
@@ -63,6 +65,7 @@ pub struct Action {
     pub command: Option<String>,
     pub path: Option<String>,
     pub contents: Option<String>,
+    #[serde(default = "default_action_timeout_secs")]
     pub timeout_secs: u64,
     pub approval_id: Option<String>,
     pub status: ActionStatus,
@@ -134,6 +137,15 @@ impl ActionManager {
         let mut actions = self.actions.lock().values().cloned().collect::<Vec<_>>();
         actions.sort_by_key(|action| action.created_at);
         actions
+    }
+
+    pub fn replace_all(&self, actions: Vec<Action>) {
+        let mut next = HashMap::new();
+        for action in actions {
+            next.insert(action.id.clone(), action);
+        }
+        *self.actions.lock() = next;
+        self.running.lock().clear();
     }
 
     pub fn get(&self, id: &str) -> Option<Action> {
@@ -244,9 +256,30 @@ impl ActionManager {
         if let Some(running) = self.running.lock().remove(action_id) {
             running.cancel.store(true, Ordering::SeqCst);
             let mut child = running.child.lock();
-            let _ = child.kill();
+            terminate_process_tree(&mut child);
         }
     }
+}
+
+pub fn restore_actions(actions: &[Action]) -> Vec<Action> {
+    actions
+        .iter()
+        .cloned()
+        .map(|mut action| {
+            if action.status == ActionStatus::Running {
+                action.status = ActionStatus::Failed;
+                action.error = Some("app restarted before action completed".to_string());
+                action.output = "app restarted before action completed".to_string();
+                action.finished_at = Some(now_ms());
+                action.updated_at = now_ms();
+            }
+            action
+        })
+        .collect()
+}
+
+fn default_action_timeout_secs() -> u64 {
+    DEFAULT_ACTION_TIMEOUT_SECS
 }
 
 #[tauri::command]
@@ -263,6 +296,7 @@ pub fn action_create(
         format!("created action {}", action.title),
     );
     emit_action_updated(&app, action.clone());
+    persist_or_log(&app, &state);
     Ok(action)
 }
 
@@ -303,6 +337,7 @@ pub fn action_request_approval(
 
     emit_approval_updated(&app, approval);
     emit_action_updated(&app, updated.clone());
+    persist_or_log(&app, &state);
     Ok(updated)
 }
 
@@ -324,6 +359,7 @@ pub fn action_approve(
     let updated = updated.ok_or_else(|| "approval is not linked to an action".to_string())?;
     emit_approval_updated(&app, approval);
     emit_action_updated(&app, updated.clone());
+    persist_or_log(&app, &state);
     Ok(updated)
 }
 
@@ -345,6 +381,7 @@ pub fn action_reject(
     let updated = updated.ok_or_else(|| "approval is not linked to an action".to_string())?;
     emit_approval_updated(&app, approval);
     emit_action_updated(&app, updated.clone());
+    persist_or_log(&app, &state);
     Ok(updated)
 }
 
@@ -368,15 +405,19 @@ pub fn action_run(
     let context = ActionRunContext {
         workspace_root: state.workspace_root.clone(),
         employees: state.employees.clone(),
+        approvals: state.approvals.clone(),
+        actions: state.actions.clone(),
+        persistence: state.persistence.clone(),
     };
     let actions = state.actions.clone();
     let run_app = app.clone();
     let run_action = running.clone();
     thread::spawn(move || {
         let result = run_action_impl(&context, &actions, &run_action);
-        finish_background_action(&run_app, &actions, &run_action.id, result);
+        finish_background_action(&run_app, &context, &run_action.id, result);
     });
 
+    persist_or_log(&app, &state);
     Ok(running)
 }
 
@@ -425,6 +466,7 @@ pub fn action_cancel(
     }
 
     emit_action_updated(&app, updated.clone());
+    persist_or_log(&app, &state);
     Ok(updated)
 }
 
@@ -538,6 +580,9 @@ fn action_status_label(status: ActionStatus) -> &'static str {
 struct ActionRunContext {
     workspace_root: PathBuf,
     employees: EmployeeManager,
+    approvals: crate::approvals::ApprovalManager,
+    actions: ActionManager,
+    persistence: PersistenceManager,
 }
 
 struct ActionFailure {
@@ -589,19 +634,22 @@ fn run_action_impl(
 
 fn finish_background_action(
     app: &AppHandle,
-    actions: &ActionManager,
+    context: &ActionRunContext,
     action_id: &str,
     result: ActionExecutionResult,
 ) {
     let updated = match result {
-        Ok(output) => actions.finish_success(action_id, output),
-        Err(failure) => actions.finish_failure(action_id, failure.message, failure.output),
+        Ok(output) => context.actions.finish_success(action_id, output),
+        Err(failure) => context
+            .actions
+            .finish_failure(action_id, failure.message, failure.output),
     };
 
     match updated {
         Ok(action) => emit_action_updated(app, action),
         Err(error) => {
-            if actions
+            if context
+                .actions
                 .get(action_id)
                 .is_some_and(|action| action.status == ActionStatus::Cancelled)
             {
@@ -613,6 +661,33 @@ fn finish_background_action(
                 format!("action {action_id} finished with stale state: {error}"),
             );
         }
+    }
+
+    if let Err(error) = persist_context_snapshot(context) {
+        emit_log(
+            app,
+            LogLevel::Warn,
+            format!("failed to persist completed action: {error}"),
+        );
+    }
+}
+
+fn persist_context_snapshot(context: &ActionRunContext) -> Result<(), String> {
+    context.persistence.save(
+        &context.workspace_root,
+        context.employees.list(),
+        context.actions.list(),
+        context.approvals.list(),
+    )
+}
+
+fn persist_or_log(app: &AppHandle, state: &State<'_, AppState>) {
+    if let Err(error) = state.persist() {
+        emit_log(
+            app,
+            LogLevel::Warn,
+            format!("failed to persist app state: {error}"),
+        );
     }
 }
 
@@ -639,10 +714,13 @@ fn run_shell_action(
         .as_deref()
         .ok_or_else(|| ActionFailure::new("shell command action requires command"))?;
 
-    let mut child = shell_command(command)
+    let mut command = shell_command(command);
+    command
         .current_dir(cwd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_process_group(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|error| ActionFailure::new(error.to_string()))?;
     let stdout = child
@@ -737,22 +815,6 @@ fn run_file_write_action(context: &ActionRunContext, action: &Action) -> ActionE
     Ok(format!("wrote {path}"))
 }
 
-fn shell_command(command: &str) -> Command {
-    #[cfg(windows)]
-    {
-        let mut process = Command::new("cmd.exe");
-        process.args(["/C", command]);
-        process
-    }
-
-    #[cfg(not(windows))]
-    {
-        let mut process = Command::new("/bin/sh");
-        process.args(["-lc", command]);
-        process
-    }
-}
-
 fn spawn_pipe_reader<R>(mut reader: R, sender: SyncSender<Vec<u8>>)
 where
     R: Read + Send + 'static,
@@ -820,8 +882,7 @@ fn append_output(output: &mut Vec<u8>, chunk: &[u8]) -> Result<(), ActionFailure
 
 fn terminate_child(child: &Arc<Mutex<Child>>) {
     let mut child = child.lock();
-    let _ = child.kill();
-    let _ = child.wait();
+    terminate_process_tree(&mut child);
 }
 
 fn bytes_to_string(bytes: &[u8]) -> String {

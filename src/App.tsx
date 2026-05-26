@@ -135,6 +135,7 @@ function EmployeeDetails() {
   const selectedEmployee = useAppStore((state) => state.selectedEmployee());
   const approvals = useAppStore((state) => state.approvals);
   const actions = useAppStore((state) => state.actions);
+  const processes = useAppStore((state) => state.processes);
   const rolePolicies = useAppStore((state) => state.rolePolicies);
   const worktreeStatuses = useAppStore((state) => state.worktreeStatuses);
   const worktreeReviews = useAppStore((state) => state.worktreeReviews);
@@ -146,6 +147,7 @@ function EmployeeDetails() {
   const startTerminal = useAppStore((state) => state.startTerminal);
   const stopTerminal = useAppStore((state) => state.stopTerminal);
   const removeEmployee = useAppStore((state) => state.removeEmployee);
+  const spawnProcess = useAppStore((state) => state.spawnProcess);
 
   useEffect(() => {
     if (selectedEmployee?.worktreePath) {
@@ -175,6 +177,9 @@ function EmployeeDetails() {
   const worktreeReview = worktreeReviews[selectedEmployee.id];
   const employeeActions = actions.filter(
     (action) => action.employeeId === selectedEmployee.id,
+  );
+  const employeeProcesses = processes.filter(
+    (process) => !process.employeeId || process.employeeId === selectedEmployee.id,
   );
   const rolePolicy = rolePolicies.find((policy) => policy.role === selectedEmployee.role);
 
@@ -308,6 +313,17 @@ function EmployeeDetails() {
         }
       />
       <ActionPanel employeeId={selectedEmployee.id} cwd={selectedEmployee.cwd} actions={employeeActions} />
+      <ProcessPanel
+        processes={employeeProcesses}
+        onSpawn={() =>
+          void spawnProcess(
+            selectedEmployee.id,
+            "while true; do date; sleep 2; done",
+            selectedEmployee.cwd,
+            "Clock loop",
+          )
+        }
+      />
       {selectedEmployee.worktreePath ? (
         <section className="review-panel">
           <div className="section-heading">
@@ -537,6 +553,69 @@ function ApprovalPanel({
                   <X size={14} />
                 </button>
               </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ProcessPanel({
+  processes,
+  onSpawn,
+}: {
+  processes: Array<{
+    id: string;
+    title: string;
+    command: string;
+    status: string;
+    exitCode?: number | null;
+  }>;
+  onSpawn: () => void;
+}) {
+  const processLogs = useAppStore((state) => state.processLogs);
+  const killProcess = useAppStore((state) => state.killProcess);
+  const loadProcessLogs = useAppStore((state) => state.loadProcessLogs);
+
+  return (
+    <section className="process-panel">
+      <div className="section-heading">
+        <TerminalSquare size={15} />
+        Processes
+        <button className="icon-button" title="Spawn sample process" onClick={onSpawn}>
+          <Plus size={14} />
+        </button>
+      </div>
+      {processes.length === 0 ? (
+        <div className="empty-panel">No managed processes.</div>
+      ) : (
+        <div className="process-list">
+          {processes.map((process) => (
+            <div className="process-item" key={process.id}>
+              <div className="action-title">
+                <strong>{process.title}</strong>
+                <span>{process.status}</span>
+              </div>
+              <code title={process.command}>{process.command}</code>
+              <div className="approval-actions">
+                <button
+                  className="command-button compact"
+                  onClick={() => void loadProcessLogs(process.id)}
+                >
+                  Logs
+                </button>
+                <button
+                  className="command-button compact"
+                  disabled={process.status !== "running"}
+                  onClick={() => void killProcess(process.id)}
+                >
+                  Kill
+                </button>
+              </div>
+              {processLogs[process.id]?.contents ? (
+                <pre>{processLogs[process.id].contents}</pre>
+              ) : null}
             </div>
           ))}
         </div>

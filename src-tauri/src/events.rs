@@ -1,7 +1,12 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
-use crate::{actions::Action, approvals::ApprovalRequest, employees::Employee};
+use crate::{
+    actions::Action,
+    approvals::ApprovalRequest,
+    employees::Employee,
+    processes::{ManagedProcess, ProcessLogs},
+};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,6 +51,12 @@ pub struct ActionUpdatedPayload {
     pub action: Action,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessUpdatedPayload {
+    pub process: ManagedProcess,
+}
+
 pub fn emit_terminal_data(
     app: &AppHandle,
     employee_id: impl Into<String>,
@@ -70,6 +81,14 @@ pub fn emit_approval_updated(app: &AppHandle, approval: ApprovalRequest) {
 
 pub fn emit_action_updated(app: &AppHandle, action: Action) {
     let _ = app.emit("action:updated", ActionUpdatedPayload { action });
+}
+
+pub fn emit_process_updated(app: &AppHandle, process: ManagedProcess) {
+    let _ = app.emit("process:updated", ProcessUpdatedPayload { process });
+}
+
+pub fn emit_process_log(app: &AppHandle, payload: ProcessLogs) {
+    let _ = app.emit("process:log", payload);
 }
 
 pub fn emit_log(app: &AppHandle, level: LogLevel, message: impl Into<String>) {

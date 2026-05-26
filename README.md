@@ -26,6 +26,10 @@ The backend restricts file reads and writes to the selected workspace root. In d
 SLAVEY_WORKSPACE_ROOT=/path/to/workspace npm run dev
 ```
 
+## Process Cleanup
+
+On Unix/macOS, structured actions and managed background processes are spawned in a new session/process group, and cancellation attempts to terminate the full group. On Windows, process cleanup currently terminates the direct child process only; full process-tree cleanup should use Job Objects in a later phase.
+
 ## Future Milestones
 
 1. Codex CLI launch per employee.
@@ -33,4 +37,3 @@ SLAVEY_WORKSPACE_ROOT=/path/to/workspace npm run dev
 3. Approval gates before risky commands.
 4. Diff and review UI.
 5. Real animated character assets.
-

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { javascript } from "@codemirror/lang-javascript";
@@ -17,6 +17,14 @@ export function EditorPane() {
   const readFile = useAppStore((state) => state.readFile);
   const saveOpenFile = useAppStore((state) => state.saveOpenFile);
   const updateOpenFileContents = useAppStore((state) => state.updateOpenFileContents);
+  const searchFiles = useAppStore((state) => state.searchFiles);
+  const createFile = useAppStore((state) => state.createFile);
+  const createDir = useAppStore((state) => state.createDir);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchMode, setSearchMode] = useState<"search" | "grep" | "glob">("search");
+  const [searchResults, setSearchResults] = useState<
+    Array<{ path: string; lineNumber?: number | null; line?: string | null }>
+  >([]);
 
   useEffect(() => {
     if (selectedEmployee) {
@@ -62,6 +70,70 @@ export function EditorPane() {
               <span title={entry.path}>{entry.name}</span>
             </button>
           ))}
+        </div>
+        <div className="file-actions">
+          <button
+            className="command-button compact"
+            disabled={!currentDir}
+            onClick={() =>
+              currentDir && void createFile(`${currentDir}/untitled-${Date.now()}.txt`, "")
+            }
+          >
+            File
+          </button>
+          <button
+            className="command-button compact"
+            disabled={!currentDir}
+            onClick={() =>
+              currentDir && void createDir(`${currentDir}/folder-${Date.now()}`)
+            }
+          >
+            Dir
+          </button>
+        </div>
+        <div className="search-panel">
+          <select
+            value={searchMode}
+            onChange={(event) =>
+              setSearchMode(event.target.value as "search" | "grep" | "glob")
+            }
+          >
+            <option value="search">Files</option>
+            <option value="grep">Grep</option>
+            <option value="glob">Glob</option>
+          </select>
+          <input
+            value={searchQuery}
+            placeholder="Search"
+            onChange={(event) => setSearchQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                void searchFiles(searchMode, searchQuery, selectedEmployee?.cwd ?? workspaceRoot)
+                  .then(setSearchResults);
+              }
+            }}
+          />
+          <button
+            className="command-button compact"
+            onClick={() =>
+              void searchFiles(searchMode, searchQuery, selectedEmployee?.cwd ?? workspaceRoot)
+                .then(setSearchResults)
+            }
+          >
+            Go
+          </button>
+          <div className="search-results">
+            {searchResults.map((result) => (
+              <button
+                className="search-result"
+                key={`${result.path}:${result.lineNumber ?? 0}:${result.line ?? ""}`}
+                onClick={() => void readFile(result.path)}
+              >
+                <span title={result.path}>{shortPath(result.path)}</span>
+                {result.line ? <code>{result.lineNumber}: {result.line}</code> : null}
+              </button>
+            ))}
+          </div>
         </div>
       </aside>
       <section className="code-surface">

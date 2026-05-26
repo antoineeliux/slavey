@@ -1,7 +1,11 @@
 use std::{
     fs as std_fs,
+    io::Read,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
+    thread,
+    time::{Duration, Instant},
 };
 
 use serde::Serialize;
@@ -11,8 +15,12 @@ use crate::{
     employees::Employee,
     events::{emit_employee_updated, emit_log, LogLevel},
     fs::resolve_existing_dir,
+    processes::{configure_process_group, terminate_process_tree},
     AppState,
 };
+
+const GIT_COMMAND_TIMEOUT_SECS: u64 = 30;
+const MAX_GIT_OUTPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -264,25 +272,87 @@ pub fn git_worktree_review_for_employee(
     })
 }
 
+#[tauri::command]
+pub fn git_worktree_changed_files_for_employee(
+    state: State<'_, AppState>,
+    employee_id: String,
+) -> Result<Vec<String>, String> {
+    let (path, _) = employee_worktree(&state, &employee_id)?;
+    let status = parse_status_lines(&run_git(&path, &["status", "--porcelain"])?);
+    Ok(parse_changed_files(&status))
+}
+
+#[tauri::command]
+pub fn git_worktree_file_diff_for_employee(
+    state: State<'_, AppState>,
+    employee_id: String,
+    path: String,
+) -> Result<String, String> {
+    let (worktree, _) = employee_worktree(&state, &employee_id)?;
+    let relative = resolve_worktree_relative_path(&worktree, &path)?;
+    let staged = run_git(&worktree, &["diff", "--cached", "--", &relative])?;
+    let unstaged = run_git(&worktree, &["diff", "--", &relative])?;
+    Ok(
+        match (staged.trim().is_empty(), unstaged.trim().is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => format!("staged diff\n{staged}"),
+            (true, false) => format!("unstaged diff\n{unstaged}"),
+            (false, false) => format!("staged diff\n{staged}\nunstaged diff\n{unstaged}"),
+        },
+    )
+}
+
+#[tauri::command]
+pub fn git_worktree_stage_file(
+    state: State<'_, AppState>,
+    employee_id: String,
+    path: String,
+) -> Result<WorktreeReview, String> {
+    let (worktree, _) = employee_worktree(&state, &employee_id)?;
+    let relative = resolve_worktree_relative_path(&worktree, &path)?;
+    run_git(&worktree, &["add", "--", &relative])?;
+    git_worktree_review_for_employee(state, employee_id)
+}
+
+#[tauri::command]
+pub fn git_worktree_unstage_file(
+    state: State<'_, AppState>,
+    employee_id: String,
+    path: String,
+) -> Result<WorktreeReview, String> {
+    let (worktree, _) = employee_worktree(&state, &employee_id)?;
+    let relative = resolve_worktree_relative_path(&worktree, &path)?;
+    run_git(&worktree, &["restore", "--staged", "--", &relative])?;
+    git_worktree_review_for_employee(state, employee_id)
+}
+
+fn employee_worktree(
+    state: &State<'_, AppState>,
+    employee_id: &str,
+) -> Result<(PathBuf, Option<String>), String> {
+    let employee = state
+        .employees
+        .get(employee_id)
+        .ok_or_else(|| "employee not found".to_string())?;
+    let worktree_path = employee
+        .worktree_path
+        .ok_or_else(|| "employee has no worktree".to_string())?;
+    Ok((
+        resolve_existing_dir(&state.workspace_root, &worktree_path)?,
+        employee.branch_name,
+    ))
+}
+
 fn git_success(cwd: &Path, args: &[&str]) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()
-        .map(|output| output.status.success())
+    bounded_git_output(cwd, args)
+        .map(|output| output.success)
         .unwrap_or(false)
 }
 
 fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()
-        .map_err(|error| error.to_string())?;
+    let output = bounded_git_output(cwd, args)?;
 
-    if output.status.success() {
+    if output.success {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -292,6 +362,159 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
             Err(stderr)
         }
     }
+}
+
+struct GitCommandOutput {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+enum GitOutputChunk {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+}
+
+fn bounded_git_output(cwd: &Path, args: &[&str]) -> Result<GitCommandOutput, String> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_process_group(&mut command);
+
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            terminate_process_tree(&mut child);
+            return Err("failed to capture git stdout".to_string());
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            terminate_process_tree(&mut child);
+            return Err("failed to capture git stderr".to_string());
+        }
+    };
+    let (sender, receiver) = mpsc::sync_channel::<GitOutputChunk>(64);
+    spawn_git_reader(stdout, sender.clone(), true);
+    spawn_git_reader(stderr, sender, false);
+
+    let deadline = Instant::now() + Duration::from_secs(GIT_COMMAND_TIMEOUT_SECS);
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut total = 0_usize;
+
+    loop {
+        if let Err(error) = drain_git_output(&receiver, &mut stdout, &mut stderr, &mut total) {
+            terminate_process_tree(&mut child);
+            return Err(error);
+        }
+
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            drain_remaining_git_output(&receiver, &mut stdout, &mut stderr, &mut total)?;
+            return Ok(GitCommandOutput {
+                success: status.success(),
+                stdout,
+                stderr,
+            });
+        }
+
+        if Instant::now() >= deadline {
+            terminate_process_tree(&mut child);
+            let _ = drain_remaining_git_output(&receiver, &mut stdout, &mut stderr, &mut total);
+            return Err(format!(
+                "git command timed out after {GIT_COMMAND_TIMEOUT_SECS} seconds"
+            ));
+        }
+
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn spawn_git_reader<R>(mut reader: R, sender: SyncSender<GitOutputChunk>, stdout: bool)
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    let chunk = if stdout {
+                        GitOutputChunk::Stdout(buffer[..read].to_vec())
+                    } else {
+                        GitOutputChunk::Stderr(buffer[..read].to_vec())
+                    };
+                    if sender.send(chunk).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+fn drain_git_output(
+    receiver: &Receiver<GitOutputChunk>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    total: &mut usize,
+) -> Result<(), String> {
+    loop {
+        match receiver.try_recv() {
+            Ok(chunk) => append_git_output(stdout, stderr, total, chunk)?,
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => return Ok(()),
+        }
+    }
+}
+
+fn drain_remaining_git_output(
+    receiver: &Receiver<GitOutputChunk>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    total: &mut usize,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match receiver.recv_timeout(Duration::from_millis(20)) {
+            Ok(chunk) => append_git_output(stdout, stderr, total, chunk)?,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => return Ok(()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
+fn append_git_output(
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    total: &mut usize,
+    chunk: GitOutputChunk,
+) -> Result<(), String> {
+    let bytes = match &chunk {
+        GitOutputChunk::Stdout(bytes) | GitOutputChunk::Stderr(bytes) => bytes,
+    };
+    if total.saturating_add(bytes.len()) > MAX_GIT_OUTPUT_BYTES {
+        return Err(format!(
+            "git command output exceeded {} bytes",
+            MAX_GIT_OUTPUT_BYTES
+        ));
+    }
+    *total += bytes.len();
+    match chunk {
+        GitOutputChunk::Stdout(bytes) => stdout.extend_from_slice(&bytes),
+        GitOutputChunk::Stderr(bytes) => stderr.extend_from_slice(&bytes),
+    }
+    Ok(())
 }
 
 fn ensure_slavey_excluded(repo_root: &Path) -> Result<bool, String> {
@@ -338,6 +561,86 @@ fn parse_untracked_files(status: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn parse_changed_files(status: &[String]) -> Vec<String> {
+    status
+        .iter()
+        .filter_map(|line| parse_status_path(line))
+        .collect()
+}
+
+fn parse_status_path(line: &str) -> Option<String> {
+    if line.len() < 4 {
+        return None;
+    }
+    let path = &line[3..];
+    if let Some((_, to)) = path.split_once(" -> ") {
+        Some(to.to_string())
+    } else {
+        Some(path.to_string())
+    }
+}
+
+fn resolve_worktree_relative_path(worktree: &Path, input: &str) -> Result<String, String> {
+    let input_path = PathBuf::from(input);
+    if input_path.is_absolute() {
+        let resolved = if input_path.exists() {
+            input_path
+                .canonicalize()
+                .map_err(|error| error.to_string())?
+        } else {
+            return Err("absolute path must exist inside the worktree".to_string());
+        };
+        ensure_path_inside(worktree, &resolved)?;
+        return path_to_str(
+            resolved
+                .strip_prefix(worktree)
+                .map_err(|_| "path is outside the worktree".to_string())?,
+        )
+        .map(ToString::to_string);
+    }
+
+    let candidate = worktree.join(input_path);
+    if candidate.exists() {
+        let resolved = candidate
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        ensure_path_inside(worktree, &resolved)?;
+        return path_to_str(
+            resolved
+                .strip_prefix(worktree)
+                .map_err(|_| "path is outside the worktree".to_string())?,
+        )
+        .map(ToString::to_string);
+    }
+
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| "path has no parent".to_string())?
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    ensure_path_inside(worktree, &parent)?;
+    let file_name = candidate
+        .file_name()
+        .ok_or_else(|| "path has no file name".to_string())?;
+    let resolved = parent.join(file_name);
+    ensure_path_inside(worktree, &resolved)?;
+    path_to_str(
+        resolved
+            .strip_prefix(worktree)
+            .map_err(|_| "path is outside the worktree".to_string())?,
+    )
+    .map(ToString::to_string)
+}
+
+fn ensure_path_inside(root: &Path, path: &Path) -> Result<(), String> {
+    let root = root.canonicalize().map_err(|error| error.to_string())?;
+    if path.starts_with(root) {
+        Ok(())
+    } else {
+        Err("path is outside the worktree".to_string())
+    }
+}
+
 fn branch_name_for_employee(employee: &Employee) -> String {
     let sanitized = sanitize_branch_component(&employee.name);
     let fallback = employee.id.chars().take(8).collect::<String>();
@@ -372,7 +675,10 @@ fn path_to_str(path: &Path) -> Result<&str, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_status_lines, parse_untracked_files};
+    use super::{
+        append_git_output, parse_changed_files, parse_status_lines, parse_untracked_files,
+        GitOutputChunk, MAX_GIT_OUTPUT_BYTES,
+    };
 
     #[test]
     fn status_parser_detects_clean_output() {
@@ -395,5 +701,62 @@ mod tests {
             parse_untracked_files(&changes),
             vec!["new.txt".to_string(), "dir/file.rs".to_string()]
         );
+    }
+
+    #[test]
+    fn changed_file_parser_handles_renames_and_untracked_files() {
+        let changes = parse_status_lines(" M src/main.rs\nR  old.rs -> new.rs\n?? scratch.txt\n");
+
+        assert_eq!(
+            parse_changed_files(&changes),
+            vec![
+                "src/main.rs".to_string(),
+                "new.rs".to_string(),
+                "scratch.txt".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn git_output_limit_is_enforced() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut total = MAX_GIT_OUTPUT_BYTES;
+
+        let error = append_git_output(
+            &mut stdout,
+            &mut stderr,
+            &mut total,
+            GitOutputChunk::Stdout(vec![b'x']),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("git command output exceeded"));
+    }
+
+    #[test]
+    fn git_output_appends_stdout_and_stderr() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut total = 0;
+
+        append_git_output(
+            &mut stdout,
+            &mut stderr,
+            &mut total,
+            GitOutputChunk::Stdout(b"out".to_vec()),
+        )
+        .unwrap();
+        append_git_output(
+            &mut stdout,
+            &mut stderr,
+            &mut total,
+            GitOutputChunk::Stderr(b"err".to_vec()),
+        )
+        .unwrap();
+
+        assert_eq!(stdout, b"out");
+        assert_eq!(stderr, b"err");
+        assert_eq!(total, 6);
     }
 }

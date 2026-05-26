@@ -5,15 +5,17 @@ mod events;
 mod fs;
 mod git;
 mod persistence;
+mod processes;
 mod terminal;
 
 use std::path::PathBuf;
 
-use actions::ActionManager;
+use actions::{restore_actions, ActionManager};
 use approvals::ApprovalManager;
 use employees::EmployeeManager;
 use events::{emit_log, LogLevel};
 use persistence::PersistenceManager;
+use processes::ProcessManager;
 use tauri::Manager;
 use terminal::TerminalManager;
 
@@ -24,32 +26,26 @@ pub struct AppState {
     pub persistence: PersistenceManager,
     pub approvals: ApprovalManager,
     pub actions: ActionManager,
+    pub processes: ProcessManager,
 }
 
 impl AppState {
-    fn new(
-        workspace_root: PathBuf,
-        employees: EmployeeManager,
-        persistence: PersistenceManager,
-    ) -> Self {
-        Self {
-            workspace_root,
-            employees,
-            terminal: TerminalManager::default(),
-            persistence,
-            approvals: ApprovalManager::default(),
-            actions: ActionManager::default(),
-        }
-    }
-
     pub fn persist(&self) -> Result<(), String> {
-        self.persistence
-            .save(&self.workspace_root, self.employees.list())
+        self.persistence.save(
+            &self.workspace_root,
+            self.employees.list(),
+            self.actions.list(),
+            self.approvals.list(),
+        )
     }
 
     pub fn snapshot(&self) -> persistence::PersistentAppState {
-        self.persistence
-            .snapshot(&self.workspace_root, self.employees.list())
+        self.persistence.snapshot(
+            &self.workspace_root,
+            self.employees.list(),
+            self.actions.list(),
+            self.approvals.list(),
+        )
     }
 }
 
@@ -84,11 +80,15 @@ pub fn run() {
                 .map(|state| PathBuf::from(&state.workspace_root));
             let workspace_root = resolve_workspace_root(persisted_workspace);
             let employees = EmployeeManager::default();
+            let approvals = ApprovalManager::default();
+            let actions = ActionManager::default();
             if let Some(persisted) = &persisted {
                 employees.replace_all(persistence::restore_employees(
                     &workspace_root,
                     &persisted.employees,
                 ));
+                approvals.replace_all(persisted.approvals.clone());
+                actions.replace_all(restore_actions(&persisted.actions));
             }
             let persistence = PersistenceManager::new(persistence_path, persisted.as_ref());
             emit_log(
@@ -96,7 +96,15 @@ pub fn run() {
                 LogLevel::Info,
                 format!("workspace root set to {}", workspace_root.display()),
             );
-            app.manage(AppState::new(workspace_root, employees, persistence));
+            app.manage(AppState {
+                workspace_root,
+                employees,
+                terminal: TerminalManager::default(),
+                persistence,
+                approvals,
+                actions,
+                processes: ProcessManager::default(),
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -119,17 +127,33 @@ pub fn run() {
             actions::action_reject,
             actions::action_run,
             actions::action_cancel,
+            processes::process_spawn,
+            processes::process_list,
+            processes::process_logs,
+            processes::process_kill,
             git::git_is_repo,
             git::git_worktree_create_for_employee,
             git::git_worktree_status_for_employee,
             git::git_worktree_remove_for_employee,
             git::git_worktree_diff_for_employee,
             git::git_worktree_review_for_employee,
+            git::git_worktree_changed_files_for_employee,
+            git::git_worktree_file_diff_for_employee,
+            git::git_worktree_stage_file,
+            git::git_worktree_unstage_file,
             terminal::terminal_write,
             terminal::terminal_resize,
             fs::fs_list_dir,
+            fs::fs_list_files,
+            fs::fs_search,
+            fs::fs_grep,
+            fs::fs_glob,
             fs::fs_read_file,
-            fs::fs_write_file
+            fs::fs_write_file,
+            fs::fs_create_file,
+            fs::fs_create_dir,
+            fs::fs_rename,
+            fs::fs_delete
         ])
         .run(tauri::generate_context!())
         .expect("error while running Slavey");

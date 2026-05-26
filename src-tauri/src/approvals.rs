@@ -101,6 +101,14 @@ impl ApprovalManager {
         approvals
     }
 
+    pub fn replace_all(&self, approvals: Vec<ApprovalRequest>) {
+        let mut next = HashMap::new();
+        for approval in approvals {
+            next.insert(approval.id.clone(), approval);
+        }
+        *self.approvals.lock() = next;
+    }
+
     pub fn get(&self, id: &str) -> Option<ApprovalRequest> {
         self.approvals.lock().get(id).cloned()
     }
@@ -143,6 +151,7 @@ pub fn approval_create(
         format!("created approval request {}", approval.title),
     );
     emit_approval_updated(&app, approval.clone());
+    persist_or_log(&app, &state);
     Ok(approval)
 }
 
@@ -168,6 +177,7 @@ pub fn approval_approve(
         format!("approved request {}", approval.title),
     );
     emit_approval_updated(&app, approval.clone());
+    persist_or_log(&app, &state);
     Ok(approval)
 }
 
@@ -188,6 +198,7 @@ pub fn approval_reject(
         format!("rejected request {}", approval.title),
     );
     emit_approval_updated(&app, approval.clone());
+    persist_or_log(&app, &state);
     Ok(approval)
 }
 
@@ -243,6 +254,16 @@ fn approval_status_label(status: ApprovalStatus) -> &'static str {
         ApprovalStatus::Approved => "approved",
         ApprovalStatus::Rejected => "rejected",
         ApprovalStatus::Expired => "expired",
+    }
+}
+
+fn persist_or_log(app: &AppHandle, state: &State<'_, AppState>) {
+    if let Err(error) = state.persist() {
+        emit_log(
+            app,
+            LogLevel::Warn,
+            format!("failed to persist app state: {error}"),
+        );
     }
 }
 

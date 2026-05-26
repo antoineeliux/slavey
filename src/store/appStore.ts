@@ -16,6 +16,10 @@ import type {
   EmployeeUpdatedPayload,
   FilePayload,
   FsEntry,
+  FsSearchResult,
+  ManagedProcess,
+  ProcessLogs,
+  ProcessUpdatedPayload,
   RolePolicy,
   TerminalDataPayload,
   WorktreeReview,
@@ -68,6 +72,8 @@ type AppStore = {
   logs: AppLog[];
   approvals: ApprovalRequest[];
   actions: Action[];
+  processes: ManagedProcess[];
+  processLogs: Record<string, ProcessLogs>;
   rolePolicies: RolePolicy[];
   worktreeStatuses: Record<string, WorktreeStatus>;
   worktreeDiffs: Record<string, string>;
@@ -101,6 +107,16 @@ type AppStore = {
   loadWorktreeStatus: (employeeId: string) => Promise<void>;
   loadWorktreeDiff: (employeeId: string) => Promise<void>;
   loadWorktreeReview: (employeeId: string) => Promise<void>;
+  spawnProcess: (employeeId: string | null, command: string, cwd: string, title?: string) => Promise<void>;
+  killProcess: (processId: string) => Promise<void>;
+  loadProcessLogs: (processId: string, offset?: number | null) => Promise<void>;
+  upsertProcess: (process: ManagedProcess) => void;
+  appendProcessLog: (payload: ProcessLogs) => void;
+  searchFiles: (mode: "search" | "grep" | "glob", query: string, root?: string | null) => Promise<FsSearchResult[]>;
+  createFile: (path: string, contents?: string) => Promise<void>;
+  createDir: (path: string) => Promise<void>;
+  renamePath: (from: string, to: string) => Promise<void>;
+  deletePath: (path: string) => Promise<void>;
   writeTerminal: (employeeId: string, sessionId: string, input: string) => Promise<void>;
   resizeTerminal: (employeeId: string, sessionId: string, cols: number, rows: number) => Promise<void>;
   appendTerminalData: (payload: TerminalDataPayload) => void;
@@ -123,6 +139,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   logs: [],
   approvals: [],
   actions: [],
+  processes: [],
+  processLogs: {},
   rolePolicies: [],
   worktreeStatuses: {},
   worktreeDiffs: {},
@@ -149,6 +167,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const snapshot = await invoke<AppStateSnapshot>("app_state_load");
       const approvals = await invoke<ApprovalRequest[]>("approval_list");
       const actions = await invoke<Action[]>("action_list");
+      const processes = await invoke<ManagedProcess[]>("process_list");
       const rolePolicies = await invoke<RolePolicy[]>("employee_role_policies");
       const selectedEmployeeId =
         snapshot.selectedEmployeeId &&
@@ -163,6 +182,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         recentFiles: snapshot.recentFiles ?? [],
         approvals,
         actions,
+        processes,
         rolePolicies,
         backendReady: true,
       });
@@ -193,10 +213,26 @@ export const useAppStore = create<AppStore>((set, get) => ({
       "action:updated",
       (event) => get().upsertAction(event.payload.action),
     );
+    const processUnlisten = await listen<ProcessUpdatedPayload>(
+      "process:updated",
+      (event) => get().upsertProcess(event.payload.process),
+    );
+    const processLogUnlisten = await listen<ProcessLogs>(
+      "process:log",
+      (event) => get().appendProcessLog(event.payload),
+    );
     const logUnlisten = await listen<AppLog>("app:log", (event) =>
       get().addLog(event.payload),
     );
-    return [terminalUnlisten, employeeUnlisten, approvalUnlisten, actionUnlisten, logUnlisten];
+    return [
+      terminalUnlisten,
+      employeeUnlisten,
+      approvalUnlisten,
+      actionUnlisten,
+      processUnlisten,
+      processLogUnlisten,
+      logUnlisten,
+    ];
   },
 
   createEmployee: async (input) => {
@@ -406,6 +442,120 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  spawnProcess: async (employeeId, command, cwd, title) => {
+    try {
+      const process = await invoke<ManagedProcess>("process_spawn", {
+        payload: {
+          employeeId,
+          title: title ?? command,
+          command,
+          cwd,
+        },
+      });
+      get().upsertProcess(process);
+    } catch (error) {
+      get().addLog(localLog("error", `spawn process failed: ${formatError(error)}`));
+    }
+  },
+
+  killProcess: async (processId) => {
+    try {
+      const process = await invoke<ManagedProcess>("process_kill", { processId });
+      get().upsertProcess(process);
+    } catch (error) {
+      get().addLog(localLog("error", `kill process failed: ${formatError(error)}`));
+    }
+  },
+
+  loadProcessLogs: async (processId, offset) => {
+    try {
+      const logs = await invoke<ProcessLogs>("process_logs", { processId, offset });
+      set((state) => ({
+        processLogs: { ...state.processLogs, [processId]: logs },
+      }));
+    } catch (error) {
+      get().addLog(localLog("warn", `load process logs failed: ${formatError(error)}`));
+    }
+  },
+
+  upsertProcess: (process) => {
+    set((state) => {
+      const exists = state.processes.some((item) => item.id === process.id);
+      const processes = exists
+        ? state.processes.map((item) => (item.id === process.id ? process : item))
+        : [...state.processes, process];
+      processes.sort((a, b) => a.createdAt - b.createdAt);
+      return { processes };
+    });
+  },
+
+  appendProcessLog: (payload) => {
+    set((state) => {
+      const existing = state.processLogs[payload.processId];
+      const contents =
+        existing && payload.baseOffset === existing.baseOffset
+          ? `${existing.contents}${payload.contents}`.slice(-1_000_000)
+          : payload.contents;
+      return {
+        processLogs: {
+          ...state.processLogs,
+          [payload.processId]: { ...payload, contents },
+        },
+      };
+    });
+  },
+
+  searchFiles: async (mode, query, root) => {
+    try {
+      const command =
+        mode === "grep" ? "fs_grep" : mode === "glob" ? "fs_glob" : "fs_search";
+      const payload =
+        mode === "search"
+          ? { query, root, limit: 100 }
+          : { pattern: query, root, limit: 100 };
+      return await invoke<FsSearchResult[]>(command, payload);
+    } catch (error) {
+      get().addLog(localLog("error", `${mode} failed: ${formatError(error)}`));
+      return [];
+    }
+  },
+
+  createFile: async (path, contents = "") => {
+    try {
+      const file = await invoke<FilePayload>("fs_create_file", { path, contents });
+      await get().loadDir(parentDir(file.path));
+    } catch (error) {
+      get().addLog(localLog("error", `create file failed: ${formatError(error)}`));
+    }
+  },
+
+  createDir: async (path) => {
+    try {
+      const entry = await invoke<FsEntry>("fs_create_dir", { path });
+      await get().loadDir(parentDir(entry.path));
+    } catch (error) {
+      get().addLog(localLog("error", `create directory failed: ${formatError(error)}`));
+    }
+  },
+
+  renamePath: async (from, to) => {
+    try {
+      const entry = await invoke<FsEntry>("fs_rename", { from, to });
+      await get().loadDir(parentDir(entry.path));
+    } catch (error) {
+      get().addLog(localLog("error", `rename failed: ${formatError(error)}`));
+    }
+  },
+
+  deletePath: async (path) => {
+    try {
+      await invoke("fs_delete", { path });
+      await get().loadDir(parentDir(path));
+    } catch (error) {
+      get().addLog(localLog("error", `delete failed: ${formatError(error)}`));
+    }
+  },
+
   writeTerminal: async (employeeId, sessionId, input) => {
     try {
       await invoke("terminal_write", { employeeId, sessionId, input });
@@ -560,6 +710,15 @@ function formatError(error: unknown): string {
 function shortPath(path: string): string {
   const parts = path.split(/[\\/]/);
   return parts.slice(-2).join("/");
+}
+
+function parentDir(path: string): string | null {
+  const trimmed = path.replace(/[\\/]$/, "");
+  const index = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  if (index <= 0) {
+    return null;
+  }
+  return trimmed.slice(0, index);
 }
 
 function appendBoundedTerminalBuffer(previous: string, chunk: string): string {

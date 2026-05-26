@@ -1,6 +1,6 @@
 use std::{
     fs as std_fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -9,6 +9,12 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::AppState;
+
+const DEFAULT_SCAN_LIMIT: usize = 500;
+const MAX_SCAN_LIMIT: usize = 5000;
+const DEFAULT_SCAN_DEPTH: usize = 8;
+const MAX_SCAN_DEPTH: usize = 16;
+const MAX_GREP_FILE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +31,14 @@ pub struct FsEntry {
 pub struct FilePayload {
     pub path: String,
     pub contents: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FsSearchResult {
+    pub path: String,
+    pub line_number: Option<u64>,
+    pub line: Option<String>,
 }
 
 #[tauri::command]
@@ -116,6 +130,210 @@ pub fn fs_write_file(
     write_file_in_workspace(&state.workspace_root, &path, &contents)
 }
 
+#[tauri::command]
+pub fn fs_list_files(
+    state: State<'_, AppState>,
+    root: Option<String>,
+    limit: Option<usize>,
+    max_depth: Option<usize>,
+) -> Result<Vec<FsEntry>, String> {
+    let root = resolve_scan_root(&state.workspace_root, root.as_deref())?;
+    let mut files = Vec::new();
+    scan_files(
+        &state.workspace_root,
+        &root,
+        0,
+        clamp_depth(max_depth),
+        clamp_limit(limit),
+        &mut files,
+    )?;
+    Ok(files)
+}
+
+#[tauri::command]
+pub fn fs_search(
+    state: State<'_, AppState>,
+    query: String,
+    root: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<FsSearchResult>, String> {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = resolve_scan_root(&state.workspace_root, root.as_deref())?;
+    let mut files = Vec::new();
+    scan_files(
+        &state.workspace_root,
+        &root,
+        0,
+        DEFAULT_SCAN_DEPTH,
+        clamp_limit(limit),
+        &mut files,
+    )?;
+    Ok(files
+        .into_iter()
+        .filter(|entry| entry.name.to_ascii_lowercase().contains(&query))
+        .take(clamp_limit(limit))
+        .map(|entry| FsSearchResult {
+            path: entry.path,
+            line_number: None,
+            line: None,
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub fn fs_grep(
+    state: State<'_, AppState>,
+    pattern: String,
+    root: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<FsSearchResult>, String> {
+    let pattern = pattern.trim().to_string();
+    if pattern.is_empty() {
+        return Ok(Vec::new());
+    }
+    let limit = clamp_limit(limit);
+    let root = resolve_scan_root(&state.workspace_root, root.as_deref())?;
+    let mut files = Vec::new();
+    scan_files(
+        &state.workspace_root,
+        &root,
+        0,
+        DEFAULT_SCAN_DEPTH,
+        limit.saturating_mul(4).max(limit),
+        &mut files,
+    )?;
+
+    let mut results = Vec::new();
+    for file in files {
+        if results.len() >= limit {
+            break;
+        }
+        let path = PathBuf::from(&file.path);
+        if is_probably_binary(&path)? {
+            continue;
+        }
+        let contents = match std_fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(_) => continue,
+        };
+        for (index, line) in contents.lines().enumerate() {
+            if line.contains(&pattern) {
+                results.push(FsSearchResult {
+                    path: file.path.clone(),
+                    line_number: Some((index + 1) as u64),
+                    line: Some(line.chars().take(500).collect()),
+                });
+                if results.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(results)
+}
+
+#[tauri::command]
+pub fn fs_glob(
+    state: State<'_, AppState>,
+    pattern: String,
+    root: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<FsSearchResult>, String> {
+    let pattern = pattern.trim().to_string();
+    if pattern.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = resolve_scan_root(&state.workspace_root, root.as_deref())?;
+    let mut files = Vec::new();
+    scan_files(
+        &state.workspace_root,
+        &root,
+        0,
+        DEFAULT_SCAN_DEPTH,
+        clamp_limit(limit),
+        &mut files,
+    )?;
+    Ok(files
+        .into_iter()
+        .filter(|entry| glob_match(&pattern, &entry.path) || glob_match(&pattern, &entry.name))
+        .take(clamp_limit(limit))
+        .map(|entry| FsSearchResult {
+            path: entry.path,
+            line_number: None,
+            line: None,
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub fn fs_create_file(
+    state: State<'_, AppState>,
+    path: String,
+    contents: Option<String>,
+) -> Result<FilePayload, String> {
+    let file = resolve_new_file(&state.workspace_root, &path)?;
+    let contents = contents.unwrap_or_default();
+    let mut handle = std_fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&file)
+        .map_err(|error| error.to_string())?;
+    handle
+        .write_all(contents.as_bytes())
+        .map_err(|error| error.to_string())?;
+    Ok(FilePayload {
+        path: file.to_string_lossy().to_string(),
+        contents,
+    })
+}
+
+#[tauri::command]
+pub fn fs_create_dir(state: State<'_, AppState>, path: String) -> Result<FsEntry, String> {
+    let dir = resolve_new_path(&state.workspace_root, &path)?;
+    std_fs::create_dir(&dir).map_err(|error| error.to_string())?;
+    fs_entry_for_path(&dir)
+}
+
+#[tauri::command]
+pub fn fs_rename(state: State<'_, AppState>, from: String, to: String) -> Result<FsEntry, String> {
+    let source = resolve_existing_path(&state.workspace_root, &from)?;
+    let target = resolve_new_path(&state.workspace_root, &to)?;
+    std_fs::rename(&source, &target).map_err(|error| error.to_string())?;
+    fs_entry_for_path(&target)
+}
+
+#[tauri::command]
+pub fn fs_delete(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    delete_path_in_workspace(&state.workspace_root, &path)
+}
+
+fn delete_path_in_workspace(root: &Path, path: &str) -> Result<(), String> {
+    let target = resolve_deletable_path(root, path)?;
+    let metadata = std_fs::symlink_metadata(&target).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || metadata.is_file() {
+        std_fs::remove_file(&target).map_err(|error| error.to_string())
+    } else if metadata.is_dir() {
+        let mut entries = std_fs::read_dir(&target).map_err(|error| error.to_string())?;
+        if entries
+            .next()
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Err(
+                "directory is not empty; recursive delete must go through a future approved action"
+                    .to_string(),
+            );
+        }
+        std_fs::remove_dir(&target).map_err(|error| error.to_string())
+    } else {
+        Err("path is not a file or directory".to_string())
+    }
+}
+
 pub fn resolve_existing_dir(root: &Path, input: &str) -> Result<PathBuf, String> {
     let path = resolve_existing_path(root, input)?;
     if path.is_dir() {
@@ -185,6 +403,191 @@ fn join_workspace_path(root: &Path, input: &str) -> PathBuf {
 pub fn write_file_in_workspace(root: &Path, input: &str, contents: &str) -> Result<(), String> {
     let file = resolve_writable_file(root, input)?;
     atomic_write(&file, contents)
+}
+
+fn resolve_scan_root(root: &Path, input: Option<&str>) -> Result<PathBuf, String> {
+    match input {
+        Some(input) if !input.trim().is_empty() => resolve_existing_dir(root, input),
+        _ => Ok(root.to_path_buf()),
+    }
+}
+
+fn clamp_limit(limit: Option<usize>) -> usize {
+    limit.unwrap_or(DEFAULT_SCAN_LIMIT).clamp(1, MAX_SCAN_LIMIT)
+}
+
+fn clamp_depth(max_depth: Option<usize>) -> usize {
+    max_depth.unwrap_or(DEFAULT_SCAN_DEPTH).min(MAX_SCAN_DEPTH)
+}
+
+fn scan_files(
+    workspace_root: &Path,
+    dir: &Path,
+    depth: usize,
+    max_depth: usize,
+    limit: usize,
+    files: &mut Vec<FsEntry>,
+) -> Result<(), String> {
+    if files.len() >= limit || depth > max_depth {
+        return Ok(());
+    }
+
+    for entry in std_fs::read_dir(dir).map_err(|error| error.to_string())? {
+        if files.len() >= limit {
+            break;
+        }
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        if is_sensitive_name(&name) || is_ignored_scan_dir(&name) {
+            continue;
+        }
+
+        let metadata = std_fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        let resolved = path.canonicalize().map_err(|error| error.to_string())?;
+        ensure_inside_workspace(workspace_root, &resolved)?;
+        ensure_not_sensitive(&resolved)?;
+
+        if metadata.is_dir() {
+            scan_files(
+                workspace_root,
+                &resolved,
+                depth + 1,
+                max_depth,
+                limit,
+                files,
+            )?;
+        } else if metadata.is_file() {
+            files.push(FsEntry {
+                name,
+                path: resolved.to_string_lossy().to_string(),
+                is_dir: false,
+                size: Some(metadata.len()),
+                modified: metadata.modified().ok().and_then(system_time_to_ms),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn is_ignored_scan_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git"
+            | ".slavey"
+            | "node_modules"
+            | "dist"
+            | "build"
+            | "target"
+            | ".next"
+            | ".turbo"
+            | ".cache"
+    )
+}
+
+fn is_probably_binary(path: &Path) -> Result<bool, String> {
+    let metadata = std_fs::metadata(path).map_err(|error| error.to_string())?;
+    if metadata.len() > MAX_GREP_FILE_BYTES {
+        return Ok(true);
+    }
+    let mut file = std_fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut buffer = [0_u8; 1024];
+    let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+    Ok(buffer[..read].contains(&0))
+}
+
+fn glob_match(pattern: &str, value: &str) -> bool {
+    glob_match_bytes(pattern.as_bytes(), value.as_bytes())
+}
+
+fn glob_match_bytes(pattern: &[u8], value: &[u8]) -> bool {
+    let (mut p, mut v) = (0, 0);
+    let mut star = None;
+    let mut match_index = 0;
+
+    while v < value.len() {
+        if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == value[v]) {
+            p += 1;
+            v += 1;
+        } else if p < pattern.len() && pattern[p] == b'*' {
+            star = Some(p);
+            match_index = v;
+            p += 1;
+        } else if let Some(star_index) = star {
+            p = star_index + 1;
+            match_index += 1;
+            v = match_index;
+        } else {
+            return false;
+        }
+    }
+
+    while p < pattern.len() && pattern[p] == b'*' {
+        p += 1;
+    }
+    p == pattern.len()
+}
+
+fn resolve_new_file(root: &Path, input: &str) -> Result<PathBuf, String> {
+    let path = resolve_new_path(root, input)?;
+    if path.extension().is_none() && input.ends_with('/') {
+        return Err("file path is not valid".to_string());
+    }
+    Ok(path)
+}
+
+fn resolve_new_path(root: &Path, input: &str) -> Result<PathBuf, String> {
+    let candidate = join_workspace_path(root, input);
+    ensure_not_sensitive(&candidate)?;
+    if candidate.exists() {
+        return Err("target path already exists".to_string());
+    }
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| "path has no parent".to_string())?;
+    let parent = parent.canonicalize().map_err(|error| error.to_string())?;
+    ensure_inside_workspace(root, &parent)?;
+    ensure_not_sensitive(&parent)?;
+    let file_name = candidate
+        .file_name()
+        .ok_or_else(|| "path has no file name".to_string())?;
+    let resolved = parent.join(file_name);
+    ensure_not_sensitive(&resolved)?;
+    Ok(resolved)
+}
+
+fn resolve_deletable_path(root: &Path, input: &str) -> Result<PathBuf, String> {
+    let candidate = join_workspace_path(root, input);
+    ensure_not_sensitive(&candidate)?;
+    let metadata = std_fs::symlink_metadata(&candidate).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() {
+        let parent = candidate
+            .parent()
+            .ok_or_else(|| "path has no parent".to_string())?
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        ensure_inside_workspace(root, &parent)?;
+        return Ok(candidate);
+    }
+    resolve_existing_path(root, input)
+}
+
+fn fs_entry_for_path(path: &Path) -> Result<FsEntry, String> {
+    let metadata = std_fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    Ok(FsEntry {
+        name: path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string_lossy().to_string()),
+        path: path.to_string_lossy().to_string(),
+        is_dir: metadata.is_dir(),
+        size: metadata.is_file().then_some(metadata.len()),
+        modified: metadata.modified().ok().and_then(system_time_to_ms),
+    })
 }
 
 fn atomic_write(file: &Path, contents: &str) -> Result<(), String> {
@@ -386,5 +789,119 @@ mod tests {
 
         let mode = std_fs::metadata(&script).unwrap().permissions().mode();
         assert_eq!(mode & 0o111, 0o111);
+    }
+
+    #[test]
+    fn scan_rejects_workspace_escape() {
+        let root = test_root("scan-escape");
+
+        let error = resolve_scan_root(&root, Some("../")).unwrap_err();
+
+        assert!(error.contains("outside the workspace"));
+    }
+
+    #[test]
+    fn scan_skips_ignored_directories() {
+        let root = test_root("scan-ignored");
+        std_fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        std_fs::create_dir_all(root.join("src")).unwrap();
+        std_fs::write(root.join("node_modules/pkg/hidden.js"), "no").unwrap();
+        std_fs::write(root.join("src/visible.rs"), "yes").unwrap();
+        let mut files = Vec::new();
+
+        scan_files(&root, &root, 0, DEFAULT_SCAN_DEPTH, 20, &mut files).unwrap();
+
+        let paths = files
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        assert!(paths.iter().any(|path| path.ends_with("visible.rs")));
+        assert!(!paths.iter().any(|path| path.contains("node_modules")));
+    }
+
+    #[test]
+    fn file_ops_create_rename_delete_safe_file() {
+        let root = test_root("file-ops");
+
+        let file = resolve_new_file(&root, "a.txt").unwrap();
+        std_fs::write(&file, "ok").unwrap();
+        let renamed = resolve_new_path(&root, "b.txt").unwrap();
+        std_fs::rename(&file, &renamed).unwrap();
+        let deletable = resolve_deletable_path(&root, "b.txt").unwrap();
+        std_fs::remove_file(deletable).unwrap();
+
+        assert!(!root.join("b.txt").exists());
+    }
+
+    #[test]
+    fn delete_file_is_allowed() {
+        let root = test_root("delete-file");
+        std_fs::write(root.join("delete-me.txt"), "ok").unwrap();
+
+        delete_path_in_workspace(&root, "delete-me.txt").unwrap();
+
+        assert!(!root.join("delete-me.txt").exists());
+    }
+
+    #[test]
+    fn delete_empty_dir_is_allowed() {
+        let root = test_root("delete-empty-dir");
+        std_fs::create_dir(root.join("empty")).unwrap();
+
+        delete_path_in_workspace(&root, "empty").unwrap();
+
+        assert!(!root.join("empty").exists());
+    }
+
+    #[test]
+    fn delete_non_empty_dir_is_rejected() {
+        let root = test_root("delete-non-empty-dir");
+        std_fs::create_dir(root.join("full")).unwrap();
+        std_fs::write(root.join("full/file.txt"), "ok").unwrap();
+
+        let error = delete_path_in_workspace(&root, "full").unwrap_err();
+
+        assert!(error.contains("recursive delete must go through a future approved action"));
+        assert!(root.join("full/file.txt").exists());
+    }
+
+    #[test]
+    fn delete_sensitive_path_is_rejected() {
+        let root = test_root("delete-sensitive");
+        std_fs::write(root.join(".env"), "SECRET=1").unwrap();
+
+        assert!(delete_path_in_workspace(&root, ".env").is_err());
+        assert!(root.join(".env").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_symlink_removes_link_not_outside_target() {
+        let root = test_root("delete-symlink");
+        let outside =
+            std::env::temp_dir().join(format!("slavey-outside-{}.txt", uuid::Uuid::new_v4()));
+        std_fs::write(&outside, "keep").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("outside-link")).unwrap();
+
+        delete_path_in_workspace(&root, "outside-link").unwrap();
+
+        assert!(!root.join("outside-link").exists());
+        assert_eq!(std_fs::read_to_string(&outside).unwrap(), "keep");
+        let _ = std_fs::remove_file(outside);
+    }
+
+    #[test]
+    fn file_ops_block_sensitive_paths() {
+        let root = test_root("file-ops-sensitive");
+
+        assert!(resolve_new_file(&root, ".env").is_err());
+        assert!(resolve_new_path(&root, ".git/config").is_err());
+    }
+
+    #[test]
+    fn glob_match_supports_star_and_question() {
+        assert!(glob_match("*.rs", "main.rs"));
+        assert!(glob_match("file-?.txt", "file-a.txt"));
+        assert!(!glob_match("*.rs", "main.ts"));
     }
 }

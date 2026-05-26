@@ -1,5 +1,6 @@
 use std::{
     fs as std_fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -9,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::{
+    actions::Action,
+    approvals::ApprovalRequest,
     employees::{Employee, EmployeeStatus},
     events::now_ms,
     fs::resolve_existing_dir,
@@ -18,11 +21,21 @@ use crate::{
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistentAppState {
+    #[serde(default)]
     pub workspace_root: String,
+    #[serde(default)]
     pub employees: Vec<Employee>,
+    #[serde(default)]
+    pub actions: Vec<Action>,
+    #[serde(default)]
+    pub approvals: Vec<ApprovalRequest>,
+    #[serde(default)]
     pub selected_employee_id: Option<String>,
+    #[serde(default)]
     pub active_tab: Option<String>,
+    #[serde(default)]
     pub recent_files: Vec<String>,
+    #[serde(default)]
     pub updated_at: u64,
 }
 
@@ -63,11 +76,19 @@ impl PersistenceManager {
         }
     }
 
-    pub fn snapshot(&self, workspace_root: &Path, employees: Vec<Employee>) -> PersistentAppState {
+    pub fn snapshot(
+        &self,
+        workspace_root: &Path,
+        employees: Vec<Employee>,
+        actions: Vec<Action>,
+        approvals: Vec<ApprovalRequest>,
+    ) -> PersistentAppState {
         let ui_state = self.ui_state.lock();
         PersistentAppState {
             workspace_root: workspace_root.to_string_lossy().to_string(),
             employees,
+            actions,
+            approvals,
             selected_employee_id: ui_state.selected_employee_id.clone(),
             active_tab: ui_state.active_tab.clone(),
             recent_files: ui_state.recent_files.clone(),
@@ -75,14 +96,20 @@ impl PersistenceManager {
         }
     }
 
-    pub fn save(&self, workspace_root: &Path, employees: Vec<Employee>) -> Result<(), String> {
-        let snapshot = self.snapshot(workspace_root, employees);
+    pub fn save(
+        &self,
+        workspace_root: &Path,
+        employees: Vec<Employee>,
+        actions: Vec<Action>,
+        approvals: Vec<ApprovalRequest>,
+    ) -> Result<(), String> {
+        let snapshot = self.snapshot(workspace_root, employees, actions, approvals);
         if let Some(parent) = self.path.parent() {
             std_fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         let contents =
             serde_json::to_string_pretty(&snapshot).map_err(|error| error.to_string())?;
-        std_fs::write(&self.path, contents).map_err(|error| error.to_string())
+        atomic_write_json(&self.path, contents.as_bytes())
     }
 
     pub fn update_ui(&self, request: AppStateSaveRequest) {
@@ -91,6 +118,41 @@ impl PersistenceManager {
         ui_state.active_tab = request.active_tab;
         ui_state.recent_files = request.recent_files;
     }
+}
+
+fn atomic_write_json(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "state path has no parent".to_string())?;
+    std_fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "state path has no valid file name".to_string())?;
+    let temp_path = parent.join(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+
+    let result = (|| {
+        let mut file = std_fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|error| error.to_string())?;
+        file.write_all(contents)
+            .map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        drop(file);
+        std_fs::rename(&temp_path, path).map_err(|error| error.to_string())?;
+        if let Ok(parent_dir) = std_fs::File::open(parent) {
+            let _ = parent_dir.sync_all();
+        }
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std_fs::remove_file(&temp_path);
+    }
+
+    result
 }
 
 pub fn load_from_disk(path: &Path) -> Result<Option<PersistentAppState>, String> {
@@ -156,4 +218,71 @@ pub fn app_state_save(
     state.persistence.update_ui(payload);
     state.persist()?;
     Ok(state.snapshot())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::actions::{restore_actions, Action, ActionKind, ActionStatus};
+
+    fn test_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "slavey-persistence-{name}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std_fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn sample_action(status: ActionStatus) -> Action {
+        Action {
+            id: "action-1".to_string(),
+            employee_id: "employee-1".to_string(),
+            kind: ActionKind::ShellCommand,
+            title: "Run command".to_string(),
+            description: "Test command".to_string(),
+            cwd: None,
+            command: Some("sleep 1".to_string()),
+            path: None,
+            contents: None,
+            timeout_secs: 120,
+            approval_id: None,
+            status,
+            output: String::new(),
+            error: None,
+            created_at: 1,
+            updated_at: 1,
+            started_at: Some(2),
+            finished_at: None,
+        }
+    }
+
+    #[test]
+    fn save_and_load_valid_state() {
+        let root = test_root("save-load");
+        let path = root.join("state.json");
+        let manager = PersistenceManager::new(path.clone(), None);
+
+        manager
+            .save(&root, Vec::new(), Vec::new(), Vec::new())
+            .unwrap();
+        let loaded = load_from_disk(&path).unwrap().unwrap();
+
+        assert_eq!(loaded.workspace_root, root.to_string_lossy());
+        assert!(loaded.employees.is_empty());
+        assert!(loaded.actions.is_empty());
+        assert!(loaded.approvals.is_empty());
+    }
+
+    #[test]
+    fn restore_running_actions_as_failed() {
+        let restored = restore_actions(&[sample_action(ActionStatus::Running)]);
+
+        assert_eq!(restored[0].status, ActionStatus::Failed);
+        assert_eq!(
+            restored[0].error.as_deref(),
+            Some("app restarted before action completed")
+        );
+        assert!(restored[0].finished_at.is_some());
+    }
 }

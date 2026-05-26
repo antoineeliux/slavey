@@ -51,6 +51,8 @@ export type AppLog = {
 export type AppStateSnapshot = {
   workspaceRoot: string;
   employees: Employee[];
+  actions?: Action[];
+  approvals?: ApprovalRequest[];
   selectedEmployeeId?: string | null;
   activeTab?: AppTab | null;
   recentFiles: string[];
@@ -63,6 +65,12 @@ export type FsEntry = {
   isDir: boolean;
   size?: number | null;
   modified?: number | null;
+};
+
+export type FsSearchResult = {
+  path: string;
+  lineNumber?: number | null;
+  line?: string | null;
 };
 
 export type FilePayload = {
@@ -158,4 +166,30 @@ export type Action = {
 
 export type ActionUpdatedPayload = {
   action: Action;
+};
+
+export type ManagedProcessStatus = "running" | "exited" | "failed" | "killed";
+
+export type ManagedProcess = {
+  id: string;
+  employeeId?: string | null;
+  title: string;
+  command: string;
+  cwd: string;
+  status: ManagedProcessStatus;
+  exitCode?: number | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type ProcessLogs = {
+  processId: string;
+  baseOffset: number;
+  nextOffset: number;
+  contents: string;
+  truncated: boolean;
+};
+
+export type ProcessUpdatedPayload = {
+  process: ManagedProcess;
 };

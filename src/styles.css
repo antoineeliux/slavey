@@ -507,6 +507,59 @@ select:focus {
   padding: 6px;
 }
 
+.file-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 6px;
+  border-top: 1px solid #242832;
+}
+
+.search-panel {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) 42px;
+  gap: 6px;
+  padding: 6px;
+  border-top: 1px solid #242832;
+}
+
+.search-results {
+  grid-column: 1 / -1;
+  display: grid;
+  max-height: 180px;
+  overflow: auto;
+  gap: 4px;
+}
+
+.search-result {
+  display: grid;
+  min-width: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #cfd5df;
+  cursor: pointer;
+  padding: 5px;
+  text-align: left;
+}
+
+.search-result:hover {
+  background: #20252e;
+}
+
+.search-result span,
+.search-result code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-result code {
+  color: #8e96a6;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+}
+
 .file-row {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);
@@ -691,6 +744,7 @@ select:focus {
 
 .policy-panel,
 .action-panel,
+.process-panel,
 .review-panel {
   display: grid;
   gap: 10px;
@@ -734,6 +788,11 @@ select:focus {
   gap: 8px;
 }
 
+.process-list {
+  display: grid;
+  gap: 8px;
+}
+
 .action-toolbar {
   display: flex;
   gap: 8px;
@@ -741,6 +800,7 @@ select:focus {
 
 .approval-item,
 .action-item,
+.process-item,
 .empty-panel {
   min-width: 0;
   border: 1px solid #303644;
@@ -760,6 +820,11 @@ select:focus {
 }
 
 .action-item {
+  display: grid;
+  gap: 7px;
+}
+
+.process-item {
   display: grid;
   gap: 7px;
 }
@@ -796,7 +861,8 @@ select:focus {
 .approval-item p,
 .approval-item code,
 .action-item p,
-.action-item code {
+.action-item code,
+.process-item code {
   overflow: hidden;
   color: #9ba4b5;
   font-size: 12px;
@@ -805,7 +871,8 @@ select:focus {
 }
 
 .approval-item code,
-.action-item code {
+.action-item code,
+.process-item code {
   color: #f2c14e;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
@@ -817,6 +884,7 @@ select:focus {
 }
 
 .action-item pre,
+.process-item pre,
 .review-block pre {
   max-height: 160px;
   overflow: auto;
