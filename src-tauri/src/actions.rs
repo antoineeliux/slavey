@@ -574,6 +574,10 @@ fn run_action_impl(
     actions: &ActionManager,
     action: &Action,
 ) -> ActionExecutionResult {
+    if action_is_cancelled(actions, &action.id) {
+        return Err(ActionFailure::new("action cancelled"));
+    }
+
     match action.kind {
         ActionKind::ShellCommand => run_shell_action(context, actions, action),
         ActionKind::FileWrite => run_file_write_action(context, action),
@@ -652,6 +656,10 @@ fn run_shell_action(
     let child = Arc::new(Mutex::new(child));
     let cancel = Arc::new(AtomicBool::new(false));
     actions.register_running_process(&action.id, Arc::clone(&child), Arc::clone(&cancel));
+    if action_is_cancelled(actions, &action.id) {
+        actions.cancel_running_process(&action.id);
+        return Err(ActionFailure::new("action cancelled"));
+    }
 
     let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(64);
     spawn_pipe_reader(stdout, sender.clone());
@@ -818,6 +826,12 @@ fn terminate_child(child: &Arc<Mutex<Child>>) {
 
 fn bytes_to_string(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).to_string()
+}
+
+fn action_is_cancelled(actions: &ActionManager, action_id: &str) -> bool {
+    actions
+        .get(action_id)
+        .is_some_and(|action| action.status == ActionStatus::Cancelled)
 }
 
 impl From<ActionKind> for ApprovalKind {
