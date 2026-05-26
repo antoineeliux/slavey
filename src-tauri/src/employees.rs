@@ -10,10 +10,13 @@ use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::{
-    actions::ActionKind,
-    events::{emit_employee_updated, emit_log, now_ms, LogLevel},
+    actions::{ActionKind, ActionManager},
+    approvals::ApprovalManager,
+    events::{emit_employee_updated, emit_log, emit_terminal_session_updated, now_ms, LogLevel},
     fs::resolve_existing_dir,
-    terminal::{TerminalLaunchProfile, DEFAULT_PTY_SIZE},
+    persistence::PersistenceManager,
+    processes::ProcessManager,
+    terminal::{TerminalLaunchProfile, TerminalSessionStore, DEFAULT_PTY_SIZE},
     AppState,
 };
 
@@ -77,6 +80,17 @@ pub struct EmployeeCreateRequest {
 #[derive(Clone, Default)]
 pub struct EmployeeManager {
     employees: Arc<Mutex<HashMap<String, Employee>>>,
+}
+
+#[derive(Clone)]
+struct TerminalPersistContext {
+    workspace_root: PathBuf,
+    employees: EmployeeManager,
+    terminal_sessions: TerminalSessionStore,
+    actions: ActionManager,
+    approvals: ApprovalManager,
+    processes: ProcessManager,
+    persistence: PersistenceManager,
 }
 
 impl EmployeeManager {
@@ -191,6 +205,9 @@ pub fn employee_remove(
     if let Some(removed) = state.employees.remove(&employee_id) {
         if let Some(session_id) = removed.terminal_session_id {
             let _ = state.terminal.kill_session(&session_id);
+            if let Some(record) = state.terminal_sessions.stop(&session_id) {
+                emit_terminal_session_updated(&app, record);
+            }
         }
         emit_log(
             &app,
@@ -236,6 +253,7 @@ fn start_terminal_with_profile(
     }
 
     let cwd = resolve_employee_execution_dir(&state.workspace_root, &employee, None)?;
+    let record_cwd = cwd.to_string_lossy().to_string();
     let starting = state
         .employees
         .update(&employee_id, |employee| {
@@ -245,10 +263,26 @@ fn start_terminal_with_profile(
     emit_employee_updated(&app, starting);
 
     let session_id = format!("term-{}", Uuid::new_v4());
+    let session_record = state.terminal_sessions.create(
+        session_id.clone(),
+        employee_id.clone(),
+        profile,
+        record_cwd,
+    );
     let employees = state.employees.clone();
+    let terminal_sessions = state.terminal_sessions.clone();
     let exit_app = app.clone();
     let exit_employee_id = employee_id.clone();
     let exit_session_id = session_id.clone();
+    let exit_persist_context = TerminalPersistContext {
+        workspace_root: state.workspace_root.clone(),
+        employees: state.employees.clone(),
+        terminal_sessions: state.terminal_sessions.clone(),
+        actions: state.actions.clone(),
+        approvals: state.approvals.clone(),
+        processes: state.processes.clone(),
+        persistence: state.persistence.clone(),
+    };
 
     let launch_result = state.terminal.create_profile_session(
         app.clone(),
@@ -258,6 +292,7 @@ fn start_terminal_with_profile(
         DEFAULT_PTY_SIZE,
         profile,
         move |exit_code| {
+            let exit_code_i32 = i32::try_from(exit_code).unwrap_or(i32::MAX);
             let next_status = if exit_code == 0 {
                 EmployeeStatus::Done
             } else {
@@ -276,6 +311,10 @@ fn start_terminal_with_profile(
                 emit_employee_updated(&exit_app, updated);
             }
 
+            if let Some(record) = terminal_sessions.finish(&exit_session_id, exit_code_i32) {
+                emit_terminal_session_updated(&exit_app, record);
+            }
+
             emit_log(
                 &exit_app,
                 LogLevel::Info,
@@ -284,10 +323,17 @@ fn start_terminal_with_profile(
                     exit_session_id, exit_code
                 ),
             );
+            persist_terminal_snapshot_or_log(&exit_app, &exit_persist_context);
         },
     );
 
     if let Err(error) = launch_result {
+        if let Some(record) = state.terminal_sessions.fail_start(
+            &session_id,
+            format!("failed to start {} terminal", profile.current_command()),
+        ) {
+            emit_terminal_session_updated(&app, record);
+        }
         let failed = state
             .employees
             .update(&employee_id, |employee| {
@@ -305,6 +351,7 @@ fn start_terminal_with_profile(
                 profile.current_command()
             ),
         );
+        persist_or_log(&app, &state);
         return Err(error.to_string());
     }
 
@@ -325,6 +372,7 @@ fn start_terminal_with_profile(
         ),
     );
     emit_employee_updated(&app, running.clone());
+    emit_terminal_session_updated(&app, session_record);
     persist_or_log(&app, &state);
     Ok(running)
 }
@@ -340,13 +388,16 @@ pub fn employee_stop_terminal(
         .get(&employee_id)
         .ok_or_else(|| "employee not found".to_string())?;
 
-    if let Some(session_id) = employee.terminal_session_id {
+    if let Some(session_id) = employee.terminal_session_id.clone() {
         if let Err(error) = state.terminal.kill_session(&session_id) {
             emit_log(
                 &app,
                 LogLevel::Warn,
                 format!("failed to kill terminal session {session_id}: {error}"),
             );
+        }
+        if let Some(record) = state.terminal_sessions.stop(&session_id) {
+            emit_terminal_session_updated(&app, record);
         }
     }
 
@@ -377,6 +428,28 @@ fn persist_or_log(app: &AppHandle, state: &State<'_, AppState>) {
             format!("failed to persist app state: {error}"),
         );
     }
+}
+
+fn persist_terminal_snapshot_or_log(app: &AppHandle, context: &TerminalPersistContext) {
+    if let Err(error) = persist_terminal_snapshot(context) {
+        emit_log(
+            app,
+            LogLevel::Warn,
+            format!("failed to persist terminal state: {error}"),
+        );
+    }
+}
+
+fn persist_terminal_snapshot(context: &TerminalPersistContext) -> Result<(), String> {
+    context.persistence.save(
+        &context.workspace_root,
+        context.employees.list(),
+        context.terminal_sessions.list(),
+        context.actions.list(),
+        context.approvals.list(),
+        context.processes.list(),
+        context.processes.log_snapshots(),
+    )
 }
 
 fn ensure_employee_can_remove(employee: &Employee) -> Result<(), String> {

@@ -6,6 +6,7 @@ use crate::{
     approvals::ApprovalRequest,
     employees::Employee,
     processes::{ManagedProcess, ProcessLogs},
+    terminal::TerminalSessionRecord,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -22,6 +23,12 @@ pub struct TerminalDataPayload {
     pub employee_id: String,
     pub session_id: String,
     pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSessionUpdatedPayload {
+    pub session: TerminalSessionRecord,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,6 +76,13 @@ pub fn emit_terminal_data(
         data,
     };
     let _ = app.emit("terminal:data", payload);
+}
+
+pub fn emit_terminal_session_updated(app: &AppHandle, session: TerminalSessionRecord) {
+    let _ = app.emit(
+        "terminal:session-updated",
+        TerminalSessionUpdatedPayload { session },
+    );
 }
 
 pub fn emit_employee_updated(app: &AppHandle, employee: Employee) {

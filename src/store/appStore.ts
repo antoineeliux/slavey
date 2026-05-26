@@ -23,6 +23,8 @@ import type {
   ProcessUpdatedPayload,
   RolePolicy,
   TerminalDataPayload,
+  TerminalSessionRecord,
+  TerminalSessionUpdatedPayload,
   WorktreeReview,
   WorktreeStatus,
 } from "../types";
@@ -70,12 +72,14 @@ type AppStore = {
   selectedEmployeeId: string | null;
   workspaceRoot: string | null;
   terminalBuffers: Record<string, string>;
+  terminalSessions: TerminalSessionRecord[];
   logs: AppLog[];
   approvals: ApprovalRequest[];
   actions: Action[];
   processes: ManagedProcess[];
   processLogs: Record<string, ProcessLogs>;
   codexCliStatus: CodexCliStatus | null;
+  codexCliStatusLoading: boolean;
   rolePolicies: RolePolicy[];
   worktreeStatuses: Record<string, WorktreeStatus>;
   worktreeDiffs: Record<string, string>;
@@ -100,6 +104,7 @@ type AppStore = {
   startCodexTerminal: (employeeId: string) => Promise<void>;
   stopTerminal: (employeeId: string) => Promise<void>;
   loadCodexCliStatus: () => Promise<void>;
+  loadTerminalSessions: () => Promise<void>;
   createWorktree: (employeeId: string) => Promise<void>;
   removeWorktree: (employeeId: string) => Promise<void>;
   createApproval: (input: CreateApprovalInput) => Promise<void>;
@@ -132,6 +137,7 @@ type AppStore = {
   writeTerminal: (employeeId: string, sessionId: string, input: string) => Promise<void>;
   resizeTerminal: (employeeId: string, sessionId: string, cols: number, rows: number) => Promise<void>;
   appendTerminalData: (payload: TerminalDataPayload) => void;
+  upsertTerminalSession: (session: TerminalSessionRecord) => void;
   upsertEmployee: (employee: Employee) => void;
   upsertApproval: (approval: ApprovalRequest) => void;
   upsertAction: (action: Action) => void;
@@ -148,12 +154,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
   selectedEmployeeId: null,
   workspaceRoot: null,
   terminalBuffers: {},
+  terminalSessions: [],
   logs: [],
   approvals: [],
   actions: [],
   processes: [],
   processLogs: {},
   codexCliStatus: null,
+  codexCliStatusLoading: false,
   rolePolicies: [],
   worktreeStatuses: {},
   worktreeDiffs: {},
@@ -185,7 +193,6 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const actions = await invoke<Action[]>("action_list");
       const processes = await invoke<ManagedProcess[]>("process_list");
       const rolePolicies = await invoke<RolePolicy[]>("employee_role_policies");
-      const codexCliStatus = await invoke<CodexCliStatus>("codex_cli_status");
       const selectedEmployeeId =
         snapshot.selectedEmployeeId &&
         snapshot.employees.some((employee) => employee.id === snapshot.selectedEmployeeId)
@@ -193,6 +200,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
           : snapshot.employees[0]?.id ?? null;
       set({
         employees: snapshot.employees,
+        terminalSessions: snapshot.terminalSessions ?? [],
         selectedEmployeeId,
         workspaceRoot: snapshot.workspaceRoot,
         activeTab: snapshot.activeTab ?? "terminal",
@@ -200,10 +208,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
         approvals,
         actions,
         processes,
-        codexCliStatus,
         rolePolicies,
         backendReady: true,
       });
+      void get().loadCodexCliStatus();
       const selected = snapshot.employees.find((employee) => employee.id === selectedEmployeeId);
       const targetDir = selected?.cwd ?? snapshot.workspaceRoot;
       if (targetDir) {
@@ -218,6 +226,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
     const terminalUnlisten = await listen<TerminalDataPayload>(
       "terminal:data",
       (event) => get().appendTerminalData(event.payload),
+    );
+    const terminalSessionUnlisten = await listen<TerminalSessionUpdatedPayload>(
+      "terminal:session-updated",
+      (event) => get().upsertTerminalSession(event.payload.session),
     );
     const employeeUnlisten = await listen<EmployeeUpdatedPayload>(
       "employee:updated",
@@ -244,6 +256,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     );
     return [
       terminalUnlisten,
+      terminalSessionUnlisten,
       employeeUnlisten,
       approvalUnlisten,
       actionUnlisten,
@@ -297,6 +310,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       const employee = await invoke<Employee>("employee_start_terminal", { employeeId });
       get().upsertEmployee(employee);
+      void get().loadTerminalSessions();
     } catch (error) {
       get().addLog(localLog("error", `start terminal failed: ${formatError(error)}`));
     }
@@ -306,6 +320,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       const employee = await invoke<Employee>("employee_start_codex_terminal", { employeeId });
       get().upsertEmployee(employee);
+      void get().loadTerminalSessions();
     } catch (error) {
       get().addLog(localLog("error", `start Codex failed: ${formatError(error)}`));
       void get().loadCodexCliStatus();
@@ -316,17 +331,36 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       const employee = await invoke<Employee>("employee_stop_terminal", { employeeId });
       get().upsertEmployee(employee);
+      void get().loadTerminalSessions();
     } catch (error) {
       get().addLog(localLog("error", `stop terminal failed: ${formatError(error)}`));
     }
   },
 
   loadCodexCliStatus: async () => {
+    set({ codexCliStatus: null, codexCliStatusLoading: true });
     try {
       const codexCliStatus = await invoke<CodexCliStatus>("codex_cli_status");
-      set({ codexCliStatus });
+      set({ codexCliStatus, codexCliStatusLoading: false });
     } catch (error) {
+      set({
+        codexCliStatus: {
+          available: false,
+          version: null,
+          message: `Codex status failed: ${formatError(error)}`,
+        },
+        codexCliStatusLoading: false,
+      });
       get().addLog(localLog("warn", `Codex status failed: ${formatError(error)}`));
+    }
+  },
+
+  loadTerminalSessions: async () => {
+    try {
+      const terminalSessions = await invoke<TerminalSessionRecord[]>("terminal_session_list");
+      set({ terminalSessions });
+    } catch (error) {
+      get().addLog(localLog("warn", `terminal sessions failed: ${formatError(error)}`));
     }
   },
 
@@ -718,6 +752,28 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }));
   },
 
+  upsertTerminalSession: (session) => {
+    const previous = get().terminalSessions.find((item) => item.sessionId === session.sessionId);
+    set((state) => {
+      const exists = state.terminalSessions.some((item) => item.sessionId === session.sessionId);
+      const terminalSessions = exists
+        ? state.terminalSessions.map((item) =>
+            item.sessionId === session.sessionId ? session : item,
+          )
+        : [...state.terminalSessions, session];
+      terminalSessions.sort((a, b) => a.startedAt - b.startedAt);
+      return { terminalSessions };
+    });
+
+    if (
+      session.profile === "codex" &&
+      session.status !== "running" &&
+      previous?.status !== session.status
+    ) {
+      refreshWorktreeReviewForEmployee(get, session.employeeId);
+    }
+  },
+
   upsertEmployee: (employee) => {
     set((state) => {
       const exists = state.employees.some((item) => item.id === employee.id);
@@ -855,6 +911,19 @@ function parentDir(path: string): string | null {
 
 function reviewFileKey(employeeId: string, path: string): string {
   return `${employeeId}:${path}`;
+}
+
+function refreshWorktreeReviewForEmployee(get: () => AppStore, employeeId: string): void {
+  const employee = get().employees.find((item) => item.id === employeeId);
+  if (!employee?.worktreePath) {
+    return;
+  }
+
+  void Promise.all([
+    get().loadWorktreeStatus(employeeId),
+    get().loadWorktreeReview(employeeId),
+    get().loadWorktreeChangedFiles(employeeId),
+  ]);
 }
 
 function appendBoundedTerminalBuffer(previous: string, chunk: string): string {

@@ -24,6 +24,7 @@ use crate::{
     fs::write_file_in_workspace,
     persistence::PersistenceManager,
     processes::{configure_process_group, shell_command, terminate_process_tree, ProcessManager},
+    terminal::TerminalSessionStore,
     AppState,
 };
 
@@ -408,6 +409,7 @@ pub fn action_run(
         approvals: state.approvals.clone(),
         actions: state.actions.clone(),
         processes: state.processes.clone(),
+        terminal_sessions: state.terminal_sessions.clone(),
         persistence: state.persistence.clone(),
     };
     let actions = state.actions.clone();
@@ -585,6 +587,7 @@ struct ActionRunContext {
     approvals: crate::approvals::ApprovalManager,
     actions: ActionManager,
     processes: ProcessManager,
+    terminal_sessions: TerminalSessionStore,
     persistence: PersistenceManager,
 }
 
@@ -680,6 +683,7 @@ fn persist_context_snapshot(context: &ActionRunContext) -> Result<(), String> {
     context.persistence.save(
         &context.workspace_root,
         context.employees.list(),
+        context.terminal_sessions.list(),
         context.actions.list(),
         context.approvals.list(),
         context.processes.list(),
@@ -970,6 +974,7 @@ mod tests {
                 approvals: ApprovalManager::default(),
                 actions: ActionManager::default(),
                 processes: ProcessManager::default(),
+                terminal_sessions: TerminalSessionStore::default(),
                 persistence: PersistenceManager::new(root.join("state.json"), None),
             },
             employee.id,

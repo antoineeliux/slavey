@@ -16,6 +16,7 @@ use crate::{
     events::now_ms,
     fs::resolve_existing_dir,
     processes::{ManagedProcess, ProcessLogSnapshot},
+    terminal::TerminalSessionRecord,
     AppState,
 };
 
@@ -26,6 +27,8 @@ pub struct PersistentAppState {
     pub workspace_root: String,
     #[serde(default)]
     pub employees: Vec<Employee>,
+    #[serde(default)]
+    pub terminal_sessions: Vec<TerminalSessionRecord>,
     #[serde(default)]
     pub actions: Vec<Action>,
     #[serde(default)]
@@ -85,6 +88,7 @@ impl PersistenceManager {
         &self,
         workspace_root: &Path,
         employees: Vec<Employee>,
+        terminal_sessions: Vec<TerminalSessionRecord>,
         actions: Vec<Action>,
         approvals: Vec<ApprovalRequest>,
         processes: Vec<ManagedProcess>,
@@ -94,6 +98,7 @@ impl PersistenceManager {
         PersistentAppState {
             workspace_root: workspace_root.to_string_lossy().to_string(),
             employees,
+            terminal_sessions,
             actions,
             approvals,
             processes,
@@ -109,6 +114,7 @@ impl PersistenceManager {
         &self,
         workspace_root: &Path,
         employees: Vec<Employee>,
+        terminal_sessions: Vec<TerminalSessionRecord>,
         actions: Vec<Action>,
         approvals: Vec<ApprovalRequest>,
         processes: Vec<ManagedProcess>,
@@ -117,6 +123,7 @@ impl PersistenceManager {
         let snapshot = self.snapshot(
             workspace_root,
             employees,
+            terminal_sessions,
             actions,
             approvals,
             processes,
@@ -304,12 +311,14 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
             )
             .unwrap();
         let loaded = load_from_disk(&path).unwrap().unwrap();
 
         assert_eq!(loaded.workspace_root, root.to_string_lossy());
         assert!(loaded.employees.is_empty());
+        assert!(loaded.terminal_sessions.is_empty());
         assert!(loaded.actions.is_empty());
         assert!(loaded.approvals.is_empty());
         assert!(loaded.processes.is_empty());

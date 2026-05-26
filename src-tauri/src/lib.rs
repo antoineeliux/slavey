@@ -17,12 +17,13 @@ use events::{emit_log, LogLevel};
 use persistence::PersistenceManager;
 use processes::ProcessManager;
 use tauri::Manager;
-use terminal::TerminalManager;
+use terminal::{TerminalManager, TerminalSessionStore};
 
 pub struct AppState {
     pub workspace_root: PathBuf,
     pub employees: EmployeeManager,
     pub terminal: TerminalManager,
+    pub terminal_sessions: TerminalSessionStore,
     pub persistence: PersistenceManager,
     pub approvals: ApprovalManager,
     pub actions: ActionManager,
@@ -34,6 +35,7 @@ impl AppState {
         self.persistence.save(
             &self.workspace_root,
             self.employees.list(),
+            self.terminal_sessions.list(),
             self.actions.list(),
             self.approvals.list(),
             self.processes.list(),
@@ -45,6 +47,7 @@ impl AppState {
         self.persistence.snapshot(
             &self.workspace_root,
             self.employees.list(),
+            self.terminal_sessions.list(),
             self.actions.list(),
             self.approvals.list(),
             self.processes.list(),
@@ -87,10 +90,14 @@ pub fn run() {
             let approvals = ApprovalManager::default();
             let actions = ActionManager::default();
             let processes = ProcessManager::default();
+            let terminal_sessions = TerminalSessionStore::default();
             if let Some(persisted) = &persisted {
                 employees.replace_all(persistence::restore_employees(
                     &workspace_root,
                     &persisted.employees,
+                ));
+                terminal_sessions.replace_all(terminal::restore_terminal_session_records(
+                    &persisted.terminal_sessions,
                 ));
                 approvals.replace_all(persisted.approvals.clone());
                 actions.replace_all(restore_actions(&persisted.actions));
@@ -102,15 +109,26 @@ pub fn run() {
                 LogLevel::Info,
                 format!("workspace root set to {}", workspace_root.display()),
             );
-            app.manage(AppState {
+            let state = AppState {
                 workspace_root,
                 employees,
                 terminal: TerminalManager::default(),
+                terminal_sessions,
                 persistence,
                 approvals,
                 actions,
                 processes,
-            });
+            };
+            if persisted.is_some() {
+                if let Err(error) = state.persist() {
+                    emit_log(
+                        app.handle(),
+                        LogLevel::Warn,
+                        format!("failed to persist restored app state: {error}"),
+                    );
+                }
+            }
+            app.manage(state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -150,6 +168,7 @@ pub fn run() {
             git::git_worktree_unstage_file,
             terminal::terminal_write,
             terminal::terminal_resize,
+            terminal::terminal_session_list,
             terminal::codex_cli_status,
             fs::fs_list_dir,
             fs::fs_list_files,

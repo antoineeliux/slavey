@@ -4,8 +4,10 @@ import {
   Code2,
   FileCode2,
   GitBranch,
+  History,
   ListTree,
   Plus,
+  RefreshCw,
   ShieldQuestion,
   TerminalSquare,
   X,
@@ -15,7 +17,7 @@ import { EmployeeDashboard } from "./components/EmployeeDashboard";
 import { EditorPane } from "./components/EditorPane";
 import { TerminalPane } from "./components/TerminalPane";
 import { useAppStore } from "./store/appStore";
-import type { Action, ApprovalRequest, WorktreeReview } from "./types";
+import type { Action, ApprovalRequest, TerminalSessionRecord, WorktreeReview } from "./types";
 
 export default function App() {
   const activeTab = useAppStore((state) => state.activeTab);
@@ -136,7 +138,9 @@ function EmployeeDetails() {
   const approvals = useAppStore((state) => state.approvals);
   const actions = useAppStore((state) => state.actions);
   const processes = useAppStore((state) => state.processes);
+  const terminalSessions = useAppStore((state) => state.terminalSessions);
   const codexCliStatus = useAppStore((state) => state.codexCliStatus);
+  const codexCliStatusLoading = useAppStore((state) => state.codexCliStatusLoading);
   const rolePolicies = useAppStore((state) => state.rolePolicies);
   const worktreeStatuses = useAppStore((state) => state.worktreeStatuses);
   const worktreeReviews = useAppStore((state) => state.worktreeReviews);
@@ -149,6 +153,7 @@ function EmployeeDetails() {
   const loadWorktreeStatus = useAppStore((state) => state.loadWorktreeStatus);
   const loadWorktreeReview = useAppStore((state) => state.loadWorktreeReview);
   const loadWorktreeChangedFiles = useAppStore((state) => state.loadWorktreeChangedFiles);
+  const loadCodexCliStatus = useAppStore((state) => state.loadCodexCliStatus);
   const startTerminal = useAppStore((state) => state.startTerminal);
   const startCodexTerminal = useAppStore((state) => state.startCodexTerminal);
   const stopTerminal = useAppStore((state) => state.stopTerminal);
@@ -194,6 +199,10 @@ function EmployeeDetails() {
   const employeeProcesses = processes.filter(
     (process) => !process.employeeId || process.employeeId === selectedEmployee.id,
   );
+  const recentSessions = terminalSessions
+    .filter((session) => session.employeeId === selectedEmployee.id)
+    .sort((a, b) => b.startedAt - a.startedAt)
+    .slice(0, 5);
   const rolePolicy = rolePolicies.find((policy) => policy.role === selectedEmployee.role);
 
   return (
@@ -244,12 +253,16 @@ function EmployeeDetails() {
         </div>
         <div>
           <dt>Codex CLI</dt>
-          <dd title={codexCliStatus?.message ?? "Checking Codex CLI"}>
-            {codexCliStatus
-              ? codexCliStatus.available
-                ? codexCliStatus.version ?? "available"
-                : "unavailable"
-              : "checking"}
+          <dd className="codex-status-line" title={codexCliStatus?.message ?? "Checking Codex CLI"}>
+            <span>{codexStatusLabel(codexCliStatus, codexCliStatusLoading)}</span>
+            <button
+              className="icon-button mini"
+              disabled={codexCliStatusLoading}
+              title="Recheck Codex CLI"
+              onClick={() => void loadCodexCliStatus()}
+            >
+              <RefreshCw size={13} />
+            </button>
           </dd>
         </div>
         <div>
@@ -289,7 +302,13 @@ function EmployeeDetails() {
           className="command-button primary"
           disabled={Boolean(selectedEmployee.terminalSessionId) || codexCliStatus?.available !== true}
           onClick={() => void startCodexTerminal(selectedEmployee.id)}
-          title={codexCliStatus?.available === false ? codexCliStatus.message : "Start Codex"}
+          title={
+            codexCliStatus?.available === false
+              ? codexCliStatus.message
+              : codexCliStatusLoading || !codexCliStatus
+                ? "Checking Codex CLI"
+                : "Start Codex"
+          }
         >
           Start Codex
         </button>
@@ -356,6 +375,7 @@ function EmployeeDetails() {
         }
       />
       <ActionPanel employeeId={selectedEmployee.id} cwd={selectedEmployee.cwd} actions={employeeActions} />
+      <TerminalSessionHistory sessions={recentSessions} />
       <ProcessPanel
         processes={employeeProcesses}
         onSpawn={() =>
@@ -382,6 +402,42 @@ function EmployeeDetails() {
         />
       ) : null}
     </div>
+  );
+}
+
+function TerminalSessionHistory({ sessions }: { sessions: TerminalSessionRecord[] }) {
+  return (
+    <section className="session-panel">
+      <div className="section-heading compact-heading">
+        <History size={15} />
+        Sessions
+      </div>
+      {sessions.length === 0 ? (
+        <div className="empty-panel">No terminal sessions yet.</div>
+      ) : (
+        <div className="session-list">
+          {sessions.map((session) => (
+            <div className={`session-item ${session.status}`} key={session.sessionId}>
+              <div className="action-title">
+                <strong>{formatLabel(session.profile)}</strong>
+                <span>{session.status}</span>
+              </div>
+              <code title={session.cwd}>{session.cwd}</code>
+              <div className="session-meta">
+                <span>
+                  {formatTimestamp(session.startedAt)} -{" "}
+                  {session.endedAt ? formatTimestamp(session.endedAt) : "active"}
+                </span>
+                {session.exitCode !== null && session.exitCode !== undefined ? (
+                  <span>exit {session.exitCode}</span>
+                ) : null}
+              </div>
+              {session.message ? <p>{session.message}</p> : null}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -786,6 +842,23 @@ function statusLabel(statusLine: string): string {
 function nextEmployeeName(): string {
   const count = useAppStore.getState().employees.length + 1;
   return `Employee ${count}`;
+}
+
+function codexStatusLabel(
+  status: { available: boolean; version?: string | null } | null,
+  loading: boolean,
+): string {
+  if (loading || !status) {
+    return "checking";
+  }
+  if (!status.available) {
+    return "unavailable";
+  }
+  return status.version ?? "available";
+}
+
+function formatTimestamp(timestamp: number): string {
+  return new Date(timestamp).toLocaleTimeString();
 }
 
 function formatLabel(value: string): string {

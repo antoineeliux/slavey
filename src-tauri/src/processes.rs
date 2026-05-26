@@ -23,6 +23,7 @@ use crate::{
     events::{emit_log, emit_process_log, emit_process_updated, now_ms, LogLevel},
     fs::resolve_existing_dir,
     persistence::PersistenceManager,
+    terminal::TerminalSessionStore,
     AppState,
 };
 
@@ -269,6 +270,7 @@ struct ProcessPersistContext {
     actions: ActionManager,
     approvals: ApprovalManager,
     processes: ProcessManager,
+    terminal_sessions: TerminalSessionStore,
     persistence: PersistenceManager,
 }
 
@@ -341,6 +343,7 @@ pub fn process_spawn(
         actions: state.actions.clone(),
         approvals: state.approvals.clone(),
         processes: state.processes.clone(),
+        terminal_sessions: state.terminal_sessions.clone(),
         persistence: state.persistence.clone(),
     };
 
@@ -518,6 +521,7 @@ fn persist_process_snapshot(context: &ProcessPersistContext) -> Result<(), Strin
     context.persistence.save(
         &context.workspace_root,
         context.employees.list(),
+        context.terminal_sessions.list(),
         context.actions.list(),
         context.approvals.list(),
         context.processes.list(),

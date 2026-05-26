@@ -35,6 +35,26 @@ export type TerminalDataPayload = {
   data: string;
 };
 
+export type TerminalSessionProfile = "shell" | "codex";
+
+export type TerminalSessionStatus = "running" | "exited" | "failed" | "stopped";
+
+export type TerminalSessionRecord = {
+  sessionId: string;
+  employeeId: string;
+  profile: TerminalSessionProfile;
+  cwd: string;
+  status: TerminalSessionStatus;
+  exitCode?: number | null;
+  startedAt: number;
+  endedAt?: number | null;
+  message?: string | null;
+};
+
+export type TerminalSessionUpdatedPayload = {
+  session: TerminalSessionRecord;
+};
+
 export type EmployeeUpdatedPayload = {
   employee: Employee;
 };
@@ -51,6 +71,7 @@ export type AppLog = {
 export type AppStateSnapshot = {
   workspaceRoot: string;
   employees: Employee[];
+  terminalSessions?: TerminalSessionRecord[];
   actions?: Action[];
   approvals?: ApprovalRequest[];
   processes?: ManagedProcess[];
