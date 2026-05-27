@@ -72,6 +72,10 @@ export const createBootstrapSlice: AppStoreSlice<BootstrapSlice> = (_set, get) =
   },
 
   connectEvents: async () => {
+    if (commands.e2eTauriMockEnabled) {
+      return [];
+    }
+
     const terminalUnlisten = await listen<TerminalDataPayload>(
       "terminal:data",
       (event) => get().appendTerminalData(event.payload),

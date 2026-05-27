@@ -8,12 +8,33 @@ MVP desktop app for managing AI coding-agent employees. The app uses Tauri 2, a 
 npm install
 npm run install-hooks
 npm run test:web:run
+npm run test:e2e:run
 npm run check
 npm run dev
 npm run build
 ```
 
 The Tauri app serves the Vite frontend at `http://localhost:1420` during development.
+
+Browser smoke/E2E tests run with Playwright against the Vite app and explicit mock Tauri data:
+
+```sh
+npm run test:e2e:run
+```
+
+For the interactive runner:
+
+```sh
+npm run test:e2e
+```
+
+If Chromium is not installed locally, install it with:
+
+```sh
+npx playwright install chromium
+```
+
+The E2E harness sets `VITE_SLAVEY_E2E=true`, which keeps browser tests on mock workspace, diagnostics, employee, activity, terminal, action, approval, and review data. These tests are app-shell regression smoke tests, not backend validation.
 
 See [Engineering Rules](docs/engineering-rules.md) for validation, Git workflow, and safety standards.
 
