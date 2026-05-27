@@ -416,6 +416,7 @@ function SettingsForm({
 
 function EmployeeDetails() {
   const selectedEmployee = useAppStore((state) => state.selectedEmployee());
+  const employeeActivities = useAppStore((state) => state.employeeActivities);
   const approvals = useAppStore((state) => state.approvals);
   const actions = useAppStore((state) => state.actions);
   const processes = useAppStore((state) => state.processes);
@@ -503,6 +504,7 @@ function EmployeeDetails() {
     .sort((a, b) => b.startedAt - a.startedAt)
     .slice(0, 5);
   const rolePolicy = rolePolicies.find((policy) => policy.role === selectedEmployee.role);
+  const activity = employeeActivities[selectedEmployee.id] ?? null;
 
   return (
     <div className="details-stack">
@@ -514,6 +516,22 @@ function EmployeeDetails() {
         {displayStatus.replace("_", " ")}
       </div>
       <dl className="detail-list">
+        <div>
+          <dt>Activity</dt>
+          <dd title={activity?.details ?? ""}>{activity?.label ?? "unknown"}</dd>
+        </div>
+        <div>
+          <dt>Activity state</dt>
+          <dd>{activity?.status.replaceAll("_", " ") ?? "unknown"}</dd>
+        </div>
+        <div>
+          <dt>Review counts</dt>
+          <dd>
+            {activity
+              ? `${activity.reviewCounts.changedFiles} changed, ${activity.reviewCounts.stagedFiles} staged, ${activity.reviewCounts.untrackedFiles} untracked`
+              : "unknown"}
+          </dd>
+        </div>
         <div>
           <dt>Execution</dt>
           <dd>{selectedEmployee.worktreePath ? "isolated worktree" : "root workspace"}</dd>
@@ -657,6 +675,15 @@ function EmployeeDetails() {
       ) : null}
       {worktreeDisabledReason && !selectedEmployee.worktreePath ? (
         <div className="inline-warning">{worktreeDisabledReason}</div>
+      ) : null}
+      {activity?.blockers.length ? (
+        <div className="handoff-blockers">
+          {activity.blockers.map((blocker) => (
+            <div className="inline-warning" key={blocker}>
+              {blocker}
+            </div>
+          ))}
+        </div>
       ) : null}
       {selectedEmployee.worktreePath && worktreeStatus?.dirty ? (
         <div className="inline-warning">

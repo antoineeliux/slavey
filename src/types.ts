@@ -59,6 +59,41 @@ export type EmployeeUpdatedPayload = {
   employee: Employee;
 };
 
+export type EmployeeActivityStatus =
+  | "idle"
+  | "shell_running"
+  | "codex_running"
+  | "action_pending_approval"
+  | "action_running"
+  | "process_running"
+  | "review_needed"
+  | "handoff_ready"
+  | "blocked"
+  | "stopped";
+
+export type EmployeeReviewCounts = {
+  changedFiles: number;
+  stagedFiles: number;
+  untrackedFiles: number;
+};
+
+export type EmployeeActivity = {
+  employeeId: string;
+  status: EmployeeActivityStatus;
+  label: string;
+  details?: string | null;
+  lastActivityAt?: number | null;
+  activeTerminalSessionId?: string | null;
+  activeActionId?: string | null;
+  activeProcessIds: string[];
+  reviewCounts: EmployeeReviewCounts;
+  blockers: string[];
+};
+
+export type EmployeeActivityUpdatedPayload = {
+  employeeId?: string | null;
+};
+
 export type LogLevel = "info" | "warn" | "error";
 
 export type AppLog = {

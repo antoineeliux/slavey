@@ -12,7 +12,10 @@ use uuid::Uuid;
 use crate::{
     actions::{ActionKind, ActionManager},
     approvals::ApprovalManager,
-    events::{emit_employee_updated, emit_log, emit_terminal_session_updated, now_ms, LogLevel},
+    events::{
+        emit_employee_activity_updated, emit_employee_updated, emit_log,
+        emit_terminal_session_updated, now_ms, LogLevel,
+    },
     fs::resolve_existing_dir,
     persistence::{AppStateSnapshotInput, PersistenceManager},
     processes::ProcessManager,
@@ -219,6 +222,7 @@ pub fn employee_remove(
             LogLevel::Info,
             format!("removed employee {}", removed.name),
         );
+        emit_employee_activity_updated(&app, Some(employee_id));
         persist_or_log(&app, &state);
     }
     Ok(())

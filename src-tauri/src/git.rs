@@ -9,7 +9,7 @@ use tauri::{AppHandle, State};
 
 use crate::{
     employees::{resolve_employee_execution_dir, Employee},
-    events::{emit_employee_updated, emit_log, LogLevel},
+    events::{emit_employee_activity_updated, emit_employee_updated, emit_log, LogLevel},
     fs::resolve_existing_dir,
     AppState,
 };
@@ -450,6 +450,7 @@ pub fn git_worktree_commit_for_employee(
         LogLevel::Info,
         format!("committed worktree changes {}", commit.short_hash),
     );
+    emit_employee_activity_updated(&app, Some(payload.employee_id));
     Ok(commit)
 }
 
@@ -548,6 +549,7 @@ pub fn git_worktree_apply_handoff_for_employee(
         );
     }
 
+    emit_employee_activity_updated(&app, Some(payload.employee_id));
     Ok(result)
 }
 
@@ -558,15 +560,17 @@ pub fn git_worktree_abort_handoff_for_employee(
     employee_id: String,
 ) -> Result<WorktreeHandoffAbortResult, String> {
     let workspace_root = state.workspace_root();
-    let result = abort_handoff_for_paths(employee_id, &workspace_root)?;
+    let result = abort_handoff_for_paths(employee_id.clone(), &workspace_root)?;
     if result.aborted {
         emit_log(&app, LogLevel::Info, "aborted main workspace cherry-pick");
     }
+    emit_employee_activity_updated(&app, Some(employee_id));
     Ok(result)
 }
 
 #[tauri::command]
 pub fn git_worktree_stage_file(
+    app: AppHandle,
     state: State<'_, AppState>,
     employee_id: String,
     path: String,
@@ -574,11 +578,13 @@ pub fn git_worktree_stage_file(
     let (worktree, _) = employee_worktree(&state, &employee_id)?;
     let relative = resolve_worktree_relative_path(&worktree, &path)?;
     run_git(&worktree, &["add", "--", &relative])?;
+    emit_employee_activity_updated(&app, Some(employee_id.clone()));
     git_worktree_review_for_employee(state, employee_id)
 }
 
 #[tauri::command]
 pub fn git_worktree_discard_file_for_employee(
+    app: AppHandle,
     state: State<'_, AppState>,
     employee_id: String,
     path: String,
@@ -591,11 +597,13 @@ pub fn git_worktree_discard_file_for_employee(
     }
 
     run_git(&worktree, &["restore", "--", &relative])?;
+    emit_employee_activity_updated(&app, Some(employee_id.clone()));
     git_worktree_review_for_employee(state, employee_id)
 }
 
 #[tauri::command]
 pub fn git_worktree_delete_untracked_file_for_employee(
+    app: AppHandle,
     state: State<'_, AppState>,
     employee_id: String,
     path: String,
@@ -603,11 +611,13 @@ pub fn git_worktree_delete_untracked_file_for_employee(
     let (worktree, _) = employee_worktree(&state, &employee_id)?;
     let status = parse_status_lines(&run_git(&worktree, &["status", "--porcelain"])?);
     remove_untracked_file(&worktree, &status, &path)?;
+    emit_employee_activity_updated(&app, Some(employee_id.clone()));
     git_worktree_review_for_employee(state, employee_id)
 }
 
 #[tauri::command]
 pub fn git_worktree_unstage_file(
+    app: AppHandle,
     state: State<'_, AppState>,
     employee_id: String,
     path: String,
@@ -615,6 +625,7 @@ pub fn git_worktree_unstage_file(
     let (worktree, _) = employee_worktree(&state, &employee_id)?;
     let relative = resolve_worktree_relative_path(&worktree, &path)?;
     run_git(&worktree, &["restore", "--staged", "--", &relative])?;
+    emit_employee_activity_updated(&app, Some(employee_id.clone()));
     git_worktree_review_for_employee(state, employee_id)
 }
 

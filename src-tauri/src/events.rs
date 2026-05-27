@@ -64,6 +64,12 @@ pub struct ProcessUpdatedPayload {
     pub process: ManagedProcess,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmployeeActivityUpdatedPayload {
+    pub employee_id: Option<String>,
+}
+
 pub fn emit_terminal_data(
     app: &AppHandle,
     employee_id: impl Into<String>,
@@ -79,26 +85,38 @@ pub fn emit_terminal_data(
 }
 
 pub fn emit_terminal_session_updated(app: &AppHandle, session: TerminalSessionRecord) {
+    let employee_id = session.employee_id.clone();
     let _ = app.emit(
         "terminal:session-updated",
         TerminalSessionUpdatedPayload { session },
     );
+    emit_employee_activity_updated(app, Some(employee_id));
 }
 
 pub fn emit_employee_updated(app: &AppHandle, employee: Employee) {
+    let employee_id = employee.id.clone();
     let _ = app.emit("employee:updated", EmployeeUpdatedPayload { employee });
+    emit_employee_activity_updated(app, Some(employee_id));
 }
 
 pub fn emit_approval_updated(app: &AppHandle, approval: ApprovalRequest) {
+    let employee_id = approval.employee_id.clone();
     let _ = app.emit("approval:updated", ApprovalUpdatedPayload { approval });
+    emit_employee_activity_updated(app, Some(employee_id));
 }
 
 pub fn emit_action_updated(app: &AppHandle, action: Action) {
+    let employee_id = action.employee_id.clone();
     let _ = app.emit("action:updated", ActionUpdatedPayload { action });
+    emit_employee_activity_updated(app, Some(employee_id));
 }
 
 pub fn emit_process_updated(app: &AppHandle, process: ManagedProcess) {
+    let employee_id = process.employee_id.clone();
     let _ = app.emit("process:updated", ProcessUpdatedPayload { process });
+    if let Some(employee_id) = employee_id {
+        emit_employee_activity_updated(app, Some(employee_id));
+    }
 }
 
 pub fn emit_process_log(app: &AppHandle, payload: ProcessLogs) {
@@ -113,6 +131,13 @@ pub fn emit_log(app: &AppHandle, level: LogLevel, message: impl Into<String>) {
         timestamp: now_ms(),
     };
     let _ = app.emit("app:log", payload);
+}
+
+pub fn emit_employee_activity_updated(app: &AppHandle, employee_id: Option<String>) {
+    let _ = app.emit(
+        "employee:activity-updated",
+        EmployeeActivityUpdatedPayload { employee_id },
+    );
 }
 
 pub fn now_ms() -> u64 {

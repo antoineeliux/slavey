@@ -8,6 +8,7 @@ const roles: EmployeeRole[] = ["general", "frontend", "backend", "reviewer", "te
 
 export function EmployeeDashboard() {
   const employees = useAppStore((state) => state.employees);
+  const employeeActivities = useAppStore((state) => state.employeeActivities);
   const selectedEmployeeId = useAppStore((state) => state.selectedEmployeeId);
   const approvals = useAppStore((state) => state.approvals);
   const selectEmployee = useAppStore((state) => state.selectEmployee);
@@ -59,6 +60,7 @@ export function EmployeeDashboard() {
               (approval) =>
                 approval.employeeId === employee.id && approval.status === "pending",
             );
+            const activity = employeeActivities[employee.id];
             return (
               <button
                 type="button"
@@ -87,10 +89,21 @@ export function EmployeeDashboard() {
                   <span>{employee.role}</span>
                 </div>
                 <div className="employee-meta">
-                  <span>{employee.status.replace("_", " ")}</span>
+                  <span>{activity?.label ?? employee.status.replace("_", " ")}</span>
                   <span>{employee.worktreePath ? "worktree" : "root"}</span>
-                  <span>{employee.currentCommand ?? "no command"}</span>
+                  <span>{activity?.details ?? employee.currentCommand ?? "no command"}</span>
                 </div>
+                {activity ? (
+                  <div className="employee-activity-line">
+                    <span>{activity.status.replaceAll("_", " ")}</span>
+                    {activity.reviewCounts.changedFiles > 0 ? (
+                      <span>{activity.reviewCounts.changedFiles} changed</span>
+                    ) : null}
+                    {activity.activeProcessIds.length > 0 ? (
+                      <span>{activity.activeProcessIds.length} process</span>
+                    ) : null}
+                  </div>
+                ) : null}
                 <p title={employee.cwd}>{employee.cwd}</p>
                 <code>{employee.terminalSessionId ?? "no session"}</code>
               </div>

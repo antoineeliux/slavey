@@ -4,7 +4,7 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::{
-    events::{emit_log, LogLevel},
+    events::{emit_employee_activity_updated, emit_log, LogLevel},
     git::{current_branch as git_current_branch, git_success, parse_status_lines, run_git},
     persistence::AppSettings,
     terminal::{codex_cli_status_impl, CodexCliStatus},
@@ -66,6 +66,7 @@ pub fn workspace_set_root(
             LogLevel::Info,
             format!("workspace root set to {}", info.workspace_root),
         );
+        emit_employee_activity_updated(&app, None);
     }
 
     Ok(info)

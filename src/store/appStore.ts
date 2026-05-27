@@ -15,6 +15,8 @@ import type {
   ApprovalUpdatedPayload,
   CodexCliStatus,
   Employee,
+  EmployeeActivity,
+  EmployeeActivityUpdatedPayload,
   EmployeeRole,
   EmployeeUpdatedPayload,
   FilePayload,
@@ -82,6 +84,7 @@ type CreateActionInput = {
 
 type AppStore = {
   employees: Employee[];
+  employeeActivities: Record<string, EmployeeActivity>;
   selectedEmployeeId: string | null;
   workspaceRoot: string | null;
   workspaceInfo: WorkspaceInfo | null;
@@ -119,6 +122,8 @@ type AppStore = {
   bootstrap: () => Promise<void>;
   connectEvents: () => Promise<UnlistenFn[]>;
   loadWorkspaceInfo: () => Promise<void>;
+  loadEmployeeActivities: () => Promise<void>;
+  refreshEmployeeActivity: (employeeId: string) => Promise<void>;
   setWorkspaceRoot: (path: string) => Promise<void>;
   clearRecentWorkspaces: () => Promise<void>;
   updateSettings: (settings: AppSettingsUpdate) => Promise<void>;
@@ -183,6 +188,7 @@ type AppStore = {
 
 export const useAppStore = create<AppStore>((set, get) => ({
   employees: [],
+  employeeActivities: {},
   selectedEmployeeId: null,
   workspaceRoot: null,
   workspaceInfo: null,
@@ -233,6 +239,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const approvals = await invoke<ApprovalRequest[]>("approval_list");
       const actions = await invoke<Action[]>("action_list");
       const processes = await invoke<ManagedProcess[]>("process_list");
+      const employeeActivities = await invoke<EmployeeActivity[]>("employee_activity_list");
       const rolePolicies = await invoke<RolePolicy[]>("employee_role_policies");
       const workspaceRoot = workspaceInfo.workspaceRoot || snapshot.workspaceRoot;
       const settings = normalizeSettings(workspaceInfo.settings ?? snapshot.settings);
@@ -243,6 +250,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
           : snapshot.employees[0]?.id ?? null;
       set({
         employees: snapshot.employees,
+        employeeActivities: activitiesByEmployee(employeeActivities),
         terminalSessions: snapshot.terminalSessions ?? [],
         selectedEmployeeId,
         workspaceRoot,
@@ -283,6 +291,17 @@ export const useAppStore = create<AppStore>((set, get) => ({
       "employee:updated",
       (event) => get().upsertEmployee(event.payload.employee),
     );
+    const employeeActivityUnlisten = await listen<EmployeeActivityUpdatedPayload>(
+      "employee:activity-updated",
+      (event) => {
+        const employeeId = event.payload.employeeId;
+        if (employeeId) {
+          void get().refreshEmployeeActivity(employeeId);
+        } else {
+          void get().loadEmployeeActivities();
+        }
+      },
+    );
     const approvalUnlisten = await listen<ApprovalUpdatedPayload>(
       "approval:updated",
       (event) => get().upsertApproval(event.payload.approval),
@@ -306,6 +325,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
       terminalUnlisten,
       terminalSessionUnlisten,
       employeeUnlisten,
+      employeeActivityUnlisten,
       approvalUnlisten,
       actionUnlisten,
       processUnlisten,
@@ -331,6 +351,32 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const message = formatError(error);
       set({ workspaceLoading: false, workspaceError: message });
       get().addLog(localLog("warn", `workspace info failed: ${message}`));
+    }
+  },
+
+  loadEmployeeActivities: async () => {
+    try {
+      const activities = await invoke<EmployeeActivity[]>("employee_activity_list");
+      set({ employeeActivities: activitiesByEmployee(activities) });
+    } catch (error) {
+      get().addLog(localLog("warn", `employee activity failed: ${formatError(error)}`));
+    }
+  },
+
+  refreshEmployeeActivity: async (employeeId) => {
+    try {
+      const activity = await invoke<EmployeeActivity>("employee_activity_get", { employeeId });
+      set((state) => ({
+        employeeActivities: {
+          ...state.employeeActivities,
+          [activity.employeeId]: activity,
+        },
+      }));
+    } catch {
+      set((state) => {
+        const { [employeeId]: _removed, ...employeeActivities } = state.employeeActivities;
+        return { employeeActivities };
+      });
     }
   },
 
@@ -399,11 +445,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
       await invoke("employee_remove", { employeeId });
       set((state) => {
         const employees = state.employees.filter((employee) => employee.id !== employeeId);
+        const { [employeeId]: _activity, ...employeeActivities } = state.employeeActivities;
         const selectedEmployeeId =
           state.selectedEmployeeId === employeeId
             ? employees[0]?.id ?? null
             : state.selectedEmployeeId;
-        return { employees, selectedEmployeeId };
+        return { employees, employeeActivities, selectedEmployeeId };
       });
       await get().persistUiState();
       const selected = get().selectedEmployee();
@@ -1202,6 +1249,7 @@ function resetWorkspaceFrontendState(
 ): void {
   setState({
     employees: [],
+    employeeActivities: {},
     selectedEmployeeId: null,
     workspaceRoot: workspaceInfo.workspaceRoot,
     workspaceInfo,
@@ -1231,6 +1279,10 @@ function resetWorkspaceFrontendState(
     currentDir: workspaceInfo.workspaceRoot,
     openFile: null,
   });
+}
+
+function activitiesByEmployee(activities: EmployeeActivity[]): Record<string, EmployeeActivity> {
+  return Object.fromEntries(activities.map((activity) => [activity.employeeId, activity]));
 }
 
 async function refreshWorktreeReviewForEmployee(

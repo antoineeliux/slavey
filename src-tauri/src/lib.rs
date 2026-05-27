@@ -1,4 +1,5 @@
 mod actions;
+mod activity;
 mod approvals;
 mod employees;
 mod events;
@@ -145,6 +146,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            activity::employee_activity_list,
+            activity::employee_activity_get,
             persistence::app_state_load,
             persistence::app_state_save,
             employees::employee_create,
