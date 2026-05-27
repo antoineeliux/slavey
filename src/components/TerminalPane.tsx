@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
-import { Play, SquareTerminal } from "lucide-react";
+import { History, Pencil, Play, Square, SquareTerminal } from "lucide-react";
 import "@xterm/xterm/css/xterm.css";
 
 import { useAppStore } from "../store/appStore";
+import type { CodexCliStatus, Employee, TerminalSessionRecord } from "../types";
 
 export function TerminalPane() {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -18,9 +19,29 @@ export function TerminalPane() {
   const resizeTerminal = useAppStore((state) => state.resizeTerminal);
   const startTerminal = useAppStore((state) => state.startTerminal);
   const startCodexTerminal = useAppStore((state) => state.startCodexTerminal);
+  const stopTerminalSession = useAppStore((state) => state.stopTerminalSession);
+  const renameTerminalSession = useAppStore((state) => state.renameTerminalSession);
   const settings = useAppStore((state) => state.settings);
   const codexCliStatus = useAppStore((state) => state.codexCliStatus);
+  const terminalSessions = useAppStore((state) => state.terminalSessions);
   const sessionId = selectedEmployee?.terminalSessionId ?? null;
+  const activeSession = useMemo(
+    () =>
+      sessionId
+        ? terminalSessions.find((session) => session.sessionId === sessionId) ?? null
+        : null,
+    [sessionId, terminalSessions],
+  );
+  const recentSessions = useMemo(
+    () =>
+      selectedEmployee
+        ? terminalSessions
+            .filter((session) => session.employeeId === selectedEmployee.id)
+            .sort((a, b) => b.startedAt - a.startedAt)
+            .slice(0, 8)
+        : [],
+    [selectedEmployee?.id, terminalSessions],
+  );
   const buffer = useMemo(
     () => (sessionId ? terminalBuffers[sessionId] ?? "" : ""),
     [sessionId, terminalBuffers],
@@ -126,14 +147,12 @@ export function TerminalPane() {
   }, [resizeTerminal, selectedEmployee?.id, sessionId]);
 
   const defaultProfile = settings.defaultTerminalProfile;
-  const defaultTerminalDisabled =
-    !selectedEmployee ||
-    Boolean(sessionId) ||
-    (defaultProfile === "codex" && codexCliStatus?.available !== true);
-  const defaultTerminalTitle =
-    defaultProfile === "codex" && codexCliStatus?.available === false
-      ? codexCliStatus.message
-      : `Start ${defaultProfile}`;
+  const defaultTerminalDisabledReason = terminalStartDisabledReason(
+    selectedEmployee,
+    sessionId,
+    defaultProfile,
+    codexCliStatus,
+  );
 
   return (
     <div className="terminal-pane">
@@ -141,27 +160,169 @@ export function TerminalPane() {
         <div className="toolbar-title">
           <SquareTerminal size={16} />
           {selectedEmployee ? selectedEmployee.name : "Terminal"}
+          {activeSession ? <span className="toolbar-muted">{activeSession.label}</span> : null}
         </div>
-        <button
-          className="command-button compact"
-          disabled={defaultTerminalDisabled}
-          title={defaultTerminalTitle}
-          onClick={() => {
-            if (!selectedEmployee) {
-              return;
+        <div className="toolbar-actions">
+          <button
+            className="command-button compact"
+            disabled={Boolean(defaultTerminalDisabledReason)}
+            title={defaultTerminalDisabledReason ?? `Start ${defaultProfile}`}
+            onClick={() => {
+              if (!selectedEmployee) {
+                return;
+              }
+              if (defaultProfile === "codex") {
+                void startCodexTerminal(selectedEmployee.id);
+              } else {
+                void startTerminal(selectedEmployee.id);
+              }
+            }}
+          >
+            <Play size={14} />
+            Start {defaultProfile}
+          </button>
+          <button
+            className="command-button compact"
+            disabled={!selectedEmployee || !sessionId}
+            title={sessionId ? "Stop active session" : "No active session"}
+            onClick={() =>
+              selectedEmployee &&
+              sessionId &&
+              void stopTerminalSession(selectedEmployee.id, sessionId)
             }
-            if (defaultProfile === "codex") {
-              void startCodexTerminal(selectedEmployee.id);
-            } else {
-              void startTerminal(selectedEmployee.id);
-            }
-          }}
-        >
-          <Play size={14} />
-          Start {defaultProfile}
-        </button>
+          >
+            <Square size={13} />
+            Stop
+          </button>
+        </div>
       </div>
+      {activeSession ? <ActiveSessionSummary session={activeSession} /> : null}
       <div className="terminal-host" ref={hostRef} />
+      <TerminalSessionPanel
+        activeSessionId={sessionId}
+        sessions={recentSessions}
+        onStop={(session) => void stopTerminalSession(session.employeeId, session.sessionId)}
+        onRename={(session) => {
+          const label = prompt("Session label", session.label);
+          if (label?.trim()) {
+            void renameTerminalSession(session.employeeId, session.sessionId, label);
+          }
+        }}
+      />
     </div>
   );
+}
+
+function ActiveSessionSummary({ session }: { session: TerminalSessionRecord }) {
+  return (
+    <div className="terminal-session-bar">
+      <strong>{session.label}</strong>
+      <span>{formatLabel(session.profile)}</span>
+      <span title={session.cwd}>{session.cwd}</span>
+      <span>started {formatTimestamp(session.startedAt)}</span>
+      {session.lastOutputAt ? <span>output {formatTimestamp(session.lastOutputAt)}</span> : null}
+    </div>
+  );
+}
+
+function TerminalSessionPanel({
+  activeSessionId,
+  sessions,
+  onStop,
+  onRename,
+}: {
+  activeSessionId: string | null;
+  sessions: TerminalSessionRecord[];
+  onStop: (session: TerminalSessionRecord) => void;
+  onRename: (session: TerminalSessionRecord) => void;
+}) {
+  return (
+    <section className="terminal-session-panel">
+      <div className="compact-panel-heading">
+        <span>
+          <History size={14} />
+          Sessions
+        </span>
+      </div>
+      {sessions.length === 0 ? (
+        <div className="empty-line compact">No terminal sessions</div>
+      ) : (
+        <div className="terminal-session-list">
+          {sessions.map((session) => (
+            <div
+              className={
+                session.sessionId === activeSessionId
+                  ? `terminal-session-item active ${session.status}`
+                  : `terminal-session-item ${session.status}`
+              }
+              key={session.sessionId}
+            >
+              <div className="terminal-session-title">
+                <strong title={session.sessionId}>{session.label}</strong>
+                <span>{session.status.replaceAll("_", " ")}</span>
+              </div>
+              <div className="terminal-session-meta">
+                <span>{formatLabel(session.profile)}</span>
+                <span>{formatSessionRange(session)}</span>
+                <span>{session.stopReason?.replaceAll("_", " ") ?? "active"}</span>
+                {session.exitCode !== null && session.exitCode !== undefined ? (
+                  <span>exit {session.exitCode}</span>
+                ) : null}
+              </div>
+              <code title={session.cwd}>{session.cwd}</code>
+              {session.message ? <p>{session.message}</p> : null}
+              <div className="session-actions">
+                <button
+                  className="icon-button mini"
+                  title="Rename session"
+                  onClick={() => onRename(session)}
+                >
+                  <Pencil size={12} />
+                </button>
+                <button
+                  className="icon-button mini"
+                  disabled={session.status !== "running"}
+                  title={session.status === "running" ? "Stop session" : "Session is not running"}
+                  onClick={() => onStop(session)}
+                >
+                  <Square size={12} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function terminalStartDisabledReason(
+  employee: Employee | null,
+  sessionId: string | null,
+  profile: "shell" | "codex",
+  codexCliStatus: CodexCliStatus | null,
+): string | null {
+  if (!employee) {
+    return "Select an employee before starting a terminal";
+  }
+  if (sessionId) {
+    return "Employee already has an active terminal session";
+  }
+  if (profile === "codex" && codexCliStatus?.available !== true) {
+    return codexCliStatus?.message ?? "Codex CLI availability is unknown";
+  }
+  return null;
+}
+
+function formatSessionRange(session: TerminalSessionRecord): string {
+  const end = session.stoppedAt ?? session.endedAt;
+  return `${formatTimestamp(session.startedAt)} - ${end ? formatTimestamp(end) : "active"}`;
+}
+
+function formatTimestamp(timestamp: number): string {
+  return new Date(timestamp).toLocaleTimeString();
+}
+
+function formatLabel(value: string): string {
+  return value.replaceAll("_", " ");
 }

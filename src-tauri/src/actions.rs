@@ -698,7 +698,7 @@ fn persist_context_snapshot(context: &ActionRunContext) -> Result<(), String> {
     context.persistence.save(AppStateSnapshotInput {
         workspace_root,
         employees: context.employees.list(),
-        terminal_sessions: context.terminal_sessions.list(),
+        terminal_sessions: context.terminal_sessions.list(None),
         actions: context.actions.list(),
         approvals: context.approvals.list(),
         processes: context.processes.list(),

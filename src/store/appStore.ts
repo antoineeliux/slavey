@@ -141,8 +141,10 @@ type AppStore = {
   startTerminal: (employeeId: string) => Promise<void>;
   startCodexTerminal: (employeeId: string) => Promise<void>;
   stopTerminal: (employeeId: string) => Promise<void>;
+  stopTerminalSession: (employeeId: string, sessionId: string) => Promise<void>;
+  renameTerminalSession: (employeeId: string, sessionId: string, label: string) => Promise<void>;
   loadCodexCliStatus: () => Promise<void>;
-  loadTerminalSessions: () => Promise<void>;
+  loadTerminalSessions: (employeeId?: string | null) => Promise<void>;
   createWorktree: (employeeId: string) => Promise<void>;
   removeWorktree: (employeeId: string) => Promise<void>;
   createApproval: (input: CreateApprovalInput) => Promise<void>;
@@ -521,6 +523,32 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  stopTerminalSession: async (employeeId, sessionId) => {
+    try {
+      const session = await invoke<TerminalSessionRecord>("terminal_session_stop", {
+        employeeId,
+        sessionId,
+      });
+      get().upsertTerminalSession(session);
+      void get().loadTerminalSessions();
+    } catch (error) {
+      get().addLog(localLog("error", `stop terminal session failed: ${formatError(error)}`));
+    }
+  },
+
+  renameTerminalSession: async (employeeId, sessionId, label) => {
+    try {
+      const session = await invoke<TerminalSessionRecord>("terminal_session_rename", {
+        employeeId,
+        sessionId,
+        label,
+      });
+      get().upsertTerminalSession(session);
+    } catch (error) {
+      get().addLog(localLog("error", `rename terminal session failed: ${formatError(error)}`));
+    }
+  },
+
   loadCodexCliStatus: async () => {
     set({ codexCliStatus: null, codexCliStatusLoading: true });
     try {
@@ -555,10 +583,21 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
-  loadTerminalSessions: async () => {
+  loadTerminalSessions: async (employeeId = null) => {
     try {
-      const terminalSessions = await invoke<TerminalSessionRecord[]>("terminal_session_list");
-      set({ terminalSessions });
+      const terminalSessions = await invoke<TerminalSessionRecord[]>("terminal_session_list", {
+        employeeId,
+      });
+      set((state) => ({
+        terminalSessions: employeeId
+          ? [
+              ...state.terminalSessions.filter(
+                (session) => session.employeeId !== employeeId,
+              ),
+              ...terminalSessions,
+            ].sort((a, b) => a.startedAt - b.startedAt)
+          : terminalSessions,
+      }));
     } catch (error) {
       get().addLog(localLog("warn", `terminal sessions failed: ${formatError(error)}`));
     }

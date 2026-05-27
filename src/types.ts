@@ -39,6 +39,12 @@ export type TerminalSessionProfile = "shell" | "codex";
 
 export type TerminalSessionStatus = "running" | "exited" | "failed" | "stopped";
 
+export type TerminalStopReason =
+  | "user_stopped"
+  | "exited"
+  | "failed_to_start"
+  | "app_restarted";
+
 export type TerminalSessionRecord = {
   sessionId: string;
   employeeId: string;
@@ -48,6 +54,10 @@ export type TerminalSessionRecord = {
   exitCode?: number | null;
   startedAt: number;
   endedAt?: number | null;
+  stoppedAt?: number | null;
+  stopReason?: TerminalStopReason | null;
+  label: string;
+  lastOutputAt?: number | null;
   message?: string | null;
 };
 

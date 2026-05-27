@@ -477,6 +477,15 @@ select:focus {
   gap: 8px;
 }
 
+.toolbar-muted {
+  overflow: hidden;
+  color: #8e96a6;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .command-button {
   min-height: 32px;
   padding: 0 11px;
@@ -509,6 +518,113 @@ select:focus {
 
 .terminal-host .xterm {
   height: 100%;
+}
+
+.terminal-session-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(70px, 0.4fr) minmax(0, 1.5fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 32px;
+  border-bottom: 1px solid #242832;
+  background: #111318;
+  padding: 0 10px;
+  color: #8e96a6;
+  font-size: 11px;
+}
+
+.terminal-session-bar strong,
+.terminal-session-bar span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-session-bar strong {
+  color: #dfe4ec;
+}
+
+.terminal-session-panel {
+  display: grid;
+  max-height: 190px;
+  min-height: 0;
+  gap: 6px;
+  overflow: auto;
+  border-top: 1px solid #242832;
+  background: #13161b;
+  padding: 8px;
+}
+
+.terminal-session-list {
+  display: grid;
+  gap: 6px;
+}
+
+.terminal-session-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 8px;
+  min-width: 0;
+  border: 1px solid #303644;
+  border-radius: 8px;
+  background: #171a21;
+  padding: 8px;
+}
+
+.terminal-session-item.active,
+.session-item.active {
+  border-color: #4ecdc4;
+}
+
+.terminal-session-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.terminal-session-title strong {
+  overflow: hidden;
+  color: #dfe4ec;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-session-title span {
+  color: #8e96a6;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.terminal-session-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 9px;
+  color: #8e96a6;
+  font-size: 11px;
+}
+
+.terminal-session-item code,
+.terminal-session-item p {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: #9ba4b5;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-session-item code {
+  color: #f2c14e;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.session-actions {
+  display: flex;
+  gap: 5px;
+  justify-content: flex-end;
 }
 
 .editor-pane {

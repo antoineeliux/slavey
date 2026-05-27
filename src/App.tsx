@@ -8,10 +8,12 @@ import {
   GitBranch,
   History,
   ListTree,
+  Pencil,
   Plus,
   RefreshCw,
   Settings2,
   ShieldQuestion,
+  Square,
   TerminalSquare,
   X,
 } from "lucide-react";
@@ -444,7 +446,8 @@ function EmployeeDetails() {
   const loadCodexCliStatus = useAppStore((state) => state.loadCodexCliStatus);
   const startTerminal = useAppStore((state) => state.startTerminal);
   const startCodexTerminal = useAppStore((state) => state.startCodexTerminal);
-  const stopTerminal = useAppStore((state) => state.stopTerminal);
+  const stopTerminalSession = useAppStore((state) => state.stopTerminalSession);
+  const renameTerminalSession = useAppStore((state) => state.renameTerminalSession);
   const removeEmployee = useAppStore((state) => state.removeEmployee);
   const spawnProcess = useAppStore((state) => state.spawnProcess);
 
@@ -505,6 +508,9 @@ function EmployeeDetails() {
     .slice(0, 5);
   const rolePolicy = rolePolicies.find((policy) => policy.role === selectedEmployee.role);
   const activity = employeeActivities[selectedEmployee.id] ?? null;
+  const activeSessionReason = selectedEmployee.terminalSessionId
+    ? "Employee already has an active terminal session"
+    : null;
 
   return (
     <div className="details-stack">
@@ -611,6 +617,7 @@ function EmployeeDetails() {
         <button
           className="command-button primary"
           disabled={Boolean(selectedEmployee.terminalSessionId)}
+          title={activeSessionReason ?? "Start shell"}
           onClick={() => void startTerminal(selectedEmployee.id)}
         >
           Start shell
@@ -620,11 +627,12 @@ function EmployeeDetails() {
           disabled={Boolean(selectedEmployee.terminalSessionId) || codexCliStatus?.available !== true}
           onClick={() => void startCodexTerminal(selectedEmployee.id)}
           title={
-            codexCliStatus?.available === false
+            activeSessionReason ??
+            (codexCliStatus?.available === false
               ? codexCliStatus.message
               : codexCliStatusLoading || !codexCliStatus
                 ? "Checking Codex CLI"
-                : "Start Codex"
+                : "Start Codex")
           }
         >
           Start Codex
@@ -632,7 +640,10 @@ function EmployeeDetails() {
         <button
           className="command-button"
           disabled={!selectedEmployee.terminalSessionId}
-          onClick={() => void stopTerminal(selectedEmployee.id)}
+          onClick={() =>
+            selectedEmployee.terminalSessionId &&
+            void stopTerminalSession(selectedEmployee.id, selectedEmployee.terminalSessionId)
+          }
         >
           Stop
         </button>
@@ -705,7 +716,17 @@ function EmployeeDetails() {
         }
       />
       <ActionPanel employeeId={selectedEmployee.id} cwd={selectedEmployee.cwd} actions={employeeActions} />
-      <TerminalSessionHistory sessions={recentSessions} />
+      <TerminalSessionHistory
+        activeSessionId={selectedEmployee.terminalSessionId ?? null}
+        sessions={recentSessions}
+        onStop={(session) => void stopTerminalSession(session.employeeId, session.sessionId)}
+        onRename={(session) => {
+          const label = window.prompt("Session label", session.label);
+          if (label?.trim()) {
+            void renameTerminalSession(session.employeeId, session.sessionId, label);
+          }
+        }}
+      />
       <ProcessPanel
         processes={employeeProcesses}
         onSpawn={() =>
@@ -741,7 +762,17 @@ function EmployeeDetails() {
   );
 }
 
-function TerminalSessionHistory({ sessions }: { sessions: TerminalSessionRecord[] }) {
+function TerminalSessionHistory({
+  activeSessionId,
+  sessions,
+  onStop,
+  onRename,
+}: {
+  activeSessionId: string | null;
+  sessions: TerminalSessionRecord[];
+  onStop: (session: TerminalSessionRecord) => void;
+  onRename: (session: TerminalSessionRecord) => void;
+}) {
   return (
     <section className="session-panel">
       <div className="section-heading compact-heading">
@@ -753,22 +784,50 @@ function TerminalSessionHistory({ sessions }: { sessions: TerminalSessionRecord[
       ) : (
         <div className="session-list">
           {sessions.map((session) => (
-            <div className={`session-item ${session.status}`} key={session.sessionId}>
+            <div
+              className={
+                session.sessionId === activeSessionId
+                  ? `session-item active ${session.status}`
+                  : `session-item ${session.status}`
+              }
+              key={session.sessionId}
+            >
               <div className="action-title">
-                <strong>{formatLabel(session.profile)}</strong>
+                <strong title={session.sessionId}>{session.label}</strong>
                 <span>{session.status}</span>
               </div>
               <code title={session.cwd}>{session.cwd}</code>
               <div className="session-meta">
+                <span>{formatLabel(session.profile)}</span>
                 <span>
                   {formatTimestamp(session.startedAt)} -{" "}
-                  {session.endedAt ? formatTimestamp(session.endedAt) : "active"}
+                  {session.stoppedAt ?? session.endedAt
+                    ? formatTimestamp(session.stoppedAt ?? session.endedAt ?? 0)
+                    : "active"}
                 </span>
+                <span>{session.stopReason?.replaceAll("_", " ") ?? "active"}</span>
                 {session.exitCode !== null && session.exitCode !== undefined ? (
                   <span>exit {session.exitCode}</span>
                 ) : null}
               </div>
               {session.message ? <p>{session.message}</p> : null}
+              <div className="session-actions">
+                <button
+                  className="icon-button mini"
+                  title="Rename session"
+                  onClick={() => onRename(session)}
+                >
+                  <Pencil size={12} />
+                </button>
+                <button
+                  className="icon-button mini"
+                  disabled={session.status !== "running"}
+                  title={session.status === "running" ? "Stop session" : "Session is not running"}
+                  onClick={() => onStop(session)}
+                >
+                  <Square size={12} />
+                </button>
+              </div>
             </div>
           ))}
         </div>

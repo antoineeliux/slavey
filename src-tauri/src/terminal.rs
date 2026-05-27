@@ -15,7 +15,11 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 use crate::{
-    events::{emit_log, emit_terminal_data, LogLevel},
+    employees::EmployeeStatus,
+    events::{
+        emit_employee_updated, emit_log, emit_terminal_data, emit_terminal_session_updated,
+        LogLevel,
+    },
     processes::{configure_process_group, terminate_process_tree},
     AppState,
 };
@@ -24,6 +28,8 @@ const CODEX_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 const CODEX_STATUS_STDOUT_CAP: usize = 8 * 1024;
 const CODEX_STATUS_STDERR_CAP: usize = 8 * 1024;
 const COMMAND_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
+const TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE: usize = 50;
+const TERMINAL_LABEL_MAX_CHARS: usize = 80;
 
 pub const DEFAULT_PTY_SIZE: PtySize = PtySize {
     rows: 30,
@@ -51,6 +57,7 @@ pub struct TerminalProfileSessionRequest<F> {
     pub cwd: PathBuf,
     pub size: PtySize,
     pub profile: TerminalLaunchProfile,
+    pub on_output: Arc<dyn Fn(&str) + Send + Sync>,
     pub on_exit: F,
 }
 
@@ -70,6 +77,15 @@ pub enum TerminalSessionStatus {
     Stopped,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalStopReason {
+    UserStopped,
+    Exited,
+    FailedToStart,
+    AppRestarted,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalSessionRecord {
@@ -81,6 +97,14 @@ pub struct TerminalSessionRecord {
     pub exit_code: Option<i32>,
     pub started_at: u64,
     pub ended_at: Option<u64>,
+    #[serde(default)]
+    pub stopped_at: Option<u64>,
+    #[serde(default)]
+    pub stop_reason: Option<TerminalStopReason>,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub last_output_at: Option<u64>,
     #[serde(default)]
     pub message: Option<String>,
 }
@@ -112,6 +136,13 @@ impl TerminalLaunchProfile {
             TerminalLaunchProfile::Codex => "codex",
         }
     }
+
+    fn display_label(self) -> &'static str {
+        match self {
+            TerminalLaunchProfile::Shell => "Shell",
+            TerminalLaunchProfile::Codex => "Codex",
+        }
+    }
 }
 
 impl TerminalSessionStore {
@@ -132,18 +163,36 @@ impl TerminalSessionStore {
             exit_code: None,
             started_at: now,
             ended_at: None,
+            stopped_at: None,
+            stop_reason: None,
+            label: format!("{} session", profile.display_label()),
+            last_output_at: None,
             message: None,
         };
-        self.records
-            .lock()
-            .insert(record.session_id.clone(), record.clone());
+        let mut records = self.records.lock();
+        records.insert(record.session_id.clone(), record.clone());
+        prune_employee_history(&mut records, &record.employee_id);
         record
     }
 
-    pub fn list(&self) -> Vec<TerminalSessionRecord> {
-        let mut records = self.records.lock().values().cloned().collect::<Vec<_>>();
+    pub fn list(&self, employee_id: Option<&str>) -> Vec<TerminalSessionRecord> {
+        let mut records = self
+            .records
+            .lock()
+            .values()
+            .filter(|record| {
+                employee_id
+                    .map(|employee_id| record.employee_id == employee_id)
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         records.sort_by_key(|record| record.started_at);
         records
+    }
+
+    pub fn get(&self, session_id: &str) -> Option<TerminalSessionRecord> {
+        self.records.lock().get(session_id).cloned()
     }
 
     pub fn has_running(&self) -> bool {
@@ -156,7 +205,15 @@ impl TerminalSessionStore {
     pub fn replace_all(&self, records: Vec<TerminalSessionRecord>) {
         let mut next = HashMap::new();
         for record in records {
+            let record = normalize_session_record(record);
             next.insert(record.session_id.clone(), record);
+        }
+        let employee_ids = next
+            .values()
+            .map(|record| record.employee_id.clone())
+            .collect::<Vec<_>>();
+        for employee_id in employee_ids {
+            prune_employee_history(&mut next, &employee_id);
         }
         *self.records.lock() = next;
     }
@@ -170,17 +227,25 @@ impl TerminalSessionStore {
             session_id,
             TerminalSessionStatus::Failed,
             None,
+            Some(TerminalStopReason::FailedToStart),
             Some(message),
         )
     }
 
     pub fn stop(&self, session_id: &str) -> Option<TerminalSessionRecord> {
-        self.update_terminal_status(
-            session_id,
+        let mut records = self.records.lock();
+        let record = records.get_mut(session_id)?;
+        if record.status != TerminalSessionStatus::Running {
+            return Some(record.clone());
+        }
+        set_terminal_stopped(
+            record,
             TerminalSessionStatus::Stopped,
             None,
-            Some("stopped by user"),
-        )
+            Some(TerminalStopReason::UserStopped),
+            Some("stopped by user".to_string()),
+        );
+        Some(record.clone())
     }
 
     pub fn finish(&self, session_id: &str, exit_code: i32) -> Option<TerminalSessionRecord> {
@@ -195,9 +260,29 @@ impl TerminalSessionStore {
             TerminalSessionStatus::Failed
         };
         record.exit_code = Some(exit_code);
-        record.ended_at = Some(crate::events::now_ms());
+        let now = crate::events::now_ms();
+        record.ended_at = Some(now);
+        record.stopped_at = Some(now);
+        record.stop_reason = Some(TerminalStopReason::Exited);
         record.message = None;
         Some(record.clone())
+    }
+
+    pub fn touch_output(&self, session_id: &str) -> Option<TerminalSessionRecord> {
+        let mut records = self.records.lock();
+        let record = records.get_mut(session_id)?;
+        record.last_output_at = Some(crate::events::now_ms());
+        Some(record.clone())
+    }
+
+    pub fn rename(&self, session_id: &str, label: &str) -> Result<TerminalSessionRecord, String> {
+        let label = cleaned_session_label(label)?;
+        let mut records = self.records.lock();
+        let record = records
+            .get_mut(session_id)
+            .ok_or_else(|| format!("terminal session {session_id} not found"))?;
+        record.label = label;
+        Ok(record.clone())
     }
 
     fn update_terminal_status(
@@ -205,14 +290,18 @@ impl TerminalSessionStore {
         session_id: &str,
         status: TerminalSessionStatus,
         exit_code: Option<i32>,
+        stop_reason: Option<TerminalStopReason>,
         message: Option<impl Into<String>>,
     ) -> Option<TerminalSessionRecord> {
         let mut records = self.records.lock();
         let record = records.get_mut(session_id)?;
-        record.status = status;
-        record.exit_code = exit_code;
-        record.ended_at = Some(crate::events::now_ms());
-        record.message = message.map(Into::into);
+        set_terminal_stopped(
+            record,
+            status,
+            exit_code,
+            stop_reason,
+            message.map(Into::into),
+        );
         Some(record.clone())
     }
 }
@@ -227,13 +316,77 @@ pub fn restore_terminal_session_records(
             if record.status == TerminalSessionStatus::Running {
                 record.status = TerminalSessionStatus::Stopped;
                 record.exit_code = None;
-                record.ended_at = Some(crate::events::now_ms());
+                let now = crate::events::now_ms();
+                record.ended_at = Some(now);
+                record.stopped_at = Some(now);
+                record.stop_reason = Some(TerminalStopReason::AppRestarted);
                 record.message =
                     Some("app restarted before terminal session completed".to_string());
             }
-            record
+            normalize_session_record(record)
         })
         .collect()
+}
+
+fn normalize_session_record(mut record: TerminalSessionRecord) -> TerminalSessionRecord {
+    if record.label.trim().is_empty() {
+        record.label = format!("{} session", record.profile.display_label());
+    }
+    if record.stopped_at.is_none() {
+        record.stopped_at = record.ended_at;
+    }
+    record
+}
+
+fn set_terminal_stopped(
+    record: &mut TerminalSessionRecord,
+    status: TerminalSessionStatus,
+    exit_code: Option<i32>,
+    stop_reason: Option<TerminalStopReason>,
+    message: Option<String>,
+) {
+    let now = crate::events::now_ms();
+    record.status = status;
+    record.exit_code = exit_code;
+    record.ended_at = Some(now);
+    record.stopped_at = Some(now);
+    record.stop_reason = stop_reason;
+    record.message = message;
+}
+
+fn prune_employee_history(records: &mut HashMap<String, TerminalSessionRecord>, employee_id: &str) {
+    let mut employee_records = records
+        .values()
+        .filter(|record| record.employee_id == employee_id)
+        .map(|record| {
+            (
+                record.session_id.clone(),
+                record.started_at,
+                record.status == TerminalSessionStatus::Running,
+            )
+        })
+        .collect::<Vec<_>>();
+    if employee_records.len() <= TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE {
+        return;
+    }
+
+    employee_records.sort_by_key(|record| std::cmp::Reverse(record.1));
+    for (session_id, _started_at, running) in employee_records
+        .into_iter()
+        .skip(TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE)
+    {
+        if !running {
+            records.remove(&session_id);
+        }
+    }
+}
+
+fn cleaned_session_label(label: &str) -> Result<String, String> {
+    let label = label.trim();
+    if label.is_empty() {
+        return Err("terminal session label is required".to_string());
+    }
+    Ok(label.chars().take(TERMINAL_LABEL_MAX_CHARS).collect())
 }
 
 impl TerminalManager {
@@ -256,6 +409,7 @@ impl TerminalManager {
             cwd,
             size,
             profile: TerminalLaunchProfile::Shell,
+            on_output: Arc::new(|_| {}),
             on_exit,
         })
     }
@@ -271,6 +425,7 @@ impl TerminalManager {
             cwd,
             size,
             profile,
+            on_output,
             on_exit,
         } = request;
         let pty_system = native_pty_system();
@@ -304,7 +459,13 @@ impl TerminalManager {
             .lock()
             .insert(session_id.clone(), Arc::clone(&session));
 
-        spawn_reader(app.clone(), employee_id, session_id.clone(), reader);
+        spawn_reader(
+            app.clone(),
+            employee_id,
+            session_id.clone(),
+            reader,
+            Arc::clone(&on_output),
+        );
 
         let sessions = Arc::clone(&self.sessions);
         thread::spawn(move || {
@@ -369,12 +530,15 @@ impl TerminalManager {
         Ok(())
     }
 
-    pub fn kill_session(&self, session_id: &str) -> Result<()> {
-        let session = self
-            .sessions
-            .lock()
-            .remove(session_id)
+    pub fn kill_session_for_employee(&self, employee_id: &str, session_id: &str) -> Result<()> {
+        let mut sessions = self.sessions.lock();
+        let session = sessions
+            .get(session_id)
+            .cloned()
             .with_context(|| format!("terminal session {session_id} not found"))?;
+        ensure_session_owner(&session.employee_id, employee_id)?;
+        sessions.remove(session_id);
+        drop(sessions);
         session
             .killer
             .lock()
@@ -428,6 +592,7 @@ fn spawn_reader(
     employee_id: String,
     session_id: String,
     mut reader: Box<dyn Read + Send>,
+    on_output: Arc<dyn Fn(&str) + Send + Sync>,
 ) {
     thread::spawn(move || {
         let mut buffer = [0_u8; 8192];
@@ -436,6 +601,7 @@ fn spawn_reader(
                 Ok(0) => break,
                 Ok(read) => {
                     let data = String::from_utf8_lossy(&buffer[..read]).to_string();
+                    on_output(&session_id);
                     emit_terminal_data(&app, employee_id.clone(), session_id.clone(), data);
                 }
                 Err(error) => {
@@ -742,8 +908,109 @@ pub fn codex_cli_status() -> CodexCliStatus {
 }
 
 #[tauri::command]
-pub fn terminal_session_list(state: State<'_, AppState>) -> Vec<TerminalSessionRecord> {
-    state.terminal_sessions.list()
+pub fn terminal_session_list(
+    state: State<'_, AppState>,
+    employee_id: Option<String>,
+) -> Vec<TerminalSessionRecord> {
+    state.terminal_sessions.list(employee_id.as_deref())
+}
+
+#[tauri::command]
+pub fn terminal_session_get(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<TerminalSessionRecord, String> {
+    state
+        .terminal_sessions
+        .get(&session_id)
+        .ok_or_else(|| format!("terminal session {session_id} not found"))
+}
+
+#[tauri::command]
+pub fn terminal_session_stop(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    employee_id: String,
+    session_id: String,
+) -> Result<TerminalSessionRecord, String> {
+    let existing = state
+        .terminal_sessions
+        .get(&session_id)
+        .ok_or_else(|| format!("terminal session {session_id} not found"))?;
+    ensure_session_owner(&existing.employee_id, &employee_id).map_err(|error| error.to_string())?;
+
+    if existing.status == TerminalSessionStatus::Running {
+        if let Err(error) = state
+            .terminal
+            .kill_session_for_employee(&employee_id, &session_id)
+        {
+            let message = error.to_string();
+            if message.contains("does not belong") {
+                return Err(message);
+            }
+            emit_log(
+                &app,
+                LogLevel::Warn,
+                format!("failed to kill terminal session {session_id}: {message}"),
+            );
+        }
+    }
+
+    let record = state
+        .terminal_sessions
+        .stop(&session_id)
+        .ok_or_else(|| format!("terminal session {session_id} not found"))?;
+
+    if state
+        .employees
+        .get(&employee_id)
+        .and_then(|employee| employee.terminal_session_id)
+        .as_deref()
+        == Some(session_id.as_str())
+    {
+        if let Some(employee) = state.employees.update(&employee_id, |employee| {
+            employee.status = EmployeeStatus::Stopped;
+            employee.current_command = None;
+            employee.terminal_session_id = None;
+        }) {
+            emit_employee_updated(&app, employee);
+        }
+    }
+
+    emit_terminal_session_updated(&app, record.clone());
+    if let Err(error) = state.persist() {
+        emit_log(
+            &app,
+            LogLevel::Warn,
+            format!("failed to persist terminal session stop: {error}"),
+        );
+    }
+    Ok(record)
+}
+
+#[tauri::command]
+pub fn terminal_session_rename(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    employee_id: String,
+    session_id: String,
+    label: String,
+) -> Result<TerminalSessionRecord, String> {
+    let existing = state
+        .terminal_sessions
+        .get(&session_id)
+        .ok_or_else(|| format!("terminal session {session_id} not found"))?;
+    ensure_session_owner(&existing.employee_id, &employee_id).map_err(|error| error.to_string())?;
+    let record = state.terminal_sessions.rename(&session_id, &label)?;
+    emit_terminal_session_updated(&app, record.clone());
+    if let Err(error) = state.persist() {
+        emit_log(
+            &app,
+            LogLevel::Warn,
+            format!("failed to persist terminal session rename: {error}"),
+        );
+    }
+    Ok(record)
 }
 
 #[tauri::command]
@@ -785,7 +1052,7 @@ mod tests {
         append_capped_bytes, codex_status_from_output, ensure_session_owner,
         restore_terminal_session_records, run_bounded_command, terminal_command_spec,
         BoundedCommandOutput, TerminalLaunchProfile, TerminalSessionRecord, TerminalSessionStatus,
-        TerminalSessionStore,
+        TerminalSessionStore, TerminalStopReason, TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE,
     };
 
     #[test]
@@ -907,7 +1174,32 @@ mod tests {
 
         assert_eq!(finished.status, TerminalSessionStatus::Exited);
         assert_eq!(finished.exit_code, Some(0));
+        assert_eq!(finished.stop_reason, Some(TerminalStopReason::Exited));
         assert!(finished.ended_at.is_some());
+        assert!(finished.stopped_at.is_some());
+    }
+
+    #[test]
+    fn terminal_session_store_lists_gets_and_filters_records() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Shell,
+            "/tmp".to_string(),
+        );
+        store.create(
+            "term-2".to_string(),
+            "employee-2".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+
+        let employee_records = store.list(Some("employee-1"));
+
+        assert_eq!(employee_records.len(), 1);
+        assert_eq!(employee_records[0].session_id, "term-1");
+        assert_eq!(store.get("term-2").unwrap().employee_id, "employee-2");
     }
 
     #[test]
@@ -924,8 +1216,56 @@ mod tests {
         let finish_result = store.finish("term-1", 1);
 
         assert_eq!(stopped.status, TerminalSessionStatus::Stopped);
+        assert_eq!(stopped.stop_reason, Some(TerminalStopReason::UserStopped));
         assert!(finish_result.is_none());
-        assert_eq!(store.list()[0].status, TerminalSessionStatus::Stopped);
+        assert_eq!(store.list(None)[0].status, TerminalSessionStatus::Stopped);
+    }
+
+    #[test]
+    fn stopping_already_stopped_session_is_safe() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Shell,
+            "/tmp".to_string(),
+        );
+        let first_stop = store.stop("term-1").unwrap();
+        let second_stop = store.stop("term-1").unwrap();
+
+        assert_eq!(second_stop.status, TerminalSessionStatus::Stopped);
+        assert_eq!(second_stop.stop_reason, first_stop.stop_reason);
+        assert_eq!(second_stop.stopped_at, first_stop.stopped_at);
+    }
+
+    #[test]
+    fn terminal_session_rename_trims_and_rejects_empty_labels() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Shell,
+            "/tmp".to_string(),
+        );
+
+        let renamed = store.rename("term-1", "  Build watcher  ").unwrap();
+
+        assert_eq!(renamed.label, "Build watcher");
+        assert!(store.rename("term-1", "   ").is_err());
+    }
+
+    #[test]
+    fn terminal_session_history_is_capped_per_employee() {
+        let store = TerminalSessionStore::default();
+        let records = (0..(TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE + 5))
+            .map(|index| sample_session_record("employee-1", index as u64))
+            .collect::<Vec<_>>();
+
+        store.replace_all(records);
+
+        let records = store.list(Some("employee-1"));
+        assert_eq!(records.len(), TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE);
+        assert_eq!(records[0].started_at, 5);
     }
 
     #[test]
@@ -939,14 +1279,42 @@ mod tests {
             exit_code: None,
             started_at: 1,
             ended_at: None,
+            stopped_at: None,
+            stop_reason: None,
+            label: String::new(),
+            last_output_at: None,
             message: None,
         }]);
 
         assert_eq!(restored[0].status, TerminalSessionStatus::Stopped);
         assert_eq!(
+            restored[0].stop_reason,
+            Some(TerminalStopReason::AppRestarted)
+        );
+        assert_eq!(restored[0].label, "Codex session");
+        assert_eq!(
             restored[0].message.as_deref(),
             Some("app restarted before terminal session completed")
         );
         assert!(restored[0].ended_at.is_some());
+        assert!(restored[0].stopped_at.is_some());
+    }
+
+    fn sample_session_record(employee_id: &str, started_at: u64) -> TerminalSessionRecord {
+        TerminalSessionRecord {
+            session_id: format!("term-{started_at}"),
+            employee_id: employee_id.to_string(),
+            profile: TerminalLaunchProfile::Shell,
+            cwd: "/tmp".to_string(),
+            status: TerminalSessionStatus::Stopped,
+            exit_code: None,
+            started_at,
+            ended_at: Some(started_at + 1),
+            stopped_at: Some(started_at + 1),
+            stop_reason: Some(TerminalStopReason::UserStopped),
+            label: "Shell session".to_string(),
+            last_output_at: None,
+            message: None,
+        }
     }
 }

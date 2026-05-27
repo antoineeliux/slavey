@@ -80,7 +80,7 @@ pub fn employee_activity_get(
 pub(crate) fn employee_activity_list_impl(state: &AppState) -> Vec<EmployeeActivity> {
     let workspace_root = state.workspace_root();
     let employees = state.employees.list();
-    let terminal_sessions = state.terminal_sessions.list();
+    let terminal_sessions = state.terminal_sessions.list(None);
     let actions = state.actions.list();
     let approvals = state.approvals.list();
     let processes = state.processes.list();
@@ -103,7 +103,7 @@ pub(crate) fn employee_activity_list_impl(state: &AppState) -> Vec<EmployeeActiv
 fn employee_activity_for_state(state: &AppState, employee_id: &str) -> Option<EmployeeActivity> {
     let employee = state.employees.get(employee_id)?;
     let workspace_root = state.workspace_root();
-    let terminal_sessions = state.terminal_sessions.list();
+    let terminal_sessions = state.terminal_sessions.list(None);
     let actions = state.actions.list();
     let approvals = state.approvals.list();
     let processes = state.processes.list();
@@ -141,10 +141,7 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
         .collect::<Vec<_>>();
 
     let active_terminal = active_terminal_session(employee, &employee_sessions);
-    let active_terminal_session_id = employee
-        .terminal_session_id
-        .clone()
-        .or_else(|| active_terminal.map(|session| session.session_id.clone()));
+    let active_terminal_session_id = active_terminal.map(|session| session.session_id.clone());
     let active_action = employee_actions
         .iter()
         .copied()
@@ -275,11 +272,9 @@ fn active_terminal_session<'a>(
     sessions: &'a [&TerminalSessionRecord],
 ) -> Option<&'a TerminalSessionRecord> {
     if let Some(session_id) = employee.terminal_session_id.as_deref() {
-        if let Some(session) = sessions
-            .iter()
-            .copied()
-            .find(|session| session.session_id == session_id)
-        {
+        if let Some(session) = sessions.iter().copied().find(|session| {
+            session.session_id == session_id && session.status == TerminalSessionStatus::Running
+        }) {
             return Some(session);
         }
     }
@@ -410,9 +405,14 @@ fn last_activity_at(
 ) -> Option<u64> {
     let mut timestamps = vec![employee.updated_at];
     timestamps.extend(sessions.iter().flat_map(|session| {
-        [Some(session.started_at), session.ended_at]
-            .into_iter()
-            .flatten()
+        [
+            Some(session.started_at),
+            session.ended_at,
+            session.stopped_at,
+            session.last_output_at,
+        ]
+        .into_iter()
+        .flatten()
     }));
     timestamps.extend(actions.iter().map(|action| action.updated_at));
     timestamps.extend(
@@ -538,6 +538,30 @@ mod tests {
         let activity = activity(&state, &employee.id);
 
         assert_eq!(activity.status, EmployeeActivityStatus::CodexRunning);
+    }
+
+    #[test]
+    fn stopped_terminal_session_activity_is_not_running() {
+        let root = test_root("stopped-session");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Shell,
+            root.to_string_lossy().to_string(),
+        );
+        state.terminal_sessions.stop(&session.session_id);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Stopped;
+            employee.terminal_session_id = Some(session.session_id.clone());
+            employee.current_command = None;
+        });
+
+        let activity = activity(&state, &employee.id);
+
+        assert_eq!(activity.status, EmployeeActivityStatus::Stopped);
+        assert_eq!(activity.active_terminal_session_id, None);
     }
 
     #[test]

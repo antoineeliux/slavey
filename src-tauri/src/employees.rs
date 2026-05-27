@@ -212,7 +212,9 @@ pub fn employee_remove(
 
     if let Some(removed) = state.employees.remove(&employee_id) {
         if let Some(session_id) = removed.terminal_session_id {
-            let _ = state.terminal.kill_session(&session_id);
+            let _ = state
+                .terminal
+                .kill_session_for_employee(&removed.id, &session_id);
             if let Some(record) = state.terminal_sessions.stop(&session_id) {
                 emit_terminal_session_updated(&app, record);
             }
@@ -281,6 +283,10 @@ fn start_terminal_with_profile(
     );
     let employees = state.employees.clone();
     let terminal_sessions = state.terminal_sessions.clone();
+    let output_terminal_sessions = state.terminal_sessions.clone();
+    let on_output = Arc::new(move |session_id: &str| {
+        let _ = output_terminal_sessions.touch_output(session_id);
+    });
     let exit_app = app.clone();
     let exit_employee_id = employee_id.clone();
     let exit_session_id = session_id.clone();
@@ -303,6 +309,7 @@ fn start_terminal_with_profile(
             cwd,
             size: DEFAULT_PTY_SIZE,
             profile,
+            on_output,
             on_exit: move |exit_code| {
                 let exit_code_i32 = i32::try_from(exit_code).unwrap_or(i32::MAX);
                 let next_status = if exit_code == 0 {
@@ -401,7 +408,10 @@ pub fn employee_stop_terminal(
         .ok_or_else(|| "employee not found".to_string())?;
 
     if let Some(session_id) = employee.terminal_session_id.clone() {
-        if let Err(error) = state.terminal.kill_session(&session_id) {
+        if let Err(error) = state
+            .terminal
+            .kill_session_for_employee(&employee_id, &session_id)
+        {
             emit_log(
                 &app,
                 LogLevel::Warn,
@@ -457,7 +467,7 @@ fn persist_terminal_snapshot(context: &TerminalPersistContext) -> Result<(), Str
     context.persistence.save(AppStateSnapshotInput {
         workspace_root,
         employees: context.employees.list(),
-        terminal_sessions: context.terminal_sessions.list(),
+        terminal_sessions: context.terminal_sessions.list(None),
         actions: context.actions.list(),
         approvals: context.approvals.list(),
         processes: context.processes.list(),

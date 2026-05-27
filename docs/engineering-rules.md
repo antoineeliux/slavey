@@ -41,6 +41,8 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Terminal buffers and process logs must stay bounded.
 - Employee and game UI must use backend employee activity state as the source of truth.
 - Terminal output must not be parsed for status unless a future explicit structured protocol is added.
+- Terminal metadata may be persisted, but raw terminal output must not be persisted unless explicitly bounded and sanitized.
+- Terminal operations must validate employeeId and sessionId ownership at the backend boundary.
 - Future employee and game UI should be a presentation layer over backend state, not a second source of truth.
 
 ## Module-Size Rules

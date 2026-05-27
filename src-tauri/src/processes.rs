@@ -535,7 +535,7 @@ fn persist_process_snapshot(context: &ProcessPersistContext) -> Result<(), Strin
     context.persistence.save(AppStateSnapshotInput {
         workspace_root,
         employees: context.employees.list(),
-        terminal_sessions: context.terminal_sessions.list(),
+        terminal_sessions: context.terminal_sessions.list(None),
         actions: context.actions.list(),
         approvals: context.approvals.list(),
         processes: context.processes.list(),

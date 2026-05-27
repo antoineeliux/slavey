@@ -430,6 +430,10 @@ mod tests {
             exit_code: None,
             started_at: 1,
             ended_at: Some(2),
+            stopped_at: Some(2),
+            stop_reason: Some(crate::terminal::TerminalStopReason::UserStopped),
+            label: "Shell session".to_string(),
+            last_output_at: None,
             message: Some("stopped".to_string()),
         }
     }
@@ -586,7 +590,7 @@ mod tests {
         assert_eq!(info.workspace_root, next.to_string_lossy());
         assert_eq!(state.workspace_root(), next);
         assert!(state.employees.list().is_empty());
-        assert!(state.terminal_sessions.list().is_empty());
+        assert!(state.terminal_sessions.list(None).is_empty());
         assert!(state.actions.list().is_empty());
         assert!(state.approvals.list().is_empty());
         assert!(state.processes.list().is_empty());

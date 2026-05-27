@@ -60,7 +60,7 @@ impl AppState {
         AppStateSnapshotInput {
             workspace_root: self.workspace_root(),
             employees: self.employees.list(),
-            terminal_sessions: self.terminal_sessions.list(),
+            terminal_sessions: self.terminal_sessions.list(None),
             actions: self.actions.list(),
             approvals: self.approvals.list(),
             processes: self.processes.list(),
@@ -194,6 +194,9 @@ pub fn run() {
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_session_list,
+            terminal::terminal_session_get,
+            terminal::terminal_session_stop,
+            terminal::terminal_session_rename,
             terminal::codex_cli_status,
             workspace::workspace_info,
             workspace::workspace_set_root,
