@@ -308,23 +308,29 @@ function CodeMirrorEditor({
           EditorView.theme({
             "&": {
               height: "100%",
-              backgroundColor: "#111317",
-              color: "#d9dee8",
+              backgroundColor: "#2d353b",
+              color: "#d3c6aa",
               fontSize: "13px",
             },
             ".cm-scroller": {
               fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
             },
             ".cm-gutters": {
-              backgroundColor: "#151820",
-              color: "#707887",
-              borderRight: "1px solid #252a34",
+              backgroundColor: "#232a2e",
+              color: "#7a8478",
+              borderRight: "1px solid #3d484d",
             },
             ".cm-activeLine": {
-              backgroundColor: "#1a202b",
+              backgroundColor: "#343f44",
             },
             ".cm-activeLineGutter": {
-              backgroundColor: "#202735",
+              backgroundColor: "#3d484d",
+            },
+            "&.cm-focused": {
+              outline: "none",
+            },
+            ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
+              backgroundColor: "#514045",
             },
           }),
           EditorView.updateListener.of((update) => {
