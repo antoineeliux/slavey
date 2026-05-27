@@ -195,6 +195,109 @@ export type RepoHealth = {
   codexCliStatus: CodexCliStatus;
 };
 
+export type DiagnosticsCounts = {
+  employees: number;
+  activeTerminalSessions: number;
+  recentTerminalSessions: number;
+  actionsByStatus: Record<string, number>;
+  approvalsByStatus: Record<string, number>;
+  managedProcessesByStatus: Record<string, number>;
+  recentFiles: number;
+};
+
+export type DiagnosticsSummary = {
+  appVersion: string;
+  os: string;
+  arch: string;
+  workspaceSelected: boolean;
+  workspacePath?: string | null;
+  workspaceExists: boolean;
+  workspaceIsGitRepo: boolean;
+  gitUserNameConfigured: boolean;
+  gitUserEmailConfigured: boolean;
+  codexCliAvailable: boolean;
+  codexCliVersion?: string | null;
+  codexCliMessage: string;
+  counts: DiagnosticsCounts;
+  healthFlags: string[];
+  blockers: string[];
+};
+
+export type DiagnosticsWorkspaceInfo = {
+  workspacePath?: string | null;
+  workspaceExists: boolean;
+  isGitRepo: boolean;
+  repoRoot?: string | null;
+  currentBranch?: string | null;
+  dirty: boolean;
+  gitUserNameConfigured: boolean;
+  gitUserEmailConfigured: boolean;
+  worktreeSupported: boolean;
+  worktreeBlockers: string[];
+  handoffBlockers: string[];
+  switchBlockers: string[];
+  codexCliStatus: CodexCliStatus;
+};
+
+export type DiagnosticsActionMetadata = {
+  id: string;
+  employeeId: string;
+  kind: ActionKind;
+  title: string;
+  description: string;
+  cwd?: string | null;
+  path?: string | null;
+  source: ActionSource;
+  timeoutSecs: number;
+  outputCapBytes: number;
+  approvalId?: string | null;
+  status: ActionStatus;
+  error?: string | null;
+  failureReason?: ActionFailureReason | null;
+  cancellationReason?: string | null;
+  createdAt: number;
+  updatedAt: number;
+  startedAt?: number | null;
+  finishedAt?: number | null;
+};
+
+export type DiagnosticsApprovalMetadata = {
+  id: string;
+  employeeId: string;
+  actionId?: string | null;
+  kind: ApprovalKind;
+  title: string;
+  description: string;
+  path?: string | null;
+  cwd?: string | null;
+  status: ApprovalStatus;
+  createdAt: number;
+  resolvedAt?: number | null;
+};
+
+export type DiagnosticsProcessMetadata = {
+  id: string;
+  employeeId?: string | null;
+  title: string;
+  cwd: string;
+  status: ManagedProcessStatus;
+  exitCode?: number | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type DiagnosticsExportBundle = {
+  generatedAt: number;
+  summary: DiagnosticsSummary;
+  settings: AppSettings;
+  workspace: DiagnosticsWorkspaceInfo;
+  actions: DiagnosticsActionMetadata[];
+  approvals: DiagnosticsApprovalMetadata[];
+  terminalSessions: TerminalSessionRecord[];
+  processes: DiagnosticsProcessMetadata[];
+  notes: string[];
+};
+
 export type WorktreeStatus = {
   employeeId: string;
   hasWorktree: boolean;

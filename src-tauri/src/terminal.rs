@@ -33,11 +33,9 @@ const TERMINAL_LABEL_MAX_CHARS: usize = 80;
 
 mod session_store;
 
-#[cfg(test)]
-pub(crate) use self::session_store::TerminalStopReason;
 pub(crate) use self::session_store::{
     restore_terminal_session_records, TerminalSessionRecord, TerminalSessionStatus,
-    TerminalSessionStore,
+    TerminalSessionStore, TerminalStopReason,
 };
 
 pub const DEFAULT_PTY_SIZE: PtySize = PtySize {

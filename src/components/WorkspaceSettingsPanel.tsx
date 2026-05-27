@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FolderOpen, History, RefreshCw, Settings2 } from "lucide-react";
+import { Clipboard, FolderOpen, History, RefreshCw, Settings2, ShieldCheck } from "lucide-react";
 
+import * as commands from "../lib/tauriCommands";
 import { useAppStore } from "../store/appStore";
-import type { AppSettings, RepoHealth } from "../types";
+import type { AppSettings, DiagnosticsSummary, RepoHealth } from "../types";
 import { codexStatusLabel, identityLabel } from "./panelUtils";
 
 export function WorkspaceSettingsPanel() {
@@ -19,12 +20,60 @@ export function WorkspaceSettingsPanel() {
   const updateSettings = useAppStore((state) => state.updateSettings);
   const addLog = useAppStore((state) => state.addLog);
   const [pathInput, setPathInput] = useState(workspaceRoot ?? "");
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsSummary | null>(null);
+  const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
+  const [diagnosticsMessage, setDiagnosticsMessage] = useState<string | null>(null);
 
   useEffect(() => {
     setPathInput(workspaceRoot ?? "");
   }, [workspaceRoot]);
 
+  useEffect(() => {
+    void loadDiagnostics();
+  }, []);
+
   const health = workspaceInfo?.repoHealth ?? null;
+
+  const loadDiagnostics = async () => {
+    setDiagnosticsLoading(true);
+    setDiagnosticsMessage(null);
+    try {
+      setDiagnostics(await commands.diagnosticsSummary());
+    } catch (error) {
+      const message = String(error);
+      setDiagnosticsMessage(message);
+      addLog({
+        id: crypto.randomUUID(),
+        level: "warn",
+        message: `diagnostics failed: ${message}`,
+        timestamp: Date.now(),
+      });
+    } finally {
+      setDiagnosticsLoading(false);
+    }
+  };
+
+  const copyDiagnostics = async () => {
+    setDiagnosticsLoading(true);
+    setDiagnosticsMessage(null);
+    try {
+      const bundle = await commands.diagnosticsExportBundle();
+      await navigator.clipboard.writeText(JSON.stringify(bundle, null, 2));
+      setDiagnostics(bundle.summary);
+      setDiagnosticsMessage("Diagnostics copied.");
+    } catch (error) {
+      const message = String(error);
+      setDiagnosticsMessage(message);
+      addLog({
+        id: crypto.randomUUID(),
+        level: "warn",
+        message: `copy diagnostics failed: ${message}`,
+        timestamp: Date.now(),
+      });
+    } finally {
+      setDiagnosticsLoading(false);
+    }
+  };
 
   const pickWorkspace = async () => {
     try {
@@ -155,6 +204,14 @@ export function WorkspaceSettingsPanel() {
           </section>
 
           <SettingsForm settings={settings} onChange={updateSettings} />
+
+          <DiagnosticsSection
+            diagnostics={diagnostics}
+            loading={diagnosticsLoading}
+            message={diagnosticsMessage}
+            onRefresh={loadDiagnostics}
+            onCopy={copyDiagnostics}
+          />
         </div>
       </section>
     </div>
@@ -256,6 +313,94 @@ function SettingsForm({
           />
         </label>
       </div>
+    </section>
+  );
+}
+
+function DiagnosticsSection({
+  diagnostics,
+  loading,
+  message,
+  onRefresh,
+  onCopy,
+}: {
+  diagnostics: DiagnosticsSummary | null;
+  loading: boolean;
+  message: string | null;
+  onRefresh: () => Promise<void>;
+  onCopy: () => Promise<void>;
+}) {
+  const counts = diagnostics?.counts;
+  return (
+    <section className="settings-section diagnostics-section">
+      <div className="section-heading compact-heading">
+        <ShieldCheck size={15} />
+        Diagnostics
+      </div>
+      <div className="settings-grid diagnostics-grid">
+        <span>App</span>
+        <strong>
+          {diagnostics ? `${diagnostics.appVersion} (${diagnostics.os}/${diagnostics.arch})` : "not loaded"}
+        </strong>
+        <span>Workspace</span>
+        <strong title={diagnostics?.workspacePath ?? ""}>
+          {diagnostics?.workspacePath ?? "unknown"}
+        </strong>
+        <span>Repo</span>
+        <strong>{diagnostics?.workspaceIsGitRepo ? "git repo" : "not a git repo"}</strong>
+        <span>Employees</span>
+        <strong>{counts?.employees ?? 0}</strong>
+        <span>Terminals</span>
+        <strong>
+          {counts ? `${counts.activeTerminalSessions} active / ${counts.recentTerminalSessions} recent` : "0"}
+        </strong>
+        <span>Recent files</span>
+        <strong>{counts?.recentFiles ?? 0}</strong>
+        <span>Codex CLI</span>
+        <strong title={diagnostics?.codexCliMessage ?? ""}>
+          {diagnostics?.codexCliAvailable
+            ? diagnostics.codexCliVersion ?? "available"
+            : "unavailable"}
+        </strong>
+      </div>
+      {diagnostics?.healthFlags.length ? (
+        <div className="diagnostics-flags">
+          {diagnostics.healthFlags.map((flag) => (
+            <span key={flag}>{flag}</span>
+          ))}
+        </div>
+      ) : null}
+      {diagnostics?.blockers.length ? (
+        <div className="handoff-blockers">
+          {diagnostics.blockers.map((blocker) => (
+            <div className="inline-warning" key={blocker}>
+              {blocker}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <div className="diagnostics-actions">
+        <button
+          className="command-button compact"
+          disabled={loading}
+          onClick={() => void onRefresh()}
+        >
+          <RefreshCw size={14} />
+          Refresh
+        </button>
+        <button
+          className="command-button compact"
+          disabled={loading}
+          onClick={() => void onCopy()}
+        >
+          <Clipboard size={14} />
+          Copy diagnostics JSON
+        </button>
+      </div>
+      <p className="diagnostics-note">
+        Local-only export. Secrets, terminal output, environment variables, raw logs, and file-write contents are excluded.
+      </p>
+      {message ? <div className="inline-warning subtle-warning">{message}</div> : null}
     </section>
   );
 }

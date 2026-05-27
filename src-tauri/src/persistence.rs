@@ -236,6 +236,10 @@ impl PersistenceManager {
         self.ui_state.lock().recent_workspaces.clone()
     }
 
+    pub fn recent_files_count(&self) -> usize {
+        self.ui_state.lock().recent_files.len()
+    }
+
     pub fn note_recent_workspace(&self, workspace_root: &Path) -> Vec<String> {
         let path = workspace_root.to_string_lossy().to_string();
         let mut ui_state = self.ui_state.lock();

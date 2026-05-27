@@ -1,6 +1,7 @@
 mod actions;
 mod activity;
 mod approvals;
+mod diagnostics;
 mod employees;
 mod events;
 mod fs;
@@ -150,6 +151,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             activity::employee_activity_list,
             activity::employee_activity_get,
+            diagnostics::diagnostics_summary,
+            diagnostics::diagnostics_export_bundle,
             persistence::app_state_load,
             persistence::app_state_save,
             employees::employee_create,

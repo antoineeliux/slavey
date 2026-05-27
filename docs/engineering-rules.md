@@ -55,6 +55,10 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Future animated/game UI should live behind component boundaries and consume backend activity state.
 - Terminal metadata may be persisted, but raw terminal output must not be persisted unless explicitly bounded and sanitized.
 - Terminal operations must validate employeeId and sessionId ownership at the backend boundary.
+- Diagnostics and support bundles are opt-in, local-only, and redacted by default.
+- Diagnostics must never include terminal output, environment variables, credentials, tokens, raw process logs, or file-write contents.
+- Tauri capabilities should remain minimal; do not add shell, filesystem, HTTP, clipboard, or broader plugin permissions without a dedicated security review.
+- The Tauri CSP should stay explicit. The current inline-style exception is for the existing webview UI/runtime style injection and should be revisited before adding a new visual system.
 - Future employee and game UI should be a presentation layer over backend state, not a second source of truth.
 
 ## Module-Size Rules

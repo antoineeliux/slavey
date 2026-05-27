@@ -8,6 +8,8 @@ import type {
   AppStateSnapshot,
   ApprovalRequest,
   CodexCliStatus,
+  DiagnosticsExportBundle,
+  DiagnosticsSummary,
   Employee,
   EmployeeActivity,
   EmployeeRole,
@@ -165,6 +167,14 @@ export function terminalResize(
 
 export function codexCliStatus(): Promise<CodexCliStatus> {
   return invoke("codex_cli_status");
+}
+
+export function diagnosticsSummary(): Promise<DiagnosticsSummary> {
+  return invoke("diagnostics_summary");
+}
+
+export function diagnosticsExportBundle(): Promise<DiagnosticsExportBundle> {
+  return invoke("diagnostics_export_bundle");
 }
 
 export function approvalList(): Promise<ApprovalRequest[]> {
