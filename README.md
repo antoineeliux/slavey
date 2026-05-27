@@ -1,6 +1,17 @@
 # Slavey
 
-MVP desktop app for managing AI coding-agent employees. The app uses Tauri 2, a Rust backend, React + TypeScript, xterm.js, CodeMirror 6, and a small Zustand store.
+Release-candidate MVP desktop app for managing local AI coding-agent employees. Slavey uses Tauri 2, a Rust backend, React + TypeScript, Vite, xterm.js, CodeMirror 6, and a Zustand store.
+
+## Current MVP
+
+- Open and switch local workspaces with visible repo health, Codex CLI availability, Git identity blockers, diagnostics, and recent workspaces.
+- Create, select, and remove employees, optionally backed by Git worktrees.
+- Start Shell or Codex terminal sessions per employee with structured session history and ownership checks.
+- Use the file tree, recent files, search, and editor with dirty-state and save-conflict messaging.
+- Review employee worktree changes grouped by conflicted, staged, unstaged, and untracked files.
+- Commit employee worktree changes and run explicit handoff preflight/apply/abort flows without push or PR automation.
+- Track actions, approvals, managed processes, logs, and diagnostics without persisting raw terminal output or secrets.
+- See the animated employee command floor driven by backend-shaped `EmployeeActivity` plus structured actions, approvals, terminal sessions, reviews, handoffs, and processes.
 
 ## Development
 
@@ -15,6 +26,14 @@ npm run build
 ```
 
 The Tauri app serves the Vite frontend at `http://localhost:1420` during development.
+
+Use these commands for release-candidate validation:
+
+```sh
+npm run check
+npm run test:e2e:run
+npm run build
+```
 
 Browser smoke/E2E tests run with Playwright against the Vite app and explicit mock Tauri data:
 
@@ -50,10 +69,9 @@ SLAVEY_WORKSPACE_ROOT=/path/to/workspace npm run dev
 
 On Unix/macOS, structured actions and managed background processes are spawned in a new session/process group, and cancellation attempts to terminate the full group. On Windows, process cleanup currently terminates the direct child process only; full process-tree cleanup should use Job Objects in a later phase.
 
-## Future Milestones
+## Remaining Limitations
 
-1. Codex CLI launch per employee.
-2. Git worktree per employee.
-3. Approval gates before risky commands.
-4. Diff and review UI.
-5. Real animated character assets.
+- No push, pull request, or remote hosting automation.
+- Handoff conflicts are surfaced for manual resolution; Slavey does not auto-resolve conflicts.
+- The employee visualization is a lightweight CSS command-floor layer, not full character art.
+- Windows managed-process cleanup does not yet terminate full process trees.
