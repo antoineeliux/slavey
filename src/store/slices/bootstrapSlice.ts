@@ -26,6 +26,7 @@ export const createBootstrapSlice: AppStoreSlice<BootstrapSlice> = (_set, get) =
   backendReady: false,
 
   bootstrap: async () => {
+    const bootstrapStartActiveTab = get().activeTab;
     try {
       const snapshot = await commands.appStateLoad();
       const workspaceInfo = await commands.workspaceInfo();
@@ -41,6 +42,10 @@ export const createBootstrapSlice: AppStoreSlice<BootstrapSlice> = (_set, get) =
         snapshot.employees.some((employee) => employee.id === snapshot.selectedEmployeeId)
           ? snapshot.selectedEmployeeId
           : snapshot.employees[0]?.id ?? null;
+      const activeTab =
+        get().activeTab === bootstrapStartActiveTab
+          ? snapshot.activeTab ?? "terminal"
+          : get().activeTab;
       _set({
         employees: snapshot.employees,
         employeeActivities: activitiesByEmployee(employeeActivities),
@@ -52,7 +57,7 @@ export const createBootstrapSlice: AppStoreSlice<BootstrapSlice> = (_set, get) =
         settings,
         codexCliStatus: workspaceInfo.repoHealth.codexCliStatus,
         workspaceError: null,
-        activeTab: snapshot.activeTab ?? "terminal",
+        activeTab,
         recentFiles: snapshot.recentFiles ?? [],
         approvals,
         actions,

@@ -84,6 +84,10 @@ async function openApp(page: Page): Promise<void> {
     });
   });
   await page.goto("/");
+  await expect(page.locator("#root .app-shell")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Slavey" })).toBeVisible();
+  await expect(page.getByText("workspace online")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Mira Frontend" })).toBeVisible();
 }
 
 function collectUnexpectedErrors(page: Page): string[] {

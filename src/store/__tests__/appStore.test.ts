@@ -2,7 +2,8 @@ import { act } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { resetAppStore } from "../../test/storeTestUtils";
-import type { Employee } from "../../types";
+import { mockTauriInvoke } from "../../test/setup";
+import type { AppStateSnapshot, Employee, WorkspaceInfo } from "../../types";
 import { DEFAULT_SETTINGS } from "../helpers";
 import { useAppStore } from "../appStore";
 
@@ -96,4 +97,127 @@ describe("app store smoke behavior", () => {
 
     expect(useAppStore.getState().selectedEmployee()?.name).toBe("Grace");
   });
+
+  it("bootstrap applies the persisted active tab when the user has not changed tabs", async () => {
+    mockBootstrapCommands({ activeTab: "editor" });
+
+    await act(async () => {
+      await useAppStore.getState().bootstrap();
+    });
+
+    expect(useAppStore.getState().activeTab).toBe("editor");
+    expect(useAppStore.getState().backendReady).toBe(true);
+  });
+
+  it("bootstrap preserves a user-selected tab while restore is in flight", async () => {
+    const appStateLoad = deferred<AppStateSnapshot>();
+    mockBootstrapCommands({ activeTab: "editor", appStateLoad });
+
+    const bootstrapPromise = useAppStore.getState().bootstrap();
+    act(() => {
+      useAppStore.getState().setActiveTab("settings");
+    });
+    appStateLoad.resolve(snapshot({ activeTab: "editor" }));
+
+    await act(async () => {
+      await bootstrapPromise;
+    });
+
+    expect(useAppStore.getState().activeTab).toBe("settings");
+    expect(useAppStore.getState().backendReady).toBe(true);
+  });
 });
+
+function mockBootstrapCommands({
+  activeTab,
+  appStateLoad,
+}: {
+  activeTab: AppStateSnapshot["activeTab"];
+  appStateLoad?: Deferred<AppStateSnapshot>;
+}): void {
+  const workspace = workspaceInfo();
+  (mockTauriInvoke as InvokeMock).mockImplementation(async (command: string) => {
+    switch (command) {
+      case "app_state_load":
+        return appStateLoad ? appStateLoad.promise : snapshot({ activeTab });
+      case "workspace_info":
+        return workspace;
+      case "approval_list":
+      case "action_list":
+      case "process_list":
+      case "employee_activity_list":
+      case "employee_role_policies":
+      case "fs_list_dir":
+        return [];
+      case "codex_cli_status":
+        return workspace.repoHealth.codexCliStatus;
+      case "app_state_save":
+        return null;
+      default:
+        return null;
+    }
+  });
+}
+
+type InvokeMock = {
+  mockImplementation: (implementation: (command: string) => Promise<unknown>) => void;
+};
+
+function snapshot(overrides: Partial<AppStateSnapshot> = {}): AppStateSnapshot {
+  return {
+    workspaceRoot: "/workspace",
+    employees: [],
+    terminalSessions: [],
+    actions: [],
+    approvals: [],
+    processes: [],
+    processLogs: [],
+    selectedEmployeeId: null,
+    activeTab: "terminal",
+    recentFiles: [],
+    recentWorkspaces: ["/workspace"],
+    settings: DEFAULT_SETTINGS,
+    updatedAt: 1,
+    ...overrides,
+  };
+}
+
+function workspaceInfo(): WorkspaceInfo {
+  return {
+    workspaceRoot: "/workspace",
+    recentWorkspaces: ["/workspace"],
+    settings: DEFAULT_SETTINGS,
+    repoHealth: {
+      isExistingDirectory: true,
+      isGitRepo: true,
+      repoRoot: "/workspace",
+      currentBranch: "main",
+      dirty: false,
+      gitUserNameConfigured: true,
+      gitUserEmailConfigured: true,
+      worktreeSupported: true,
+      worktreeSupportMessage: "available",
+      worktreeBlockers: [],
+      handoffBlockers: [],
+      codexCliStatus: {
+        available: false,
+        version: null,
+        message: "Codex CLI unavailable in store tests",
+      },
+    },
+    switchBlockers: [],
+  };
+}
+
+type Deferred<T> = {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+};
+
+function deferred<T>(): Deferred<T> {
+  let resolve: (value: T) => void = () => undefined;
+  const promise = new Promise<T>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+}
