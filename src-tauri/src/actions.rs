@@ -22,7 +22,7 @@ use crate::{
     employees::{resolve_employee_execution_dir, EmployeeManager},
     events::{emit_action_updated, emit_approval_updated, emit_log, now_ms, LogLevel},
     fs::write_file_in_workspace,
-    persistence::PersistenceManager,
+    persistence::{AppStateSnapshotInput, PersistenceManager},
     processes::{configure_process_group, shell_command, terminate_process_tree, ProcessManager},
     read_workspace_root,
     terminal::TerminalSessionStore,
@@ -695,15 +695,15 @@ fn finish_background_action(
 
 fn persist_context_snapshot(context: &ActionRunContext) -> Result<(), String> {
     let workspace_root = read_workspace_root(&context.workspace_root);
-    context.persistence.save(
-        &workspace_root,
-        context.employees.list(),
-        context.terminal_sessions.list(),
-        context.actions.list(),
-        context.approvals.list(),
-        context.processes.list(),
-        context.processes.log_snapshots(),
-    )
+    context.persistence.save(AppStateSnapshotInput {
+        workspace_root,
+        employees: context.employees.list(),
+        terminal_sessions: context.terminal_sessions.list(),
+        actions: context.actions.list(),
+        approvals: context.approvals.list(),
+        processes: context.processes.list(),
+        process_logs: context.processes.log_snapshots(),
+    })
 }
 
 fn persist_or_log(app: &AppHandle, state: &State<'_, AppState>) {

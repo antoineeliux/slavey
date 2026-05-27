@@ -16,7 +16,7 @@ use approvals::ApprovalManager;
 use employees::EmployeeManager;
 use events::{emit_log, LogLevel};
 use parking_lot::RwLock;
-use persistence::PersistenceManager;
+use persistence::{AppStateSnapshotInput, PersistenceManager};
 use processes::ProcessManager;
 use tauri::Manager;
 use terminal::{TerminalManager, TerminalSessionStore};
@@ -48,29 +48,23 @@ impl AppState {
     }
 
     pub fn persist(&self) -> Result<(), String> {
-        let workspace_root = self.workspace_root();
-        self.persistence.save(
-            &workspace_root,
-            self.employees.list(),
-            self.terminal_sessions.list(),
-            self.actions.list(),
-            self.approvals.list(),
-            self.processes.list(),
-            self.processes.log_snapshots(),
-        )
+        self.persistence.save(self.snapshot_input())
     }
 
     pub fn snapshot(&self) -> persistence::PersistentAppState {
-        let workspace_root = self.workspace_root();
-        self.persistence.snapshot(
-            &workspace_root,
-            self.employees.list(),
-            self.terminal_sessions.list(),
-            self.actions.list(),
-            self.approvals.list(),
-            self.processes.list(),
-            self.processes.log_snapshots(),
-        )
+        self.persistence.snapshot(self.snapshot_input())
+    }
+
+    fn snapshot_input(&self) -> AppStateSnapshotInput {
+        AppStateSnapshotInput {
+            workspace_root: self.workspace_root(),
+            employees: self.employees.list(),
+            terminal_sessions: self.terminal_sessions.list(),
+            actions: self.actions.list(),
+            approvals: self.approvals.list(),
+            processes: self.processes.list(),
+            process_logs: self.processes.log_snapshots(),
+        }
     }
 }
 

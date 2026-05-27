@@ -113,6 +113,17 @@ pub struct AppStateSaveRequest {
     pub recent_files: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AppStateSnapshotInput {
+    pub workspace_root: PathBuf,
+    pub employees: Vec<Employee>,
+    pub terminal_sessions: Vec<TerminalSessionRecord>,
+    pub actions: Vec<Action>,
+    pub approvals: Vec<ApprovalRequest>,
+    pub processes: Vec<ManagedProcess>,
+    pub process_logs: Vec<ProcessLogSnapshot>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct PersistentUiState {
     selected_employee_id: Option<String>,
@@ -146,25 +157,17 @@ impl PersistenceManager {
         }
     }
 
-    pub fn snapshot(
-        &self,
-        workspace_root: &Path,
-        employees: Vec<Employee>,
-        terminal_sessions: Vec<TerminalSessionRecord>,
-        actions: Vec<Action>,
-        approvals: Vec<ApprovalRequest>,
-        processes: Vec<ManagedProcess>,
-        process_logs: Vec<ProcessLogSnapshot>,
-    ) -> PersistentAppState {
+    pub fn snapshot(&self, input: AppStateSnapshotInput) -> PersistentAppState {
         let ui_state = self.ui_state.lock();
+        let workspace_root = input.workspace_root.to_string_lossy().to_string();
         PersistentAppState {
-            workspace_root: workspace_root.to_string_lossy().to_string(),
-            employees,
-            terminal_sessions,
-            actions,
-            approvals,
-            processes,
-            process_logs,
+            workspace_root,
+            employees: input.employees,
+            terminal_sessions: input.terminal_sessions,
+            actions: input.actions,
+            approvals: input.approvals,
+            processes: input.processes,
+            process_logs: input.process_logs,
             selected_employee_id: ui_state.selected_employee_id.clone(),
             active_tab: ui_state.active_tab.clone(),
             recent_files: ui_state.recent_files.clone(),
@@ -174,25 +177,8 @@ impl PersistenceManager {
         }
     }
 
-    pub fn save(
-        &self,
-        workspace_root: &Path,
-        employees: Vec<Employee>,
-        terminal_sessions: Vec<TerminalSessionRecord>,
-        actions: Vec<Action>,
-        approvals: Vec<ApprovalRequest>,
-        processes: Vec<ManagedProcess>,
-        process_logs: Vec<ProcessLogSnapshot>,
-    ) -> Result<(), String> {
-        let snapshot = self.snapshot(
-            workspace_root,
-            employees,
-            terminal_sessions,
-            actions,
-            approvals,
-            processes,
-            process_logs,
-        );
+    pub fn save(&self, input: AppStateSnapshotInput) -> Result<(), String> {
+        let snapshot = self.snapshot(input);
         if let Some(parent) = self.path.parent() {
             std_fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
@@ -450,23 +436,25 @@ mod tests {
         }
     }
 
+    fn empty_snapshot_input(workspace_root: PathBuf) -> AppStateSnapshotInput {
+        AppStateSnapshotInput {
+            workspace_root,
+            employees: Vec::new(),
+            terminal_sessions: Vec::new(),
+            actions: Vec::new(),
+            approvals: Vec::new(),
+            processes: Vec::new(),
+            process_logs: Vec::new(),
+        }
+    }
+
     #[test]
     fn save_and_load_valid_state() {
         let root = test_root("save-load");
         let path = root.join("state.json");
         let manager = PersistenceManager::new(path.clone(), None);
 
-        manager
-            .save(
-                &root,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            )
-            .unwrap();
+        manager.save(empty_snapshot_input(root.clone())).unwrap();
         let loaded = load_from_disk(&path).unwrap().unwrap();
 
         assert_eq!(loaded.workspace_root, root.to_string_lossy());
@@ -504,17 +492,7 @@ mod tests {
         assert!(updated.require_confirmation_handoff_apply);
         assert_eq!(updated.max_terminal_buffer_chars, 100_000);
 
-        manager
-            .save(
-                &root,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            )
-            .unwrap();
+        manager.save(empty_snapshot_input(root)).unwrap();
         let loaded = load_from_disk(&path).unwrap().unwrap();
         let restored = PersistenceManager::new(path, Some(&loaded));
 

@@ -44,6 +44,16 @@ pub struct TerminalManager {
     sessions: Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
 }
 
+pub struct TerminalProfileSessionRequest<F> {
+    pub app: AppHandle,
+    pub employee_id: String,
+    pub session_id: String,
+    pub cwd: PathBuf,
+    pub size: PtySize,
+    pub profile: TerminalLaunchProfile,
+    pub on_exit: F,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalLaunchProfile {
@@ -239,30 +249,30 @@ impl TerminalManager {
     where
         F: FnOnce(u32) + Send + 'static,
     {
-        self.create_profile_session(
+        self.create_profile_session(TerminalProfileSessionRequest {
             app,
             employee_id,
             session_id,
             cwd,
             size,
-            TerminalLaunchProfile::Shell,
+            profile: TerminalLaunchProfile::Shell,
             on_exit,
-        )
+        })
     }
 
-    pub fn create_profile_session<F>(
-        &self,
-        app: AppHandle,
-        employee_id: String,
-        session_id: String,
-        cwd: PathBuf,
-        size: PtySize,
-        profile: TerminalLaunchProfile,
-        on_exit: F,
-    ) -> Result<()>
+    pub fn create_profile_session<F>(&self, request: TerminalProfileSessionRequest<F>) -> Result<()>
     where
         F: FnOnce(u32) + Send + 'static,
     {
+        let TerminalProfileSessionRequest {
+            app,
+            employee_id,
+            session_id,
+            cwd,
+            size,
+            profile,
+            on_exit,
+        } = request;
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(size).context("failed to open PTY")?;
         let spec = terminal_command_spec(profile);

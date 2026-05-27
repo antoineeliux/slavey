@@ -14,6 +14,8 @@ npm run build
 
 The Tauri app serves the Vite frontend at `http://localhost:1420` during development.
 
+See [Engineering Rules](docs/engineering-rules.md) for validation, Git workflow, and safety standards.
+
 ## Workspace Safety
 
 The backend restricts file reads and writes to the selected workspace root. In development, that root defaults to the project directory. You can override it with:

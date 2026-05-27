@@ -1413,7 +1413,7 @@ fn untracked_file_preview(worktree: &Path, relative: &str) -> Result<String, Str
         .read_to_end(&mut contents)
         .map_err(|error| error.to_string())?;
 
-    if contents.iter().any(|byte| *byte == 0) {
+    if contents.contains(&0) {
         return Ok(format!("{header}[binary file omitted from preview]"));
     }
 

@@ -14,10 +14,13 @@ use crate::{
     approvals::ApprovalManager,
     events::{emit_employee_updated, emit_log, emit_terminal_session_updated, now_ms, LogLevel},
     fs::resolve_existing_dir,
-    persistence::PersistenceManager,
+    persistence::{AppStateSnapshotInput, PersistenceManager},
     processes::ProcessManager,
     read_workspace_root,
-    terminal::{TerminalLaunchProfile, TerminalSessionStore, DEFAULT_PTY_SIZE},
+    terminal::{
+        TerminalLaunchProfile, TerminalProfileSessionRequest, TerminalSessionStore,
+        DEFAULT_PTY_SIZE,
+    },
     AppState, WorkspaceRootHandle,
 };
 
@@ -287,48 +290,50 @@ fn start_terminal_with_profile(
         persistence: state.persistence.clone(),
     };
 
-    let launch_result = state.terminal.create_profile_session(
-        app.clone(),
-        employee_id.clone(),
-        session_id.clone(),
-        cwd,
-        DEFAULT_PTY_SIZE,
-        profile,
-        move |exit_code| {
-            let exit_code_i32 = i32::try_from(exit_code).unwrap_or(i32::MAX);
-            let next_status = if exit_code == 0 {
-                EmployeeStatus::Done
-            } else {
-                EmployeeStatus::Failed
-            };
+    let launch_result = state
+        .terminal
+        .create_profile_session(TerminalProfileSessionRequest {
+            app: app.clone(),
+            employee_id: employee_id.clone(),
+            session_id: session_id.clone(),
+            cwd,
+            size: DEFAULT_PTY_SIZE,
+            profile,
+            on_exit: move |exit_code| {
+                let exit_code_i32 = i32::try_from(exit_code).unwrap_or(i32::MAX);
+                let next_status = if exit_code == 0 {
+                    EmployeeStatus::Done
+                } else {
+                    EmployeeStatus::Failed
+                };
 
-            if let Some(updated) = employees.update(&exit_employee_id, |employee| {
-                if employee.terminal_session_id.as_deref() == Some(exit_session_id.as_str()) {
-                    if employee.status != EmployeeStatus::Stopped {
-                        employee.status = next_status;
+                if let Some(updated) = employees.update(&exit_employee_id, |employee| {
+                    if employee.terminal_session_id.as_deref() == Some(exit_session_id.as_str()) {
+                        if employee.status != EmployeeStatus::Stopped {
+                            employee.status = next_status;
+                        }
+                        employee.terminal_session_id = None;
+                        employee.current_command = None;
                     }
-                    employee.terminal_session_id = None;
-                    employee.current_command = None;
+                }) {
+                    emit_employee_updated(&exit_app, updated);
                 }
-            }) {
-                emit_employee_updated(&exit_app, updated);
-            }
 
-            if let Some(record) = terminal_sessions.finish(&exit_session_id, exit_code_i32) {
-                emit_terminal_session_updated(&exit_app, record);
-            }
+                if let Some(record) = terminal_sessions.finish(&exit_session_id, exit_code_i32) {
+                    emit_terminal_session_updated(&exit_app, record);
+                }
 
-            emit_log(
-                &exit_app,
-                LogLevel::Info,
-                format!(
-                    "terminal session {} exited with code {}",
-                    exit_session_id, exit_code
-                ),
-            );
-            persist_terminal_snapshot_or_log(&exit_app, &exit_persist_context);
-        },
-    );
+                emit_log(
+                    &exit_app,
+                    LogLevel::Info,
+                    format!(
+                        "terminal session {} exited with code {}",
+                        exit_session_id, exit_code
+                    ),
+                );
+                persist_terminal_snapshot_or_log(&exit_app, &exit_persist_context);
+            },
+        });
 
     if let Err(error) = launch_result {
         if let Some(record) = state.terminal_sessions.fail_start(
@@ -445,15 +450,15 @@ fn persist_terminal_snapshot_or_log(app: &AppHandle, context: &TerminalPersistCo
 
 fn persist_terminal_snapshot(context: &TerminalPersistContext) -> Result<(), String> {
     let workspace_root = read_workspace_root(&context.workspace_root);
-    context.persistence.save(
-        &workspace_root,
-        context.employees.list(),
-        context.terminal_sessions.list(),
-        context.actions.list(),
-        context.approvals.list(),
-        context.processes.list(),
-        context.processes.log_snapshots(),
-    )
+    context.persistence.save(AppStateSnapshotInput {
+        workspace_root,
+        employees: context.employees.list(),
+        terminal_sessions: context.terminal_sessions.list(),
+        actions: context.actions.list(),
+        approvals: context.approvals.list(),
+        processes: context.processes.list(),
+        process_logs: context.processes.log_snapshots(),
+    })
 }
 
 fn ensure_employee_can_remove(employee: &Employee) -> Result<(), String> {
