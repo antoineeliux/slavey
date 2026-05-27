@@ -5,6 +5,7 @@ import { javascript } from "@codemirror/lang-javascript";
 import { basicSetup } from "codemirror";
 import { ChevronLeft, File, Folder, History, Pencil, Save, Trash2, X } from "lucide-react";
 
+import { uiTheme } from "../lib/uiTheme";
 import { useAppStore } from "../store/appStore";
 import type { FsEntry } from "../types";
 
@@ -308,29 +309,29 @@ function CodeMirrorEditor({
           EditorView.theme({
             "&": {
               height: "100%",
-              backgroundColor: "#2d353b",
-              color: "#d3c6aa",
+              backgroundColor: uiTheme.app,
+              color: uiTheme.text,
               fontSize: "13px",
             },
             ".cm-scroller": {
               fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
             },
             ".cm-gutters": {
-              backgroundColor: "#232a2e",
-              color: "#7a8478",
-              borderRight: "1px solid #3d484d",
+              backgroundColor: uiTheme.panelSubtle,
+              color: uiTheme.textMuted,
+              borderRight: `1px solid ${uiTheme.border}`,
             },
             ".cm-activeLine": {
-              backgroundColor: "#343f44",
+              backgroundColor: uiTheme.surface,
             },
             ".cm-activeLineGutter": {
-              backgroundColor: "#3d484d",
+              backgroundColor: uiTheme.surfaceHover,
             },
             "&.cm-focused": {
               outline: "none",
             },
             ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
-              backgroundColor: "#514045",
+              backgroundColor: uiTheme.selection,
             },
           }),
           EditorView.updateListener.of((update) => {

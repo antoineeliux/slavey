@@ -1,0 +1,16 @@
+export const uiTheme = {
+  app: "#20282b",
+  panel: "#253034",
+  panelSubtle: "#222b2e",
+  surface: "#2a3438",
+  surfaceHover: "#303b3f",
+  surfaceActive: "#354139",
+  border: "#3a4548",
+  text: "#d3c6aa",
+  textStrong: "#e4dcc6",
+  textMuted: "#8f988e",
+  accent: "#a7c080",
+  warning: "#c8a96a",
+  danger: "#d98284",
+  selection: "#354139",
+} as const;

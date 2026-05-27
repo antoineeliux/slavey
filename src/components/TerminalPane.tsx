@@ -4,6 +4,7 @@ import { Terminal } from "@xterm/xterm";
 import { History, Pencil, Play, Square, SquareTerminal } from "lucide-react";
 import "@xterm/xterm/css/xterm.css";
 
+import { uiTheme } from "../lib/uiTheme";
 import { useAppStore } from "../store/appStore";
 import type { CodexCliStatus, Employee, TerminalSessionRecord } from "../types";
 
@@ -59,18 +60,18 @@ export function TerminalPane() {
       fontSize: 13,
       lineHeight: 1.2,
       theme: {
-        background: "#2d353b",
-        foreground: "#d3c6aa",
-        cursor: "#dbbc7f",
-        selectionBackground: "#514045",
-        black: "#4f585e",
-        red: "#e67e80",
-        green: "#a7c080",
-        yellow: "#dbbc7f",
-        blue: "#7fbbb3",
-        magenta: "#d699b6",
-        cyan: "#83c092",
-        white: "#d3c6aa",
+        background: uiTheme.app,
+        foreground: uiTheme.text,
+        cursor: uiTheme.accent,
+        selectionBackground: uiTheme.selection,
+        black: uiTheme.panelSubtle,
+        red: uiTheme.danger,
+        green: uiTheme.accent,
+        yellow: uiTheme.warning,
+        blue: uiTheme.textMuted,
+        magenta: uiTheme.textMuted,
+        cyan: uiTheme.textMuted,
+        white: uiTheme.text,
       },
     });
     const fit = new FitAddon();
