@@ -2,10 +2,6 @@ use std::{
     fs as std_fs,
     io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::mpsc::{self, Receiver, SyncSender, TryRecvError},
-    thread,
-    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -15,12 +11,24 @@ use crate::{
     employees::{resolve_employee_execution_dir, Employee},
     events::{emit_employee_updated, emit_log, LogLevel},
     fs::resolve_existing_dir,
-    processes::{configure_process_group, terminate_process_tree},
     AppState,
 };
 
-const GIT_COMMAND_TIMEOUT_SECS: u64 = 30;
-const MAX_GIT_OUTPUT_BYTES: usize = 1024 * 1024;
+mod parsing;
+mod runner;
+
+use self::parsing::{
+    commit_from_output, employee_worktree_is_clean, has_staged_changes,
+    has_unstaged_change_for_path, is_untracked_file, main_workspace_has_uncommitted_changes,
+    parse_ahead_behind, parse_changed_files, parse_commit_log, parse_staged_files,
+    parse_untracked_files, validate_commit_message,
+};
+use self::runner::bounded_git_output;
+pub(crate) use self::{
+    parsing::parse_status_lines,
+    runner::{git_success, run_git},
+};
+
 const MAX_UNTRACKED_PREVIEW_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
@@ -768,180 +776,6 @@ fn abort_handoff_for_paths(
     }
 }
 
-pub(crate) fn git_success(cwd: &Path, args: &[&str]) -> bool {
-    bounded_git_output(cwd, args)
-        .map(|output| output.success)
-        .unwrap_or(false)
-}
-
-pub(crate) fn run_git(cwd: &Path, args: &[&str]) -> Result<String, String> {
-    let output = bounded_git_output(cwd, args)?;
-
-    if output.success {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if stderr.is_empty() {
-            Err("git command failed".to_string())
-        } else {
-            Err(stderr)
-        }
-    }
-}
-
-struct GitCommandOutput {
-    success: bool,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-}
-
-enum GitOutputChunk {
-    Stdout(Vec<u8>),
-    Stderr(Vec<u8>),
-}
-
-fn bounded_git_output(cwd: &Path, args: &[&str]) -> Result<GitCommandOutput, String> {
-    let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    configure_process_group(&mut command);
-
-    let mut child = command.spawn().map_err(|error| error.to_string())?;
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            terminate_process_tree(&mut child);
-            return Err("failed to capture git stdout".to_string());
-        }
-    };
-    let stderr = match child.stderr.take() {
-        Some(stderr) => stderr,
-        None => {
-            terminate_process_tree(&mut child);
-            return Err("failed to capture git stderr".to_string());
-        }
-    };
-    let (sender, receiver) = mpsc::sync_channel::<GitOutputChunk>(64);
-    spawn_git_reader(stdout, sender.clone(), true);
-    spawn_git_reader(stderr, sender, false);
-
-    let deadline = Instant::now() + Duration::from_secs(GIT_COMMAND_TIMEOUT_SECS);
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let mut total = 0_usize;
-
-    loop {
-        if let Err(error) = drain_git_output(&receiver, &mut stdout, &mut stderr, &mut total) {
-            terminate_process_tree(&mut child);
-            return Err(error);
-        }
-
-        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
-            drain_remaining_git_output(&receiver, &mut stdout, &mut stderr, &mut total)?;
-            return Ok(GitCommandOutput {
-                success: status.success(),
-                stdout,
-                stderr,
-            });
-        }
-
-        if Instant::now() >= deadline {
-            terminate_process_tree(&mut child);
-            let _ = drain_remaining_git_output(&receiver, &mut stdout, &mut stderr, &mut total);
-            return Err(format!(
-                "git command timed out after {GIT_COMMAND_TIMEOUT_SECS} seconds"
-            ));
-        }
-
-        thread::sleep(Duration::from_millis(20));
-    }
-}
-
-fn spawn_git_reader<R>(mut reader: R, sender: SyncSender<GitOutputChunk>, stdout: bool)
-where
-    R: Read + Send + 'static,
-{
-    thread::spawn(move || {
-        let mut buffer = [0_u8; 8192];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(read) => {
-                    let chunk = if stdout {
-                        GitOutputChunk::Stdout(buffer[..read].to_vec())
-                    } else {
-                        GitOutputChunk::Stderr(buffer[..read].to_vec())
-                    };
-                    if sender.send(chunk).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-}
-
-fn drain_git_output(
-    receiver: &Receiver<GitOutputChunk>,
-    stdout: &mut Vec<u8>,
-    stderr: &mut Vec<u8>,
-    total: &mut usize,
-) -> Result<(), String> {
-    loop {
-        match receiver.try_recv() {
-            Ok(chunk) => append_git_output(stdout, stderr, total, chunk)?,
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => return Ok(()),
-        }
-    }
-}
-
-fn drain_remaining_git_output(
-    receiver: &Receiver<GitOutputChunk>,
-    stdout: &mut Vec<u8>,
-    stderr: &mut Vec<u8>,
-    total: &mut usize,
-) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(1);
-    loop {
-        match receiver.recv_timeout(Duration::from_millis(20)) {
-            Ok(chunk) => append_git_output(stdout, stderr, total, chunk)?,
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
-            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => return Ok(()),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-    }
-}
-
-fn append_git_output(
-    stdout: &mut Vec<u8>,
-    stderr: &mut Vec<u8>,
-    total: &mut usize,
-    chunk: GitOutputChunk,
-) -> Result<(), String> {
-    let bytes = match &chunk {
-        GitOutputChunk::Stdout(bytes) | GitOutputChunk::Stderr(bytes) => bytes,
-    };
-    if total.saturating_add(bytes.len()) > MAX_GIT_OUTPUT_BYTES {
-        return Err(format!(
-            "git command output exceeded {} bytes",
-            MAX_GIT_OUTPUT_BYTES
-        ));
-    }
-    *total += bytes.len();
-    match chunk {
-        GitOutputChunk::Stdout(bytes) => stdout.extend_from_slice(&bytes),
-        GitOutputChunk::Stderr(bytes) => stderr.extend_from_slice(&bytes),
-    }
-    Ok(())
-}
-
 fn ensure_slavey_excluded(repo_root: &Path) -> Result<bool, String> {
     let exclude_path_output = run_git(repo_root, &["rev-parse", "--git-path", "info/exclude"])?;
     let raw_path = PathBuf::from(exclude_path_output.trim());
@@ -969,99 +803,6 @@ fn ensure_slavey_excluded(repo_root: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-pub(crate) fn parse_status_lines(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| !line.trim().is_empty())
-        .map(ToString::to_string)
-        .collect()
-}
-
-fn parse_untracked_files(status: &[String]) -> Vec<String> {
-    status
-        .iter()
-        .filter_map(|line| line.strip_prefix("?? "))
-        .map(ToString::to_string)
-        .collect()
-}
-
-fn is_untracked_file(status: &[String], path: &str) -> bool {
-    let normalized_path = normalize_git_path_for_compare(path);
-    parse_untracked_files(status)
-        .iter()
-        .any(|untracked| normalize_git_path_for_compare(untracked) == normalized_path)
-}
-
-fn parse_changed_files(status: &[String]) -> Vec<String> {
-    status
-        .iter()
-        .filter_map(|line| parse_status_path(line))
-        .collect()
-}
-
-fn parse_staged_files(status: &[String]) -> Vec<String> {
-    status
-        .iter()
-        .filter(|line| has_staged_change_line(line))
-        .filter_map(|line| parse_status_path(line))
-        .collect()
-}
-
-fn main_workspace_has_uncommitted_changes(status: &[String]) -> bool {
-    !status.is_empty()
-}
-
-fn employee_worktree_is_clean(status: &[String]) -> bool {
-    status.is_empty()
-}
-
-fn has_staged_changes(status: &[String]) -> bool {
-    status.iter().any(|line| has_staged_change_line(line))
-}
-
-fn has_staged_change_line(line: &str) -> bool {
-    let Some(staged) = line.as_bytes().first() else {
-        return false;
-    };
-    *staged != b' ' && *staged != b'?'
-}
-
-fn has_unstaged_change_for_path(status: &[String], path: &str) -> bool {
-    let normalized_path = normalize_git_path(path);
-    status.iter().any(|line| {
-        !line.starts_with("?? ")
-            && line
-                .as_bytes()
-                .get(1)
-                .is_some_and(|unstaged| *unstaged != b' ')
-            && parse_status_path(line)
-                .map(|status_path| normalize_git_path(&status_path) == normalized_path)
-                .unwrap_or(false)
-    })
-}
-
-fn parse_status_path(line: &str) -> Option<String> {
-    if line.len() < 4 {
-        return None;
-    }
-    let path = &line[3..];
-    if let Some((_, to)) = path.split_once(" -> ") {
-        Some(to.to_string())
-    } else {
-        Some(path.to_string())
-    }
-}
-
-fn validate_commit_message(message: &str) -> Result<&str, String> {
-    let message = message.trim();
-    if message.is_empty() {
-        Err("commit message is required".to_string())
-    } else {
-        Ok(message)
-    }
-}
-
 fn git_log(cwd: &Path, limit: usize) -> Result<Vec<WorktreeCommit>, String> {
     let limit = limit.clamp(1, 20).to_string();
     let output = run_git(
@@ -1083,62 +824,6 @@ fn git_commits_between(cwd: &Path, base: &str, head: &str) -> Result<Vec<Worktre
         ],
     )?;
     Ok(parse_commit_log(&output))
-}
-
-fn parse_commit_log(output: &str) -> Vec<WorktreeCommit> {
-    output.lines().filter_map(parse_commit_log_line).collect()
-}
-
-fn parse_commit_log_line(line: &str) -> Option<WorktreeCommit> {
-    let mut parts = line.splitn(4, '\u{1f}');
-    let hash = parts.next()?.trim();
-    let short_hash = parts.next()?.trim();
-    let timestamp = parts
-        .next()?
-        .trim()
-        .parse::<u64>()
-        .ok()?
-        .saturating_mul(1000);
-    let message = parts.next()?.trim();
-    if hash.is_empty() || short_hash.is_empty() || message.is_empty() {
-        return None;
-    }
-    Some(WorktreeCommit {
-        hash: hash.to_string(),
-        short_hash: short_hash.to_string(),
-        message: message.to_string(),
-        timestamp,
-    })
-}
-
-fn commit_from_output(output: &str) -> Option<WorktreeCommit> {
-    let (short_hash, message) = parse_commit_output(output)?;
-    Some(WorktreeCommit {
-        hash: short_hash.clone(),
-        short_hash,
-        message,
-        timestamp: 0,
-    })
-}
-
-fn parse_commit_output(output: &str) -> Option<(String, String)> {
-    let first_line = output
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())?;
-    let close = first_line.find(']')?;
-    let header = first_line.strip_prefix('[')?.get(..close - 1)?.trim();
-    let short_hash = header.split_whitespace().last()?.trim();
-    let message = first_line.get(close + 1..)?.trim();
-    if short_hash.is_empty()
-        || !short_hash
-            .chars()
-            .all(|character| character.is_ascii_hexdigit())
-        || message.is_empty()
-    {
-        return None;
-    }
-    Some((short_hash.to_string(), message.to_string()))
 }
 
 fn git_head(cwd: &Path) -> Result<String, String> {
@@ -1180,13 +865,6 @@ fn ahead_behind_between(
     let range = format!("{base}...{head}");
     let output = run_git(cwd, &["rev-list", "--left-right", "--count", &range])?;
     Ok(parse_ahead_behind(&output))
-}
-
-fn parse_ahead_behind(output: &str) -> (Option<u32>, Option<u32>) {
-    let mut parts = output.split_whitespace();
-    let behind = parts.next().and_then(|value| value.parse::<u32>().ok());
-    let ahead = parts.next().and_then(|value| value.parse::<u32>().ok());
-    (behind, ahead)
 }
 
 struct HandoffBlockerInput<'a> {
@@ -1462,14 +1140,6 @@ fn is_sensitive_name(name: &str) -> bool {
         || lower.ends_with(".key")
 }
 
-fn normalize_git_path(path: &str) -> String {
-    path.replace('\\', "/")
-}
-
-fn normalize_git_path_for_compare(path: &str) -> String {
-    normalize_git_path(path).trim_end_matches('/').to_string()
-}
-
 fn branch_name_for_employee(employee: &Employee) -> String {
     let sanitized = sanitize_branch_component(&employee.name);
     let fallback = employee.id.chars().take(8).collect::<String>();
@@ -1507,145 +1177,15 @@ mod tests {
     use std::{fs as std_fs, path::PathBuf};
 
     use super::{
-        append_git_output, build_handoff_blockers, employee_worktree_is_clean,
-        handoff_preflight_for_paths, has_staged_changes, has_unstaged_change_for_path,
-        is_cherry_pick_conflict, is_untracked_file, main_workspace_has_uncommitted_changes,
-        parse_ahead_behind, parse_changed_files, parse_commit_log, parse_commit_output,
-        parse_staged_files, parse_status_lines, parse_untracked_files, remove_untracked_file,
-        resolve_safe_worktree_relative_path, run_git, untracked_file_preview,
-        validate_commit_message, GitOutputChunk, HandoffBlockerInput,
-        WorktreeHandoffOperationState, MAX_GIT_OUTPUT_BYTES,
+        build_handoff_blockers, handoff_preflight_for_paths, is_cherry_pick_conflict,
+        parse_status_lines, remove_untracked_file, resolve_safe_worktree_relative_path, run_git,
+        untracked_file_preview, HandoffBlockerInput, WorktreeHandoffOperationState,
     };
 
     fn test_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("slavey-git-{name}-{}", uuid::Uuid::new_v4()));
         std_fs::create_dir_all(&root).unwrap();
         root.canonicalize().unwrap()
-    }
-
-    #[test]
-    fn status_parser_detects_clean_output() {
-        assert!(parse_status_lines("").is_empty());
-        assert!(parse_status_lines("\n\n").is_empty());
-    }
-
-    #[test]
-    fn status_parser_keeps_dirty_lines() {
-        let changes = parse_status_lines(" M src/main.rs\n?? new.txt\n");
-        assert_eq!(changes, vec![" M src/main.rs", "?? new.txt"]);
-    }
-
-    #[test]
-    fn untracked_parser_extracts_only_untracked_paths() {
-        let changes =
-            parse_status_lines(" M src/main.rs\nA  staged.rs\n?? new.txt\n?? dir/file.rs\n");
-
-        assert_eq!(
-            parse_untracked_files(&changes),
-            vec!["new.txt".to_string(), "dir/file.rs".to_string()]
-        );
-    }
-
-    #[test]
-    fn untracked_matcher_handles_git_path_separators() {
-        let changes = parse_status_lines("?? dir/file.rs\n");
-
-        assert!(is_untracked_file(&changes, "dir/file.rs"));
-        assert!(is_untracked_file(&changes, "dir\\file.rs"));
-        assert!(!is_untracked_file(&changes, "other.rs"));
-    }
-
-    #[test]
-    fn changed_file_parser_handles_renames_and_untracked_files() {
-        let changes = parse_status_lines(" M src/main.rs\nR  old.rs -> new.rs\n?? scratch.txt\n");
-
-        assert_eq!(
-            parse_changed_files(&changes),
-            vec![
-                "src/main.rs".to_string(),
-                "new.rs".to_string(),
-                "scratch.txt".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn staged_change_detection_requires_index_changes() {
-        let unstaged = parse_status_lines(" M src/main.rs\n?? scratch.txt\n");
-        let staged = parse_status_lines("A  src/new.rs\nM  src/lib.rs\n");
-
-        assert!(!has_staged_changes(&unstaged));
-        assert!(has_staged_changes(&staged));
-        assert_eq!(
-            parse_staged_files(&staged),
-            vec!["src/new.rs".to_string(), "src/lib.rs".to_string()]
-        );
-    }
-
-    #[test]
-    fn unstaged_change_detection_matches_selected_path() {
-        let changes = parse_status_lines("MM src/main.rs\n M src/other.rs\nA  staged.rs\n");
-
-        assert!(has_unstaged_change_for_path(&changes, "src/main.rs"));
-        assert!(has_unstaged_change_for_path(&changes, "src/other.rs"));
-        assert!(!has_unstaged_change_for_path(&changes, "staged.rs"));
-    }
-
-    #[test]
-    fn commit_message_validation_rejects_empty_messages() {
-        assert!(validate_commit_message("Add handoff").is_ok());
-        assert!(validate_commit_message("   ").is_err());
-    }
-
-    #[test]
-    fn commit_output_parser_extracts_hash_and_message() {
-        let parsed =
-            parse_commit_output("[slavey/test abc1234] Add review handoff\n 1 file changed")
-                .unwrap();
-
-        assert_eq!(parsed.0, "abc1234");
-        assert_eq!(parsed.1, "Add review handoff");
-    }
-
-    #[test]
-    fn commit_log_parser_extracts_recent_commits() {
-        let commits =
-            parse_commit_log("abcdef123456\u{1f}abcdef1\u{1f}1710000000\u{1f}Add handoff\n");
-
-        assert_eq!(commits.len(), 1);
-        assert_eq!(commits[0].hash, "abcdef123456");
-        assert_eq!(commits[0].short_hash, "abcdef1");
-        assert_eq!(commits[0].message, "Add handoff");
-        assert_eq!(commits[0].timestamp, 1_710_000_000_000);
-    }
-
-    #[test]
-    fn commit_log_parser_extracts_commit_lists() {
-        let commits = parse_commit_log(
-            "abcdef123456\u{1f}abcdef1\u{1f}1710000000\u{1f}First\n\
-             bcdefa234567\u{1f}bcdefa2\u{1f}1710000001\u{1f}Second\n\
-             malformed\n",
-        );
-
-        assert_eq!(commits.len(), 2);
-        assert_eq!(commits[0].short_hash, "abcdef1");
-        assert_eq!(commits[1].message, "Second");
-    }
-
-    #[test]
-    fn ahead_behind_parser_reads_left_right_counts() {
-        assert_eq!(parse_ahead_behind("2\t5\n"), (Some(2), Some(5)));
-    }
-
-    #[test]
-    fn dirty_detection_helpers_read_status_lines() {
-        let clean = parse_status_lines("");
-        let dirty = parse_status_lines(" M src/main.rs\n?? scratch.txt\n");
-
-        assert!(!main_workspace_has_uncommitted_changes(&clean));
-        assert!(main_workspace_has_uncommitted_changes(&dirty));
-        assert!(employee_worktree_is_clean(&clean));
-        assert!(!employee_worktree_is_clean(&dirty));
     }
 
     #[test]
@@ -1747,49 +1287,6 @@ mod tests {
         assert!(preflight.employee_clean);
         assert!(preflight.main_clean);
         assert!(preflight.can_apply);
-    }
-
-    #[test]
-    fn git_output_limit_is_enforced() {
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut total = MAX_GIT_OUTPUT_BYTES;
-
-        let error = append_git_output(
-            &mut stdout,
-            &mut stderr,
-            &mut total,
-            GitOutputChunk::Stdout(vec![b'x']),
-        )
-        .unwrap_err();
-
-        assert!(error.contains("git command output exceeded"));
-    }
-
-    #[test]
-    fn git_output_appends_stdout_and_stderr() {
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let mut total = 0;
-
-        append_git_output(
-            &mut stdout,
-            &mut stderr,
-            &mut total,
-            GitOutputChunk::Stdout(b"out".to_vec()),
-        )
-        .unwrap();
-        append_git_output(
-            &mut stdout,
-            &mut stderr,
-            &mut total,
-            GitOutputChunk::Stderr(b"err".to_vec()),
-        )
-        .unwrap();
-
-        assert_eq!(stdout, b"out");
-        assert_eq!(stderr, b"err");
-        assert_eq!(total, 6);
     }
 
     #[test]

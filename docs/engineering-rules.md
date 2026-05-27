@@ -43,6 +43,7 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Large Rust files are acceptable temporarily when tests are included and logic is cohesive.
 - New growth should split modules once a file is around 700-900 lines or has multiple responsibilities.
 - Prefer splitting by domain boundary: git runner/parsing/review/handoff, terminal session store/Codex status/PTY handling, filesystem path safety/file operations/search, and actions state/execution/approval transitions.
+- For large Rust command modules, keep Tauri commands at the module boundary and extract cohesive private submodules for pure helpers or runners.
 - Do not mix large refactors with feature phases.
 
 ## Testing Expectations
