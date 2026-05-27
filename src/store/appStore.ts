@@ -766,9 +766,25 @@ export const useAppStore = create<AppStore>((set, get) => ({
       const review = await invoke<WorktreeReview>("git_worktree_review_for_employee", {
         employeeId,
       });
+      const selected = get().selectedReviewFiles[employeeId];
+      const nextSelected =
+        selected && review.changedFiles.includes(selected)
+          ? selected
+          : review.changedFiles[0] ?? null;
       set((state) => ({
         worktreeReviews: { ...state.worktreeReviews, [employeeId]: review },
+        worktreeChangedFiles: { ...state.worktreeChangedFiles, [employeeId]: review.changedFiles },
+        worktreeCommits: { ...state.worktreeCommits, [employeeId]: review.recentCommits },
+        worktreeHandoffs: review.handoff
+          ? { ...state.worktreeHandoffs, [employeeId]: review.handoff }
+          : Object.fromEntries(
+              Object.entries(state.worktreeHandoffs).filter(([key]) => key !== employeeId),
+            ),
+        selectedReviewFiles: { ...state.selectedReviewFiles, [employeeId]: nextSelected },
       }));
+      if (nextSelected) {
+        await get().loadWorktreeFileDiff(employeeId, nextSelected);
+      }
     } catch (error) {
       get().addLog(localLog("warn", `worktree review failed: ${formatError(error)}`));
     }
@@ -1583,7 +1599,6 @@ async function refreshWorktreeReviewForEmployee(
   await Promise.all([
     get().loadWorktreeStatus(employeeId),
     get().loadWorktreeReview(employeeId),
-    get().loadWorktreeChangedFiles(employeeId),
   ]);
 }
 

@@ -209,10 +209,59 @@ export type WorktreeReview = {
   employeeId: string;
   worktreePath: string;
   branchName?: string | null;
+  baseBranch?: string | null;
+  upstreamBranch?: string | null;
+  remote: WorktreeRemoteInfo;
+  ahead?: number | null;
+  behind?: number | null;
+  upstreamAhead?: number | null;
+  upstreamBehind?: number | null;
+  clean: boolean;
   status: string[];
+  changedFiles: string[];
+  files: WorktreeReviewFile[];
+  stagedFiles: string[];
+  unstagedFiles: string[];
   unstagedDiff: string;
   stagedDiff: string;
   untrackedFiles: string[];
+  conflictedFiles: string[];
+  recentCommits: WorktreeCommit[];
+  handoff?: WorktreeHandoffPreflight | null;
+  operation: WorktreeHandoffOperationState;
+  blockers: string[];
+  disabledReasons: WorktreeReviewDisabledReasons;
+};
+
+export type WorktreeReviewFile = {
+  path: string;
+  status: string;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+  conflicted: boolean;
+  deleted: boolean;
+  renamed: boolean;
+};
+
+export type WorktreeRemoteInfo = {
+  remoteName?: string | null;
+  remoteUrl?: string | null;
+  upstreamBranch?: string | null;
+  upstreamExists: boolean;
+  ahead?: number | null;
+  behind?: number | null;
+  pushDisabledReason?: string | null;
+  pullRequestDisabledReason?: string | null;
+};
+
+export type WorktreeReviewDisabledReasons = {
+  commit?: string | null;
+  discard?: string | null;
+  deleteUntracked?: string | null;
+  handoffApply?: string | null;
+  push?: string | null;
+  pullRequest?: string | null;
 };
 
 export type WorktreeCommit = {
@@ -250,6 +299,7 @@ export type WorktreeHandoffPreflight = {
   commitsToApply: WorktreeCommit[];
   employeeClean: boolean;
   mainClean: boolean;
+  mainConflictedFiles: string[];
   applyStrategy: "cherry_pick" | string;
   mainOperation: WorktreeHandoffOperationState;
   blockers: string[];

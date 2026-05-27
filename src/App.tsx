@@ -870,19 +870,31 @@ function ReviewPanel({
   const commitWorktree = useAppStore((state) => state.commitWorktree);
   const applyWorktreeHandoff = useAppStore((state) => state.applyWorktreeHandoff);
   const abortWorktreeHandoff = useAppStore((state) => state.abortWorktreeHandoff);
-  const selectedStatus = selectedFile ? statusForFile(review?.status ?? [], selectedFile) : null;
+  const selectedReviewFile = selectedFile
+    ? review?.files.find((file) => file.path === selectedFile) ?? null
+    : null;
   const fileDiff = selectedFile ? fileDiffs[reviewFileKey(employeeId, selectedFile)] ?? "" : "";
-  const canStage = Boolean(selectedFile);
-  const canUnstage = Boolean(selectedFile && selectedStatus && hasStagedChange(selectedStatus));
-  const canDiscard = Boolean(selectedFile && selectedStatus && hasUnstagedChange(selectedStatus));
-  const canDeleteUntracked = Boolean(selectedFile && selectedStatus?.startsWith("?? "));
-  const hasStaged = (review?.status ?? []).some(hasStagedChange);
-  const canCommit = hasStaged && commitMessage.trim().length > 0;
-  const latestCommit = commits[0] ?? null;
-  const commitsToApply = handoff?.commitsToApply ?? [];
-  const handoffDisabledReason = handoffApplyDisabledReason(repoHealth, handoff);
-  const canApplyHandoff = handoff?.canApply === true && !handoffDisabledReason;
-  const canAbortHandoff = handoff?.mainOperation.canAbort === true;
+  const canStage = Boolean(selectedFile && !selectedReviewFile?.conflicted);
+  const canUnstage = Boolean(
+    selectedFile && selectedReviewFile?.staged && !selectedReviewFile.conflicted,
+  );
+  const canDiscard = Boolean(
+    selectedFile && selectedReviewFile?.unstaged && !selectedReviewFile.conflicted,
+  );
+  const canDeleteUntracked = Boolean(selectedFile && selectedReviewFile?.untracked);
+  const commitDisabledReason = review?.disabledReasons.commit ?? null;
+  const canCommit = !commitDisabledReason && commitMessage.trim().length > 0;
+  const reviewHandoff = review?.handoff ?? handoff;
+  const latestCommit = (review?.recentCommits ?? commits)[0] ?? null;
+  const commitsToApply = reviewHandoff?.commitsToApply ?? [];
+  const handoffDisabledReason =
+    review?.disabledReasons.handoffApply ?? handoffApplyDisabledReason(repoHealth, reviewHandoff);
+  const canApplyHandoff = reviewHandoff?.canApply === true && !handoffDisabledReason;
+  const canAbortHandoff = reviewHandoff?.mainOperation.canAbort === true;
+  const groupedFiles = reviewFileGroups(review, changedFiles);
+  const hasReviewConflicts = Boolean(
+    review?.conflictedFiles.length || reviewHandoff?.mainConflictedFiles.length,
+  );
 
   const runCommit = async () => {
     const message = commitMessage.trim();
@@ -894,10 +906,10 @@ function ReviewPanel({
   };
 
   const runApplyHandoff = () => {
-    if (!handoff?.canApply || handoffDisabledReason) {
+    if (!reviewHandoff?.canApply || handoffDisabledReason) {
       return;
     }
-    const targetBranch = handoff.mainBranch ?? "main workspace";
+    const targetBranch = reviewHandoff.mainBranch ?? "main workspace";
     const confirmed =
       !settings.requireConfirmationHandoffApply ||
       window.confirm(
@@ -924,25 +936,70 @@ function ReviewPanel({
           <ListTree size={14} />
         </button>
       </div>
+      <div className="policy-grid">
+        <span>Branch</span>
+        <strong title={review?.branchName ?? ""}>{review?.branchName ?? "unknown"}</strong>
+        <span>Base</span>
+        <strong title={review?.baseBranch ?? ""}>{review?.baseBranch ?? "unknown"}</strong>
+        <span>Base delta</span>
+        <strong>{formatAheadBehind(review?.ahead, review?.behind)}</strong>
+        <span>Upstream</span>
+        <strong title={review?.upstreamBranch ?? ""}>{review?.upstreamBranch ?? "none"}</strong>
+        <span>Upstream delta</span>
+        <strong>{formatAheadBehind(review?.upstreamAhead, review?.upstreamBehind)}</strong>
+        <span>Remote</span>
+        <strong title={review?.remote.remoteUrl ?? ""}>{review?.remote.remoteName ?? "none"}</strong>
+        <span>State</span>
+        <strong>{review?.clean ? "clean" : "dirty"}</strong>
+        <span>Operation</span>
+        <strong>{review?.operation.message ?? "ready"}</strong>
+        <span>Push</span>
+        <strong>{review?.disabledReasons.push ?? "read-only"}</strong>
+      </div>
+      {review?.blockers.length ? (
+        <div className="handoff-blockers">
+          {review.blockers.map((blocker) => (
+            <div className="inline-warning" key={blocker}>
+              {blocker}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {hasReviewConflicts ? (
+        <div className="handoff-result warning">
+          <strong>Conflict recovery</strong>
+          {review?.conflictedFiles.length ? (
+            <span>Worktree conflicts: {review.conflictedFiles.join(", ")}</span>
+          ) : null}
+          {reviewHandoff?.mainConflictedFiles.length ? (
+            <span>Main workspace conflicts: {reviewHandoff.mainConflictedFiles.join(", ")}</span>
+          ) : null}
+          <span>{reviewHandoff?.mainOperation.canAbort ? "Abort is available below." : "Resolve conflicts manually."}</span>
+        </div>
+      ) : null}
       <div className="review-file-grid">
         <div className="review-file-list">
-          {changedFiles.length === 0 ? (
+          {groupedFiles.every((group) => group.files.length === 0) ? (
             <div className="empty-panel">No changed files.</div>
           ) : (
-            changedFiles.map((file) => {
-              const status = statusForFile(review?.status ?? [], file);
-              return (
-                <button
-                  className={file === selectedFile ? "review-file active" : "review-file"}
-                  key={file}
-                  title={file}
-                  onClick={() => selectReviewFile(employeeId, file)}
-                >
-                  <span>{file}</span>
-                  <strong>{status ? statusLabel(status) : "changed"}</strong>
-                </button>
-              );
-            })
+            groupedFiles.map((group) =>
+              group.files.length ? (
+                <div className="review-file-group" key={group.title}>
+                  <span className="review-file-group-title">{group.title}</span>
+                  {group.files.map((file) => (
+                    <button
+                      className={file.path === selectedFile ? "review-file active" : "review-file"}
+                      key={`${group.title}-${file.path}`}
+                      title={file.path}
+                      onClick={() => selectReviewFile(employeeId, file.path)}
+                    >
+                      <span>{file.path}</span>
+                      <strong>{file.label}</strong>
+                    </button>
+                  ))}
+                </div>
+              ) : null,
+            )
           )}
         </div>
         <div className="review-file-detail">
@@ -950,6 +1007,7 @@ function ReviewPanel({
             <button
               className="command-button compact"
               disabled={!canStage}
+              title={selectedReviewFile?.conflicted ? "Resolve conflicts before staging" : "Stage file"}
               onClick={() => selectedFile && void stageWorktreeFile(employeeId, selectedFile)}
             >
               Stage
@@ -957,6 +1015,7 @@ function ReviewPanel({
             <button
               className="command-button compact"
               disabled={!canUnstage}
+              title={canUnstage ? "Unstage file" : (review?.disabledReasons.commit ?? "Select a staged file")}
               onClick={() => selectedFile && void unstageWorktreeFile(employeeId, selectedFile)}
             >
               Unstage
@@ -964,6 +1023,7 @@ function ReviewPanel({
             <button
               className="command-button compact"
               disabled={!canDiscard}
+              title={canDiscard ? "Discard unstaged changes" : (review?.disabledReasons.discard ?? "Select an unstaged file")}
               onClick={() => {
                 if (
                   selectedFile &&
@@ -979,6 +1039,7 @@ function ReviewPanel({
             <button
               className="command-button compact danger"
               disabled={!canDeleteUntracked}
+              title={canDeleteUntracked ? "Delete untracked file" : (review?.disabledReasons.deleteUntracked ?? "Select an untracked file")}
               onClick={() => {
                 if (
                   selectedFile &&
@@ -1019,10 +1080,23 @@ function ReviewPanel({
         <button
           className="command-button primary compact"
           disabled={!canCommit}
+          title={commitDisabledReason ?? "Commit staged files"}
           onClick={() => void runCommit()}
         >
           Commit
         </button>
+      </div>
+      <div className="handoff-commits">
+        {(review?.recentCommits ?? commits).length === 0 ? (
+          <div className="empty-panel">No recent commits.</div>
+        ) : (
+          (review?.recentCommits ?? commits).map((commit) => (
+            <div className="handoff-commit" key={commit.hash}>
+              <code>{commit.shortHash}</code>
+              <span title={commit.message}>{commit.message}</span>
+            </div>
+          ))
+        )}
       </div>
       <div className="handoff-panel">
         <div className="section-heading compact-heading">
@@ -1031,29 +1105,29 @@ function ReviewPanel({
         </div>
         <div className="policy-grid">
           <span>Branch</span>
-          <strong title={handoff?.employeeBranch ?? review?.branchName ?? ""}>
-            {handoff?.employeeBranch ?? review?.branchName ?? "unknown"}
+          <strong title={reviewHandoff?.employeeBranch ?? review?.branchName ?? ""}>
+            {reviewHandoff?.employeeBranch ?? review?.branchName ?? "unknown"}
           </strong>
           <span>Main</span>
-          <strong title={handoff?.mainBranch ?? ""}>{handoff?.mainBranch ?? "unknown"}</strong>
+          <strong title={reviewHandoff?.mainBranch ?? ""}>{reviewHandoff?.mainBranch ?? "unknown"}</strong>
           <span>Strategy</span>
-          <strong>{handoff ? formatStrategy(handoff.applyStrategy) : "unknown"}</strong>
+          <strong>{reviewHandoff ? formatStrategy(reviewHandoff.applyStrategy) : "unknown"}</strong>
           <span>Ahead</span>
-          <strong>{handoff?.ahead ?? "unknown"}</strong>
+          <strong>{reviewHandoff?.ahead ?? "unknown"}</strong>
           <span>Behind</span>
-          <strong>{handoff?.behind ?? "unknown"}</strong>
+          <strong>{reviewHandoff?.behind ?? "unknown"}</strong>
           <span>Employee</span>
-          <strong>{handoff ? (handoff.employeeClean ? "clean" : "dirty") : "unknown"}</strong>
+          <strong>{reviewHandoff ? (reviewHandoff.employeeClean ? "clean" : "dirty") : "unknown"}</strong>
           <span>Main clean</span>
-          <strong>{handoff ? (handoff.mainClean ? "clean" : "dirty") : "unknown"}</strong>
+          <strong>{reviewHandoff ? (reviewHandoff.mainClean ? "clean" : "dirty") : "unknown"}</strong>
           <span>State</span>
-          <strong>{handoff?.mainOperation.message ?? "ready"}</strong>
+          <strong>{reviewHandoff?.mainOperation.message ?? "ready"}</strong>
           <span>Latest</span>
           <strong title={latestCommit?.message ?? ""}>
             {latestCommit ? `${latestCommit.shortHash} ${latestCommit.message}` : "none"}
           </strong>
           <span>Apply</span>
-          <strong>{handoff?.message ?? "preflight pending"}</strong>
+          <strong>{reviewHandoff?.message ?? "preflight pending"}</strong>
         </div>
         <div className="handoff-commits">
           {commitsToApply.length === 0 ? (
@@ -1067,9 +1141,9 @@ function ReviewPanel({
             ))
           )}
         </div>
-        {handoff?.blockers.length ? (
+        {reviewHandoff?.blockers.length ? (
           <div className="handoff-blockers">
-            {handoff.blockers.map((blocker) => (
+            {reviewHandoff.blockers.map((blocker) => (
               <div className="inline-warning" key={blocker}>
                 {blocker}
               </div>
@@ -1096,7 +1170,7 @@ function ReviewPanel({
             className="command-button primary compact"
             disabled={!canApplyHandoff}
             onClick={runApplyHandoff}
-            title={handoffDisabledReason || handoff?.blockers.join("; ") || "Apply handoff"}
+            title={handoffDisabledReason || reviewHandoff?.blockers.join("; ") || "Apply handoff"}
           >
             <Check size={14} />
             Apply
@@ -1514,50 +1588,63 @@ function reviewFileKey(employeeId: string, path: string): string {
   return `${employeeId}:${path}`;
 }
 
-function statusForFile(statusLines: string[], file: string): string | null {
-  return (
-    statusLines.find((line) => statusPath(line) === file || statusPath(line)?.endsWith(`/${file}`)) ??
-    null
-  );
-}
+type ReviewFileListItem = { path: string; label: string };
 
-function statusPath(line: string): string | null {
-  if (line.length < 4) {
-    return null;
+function reviewFileGroups(
+  review: WorktreeReview | undefined,
+  fallbackChangedFiles: string[],
+): Array<{ title: string; files: ReviewFileListItem[] }> {
+  if (!review) {
+    return [
+      {
+        title: "Changed",
+        files: fallbackChangedFiles.map((path) => ({ path, label: "changed" })),
+      },
+    ];
   }
-  const rawPath = line.slice(3);
-  if (!rawPath.includes(" -> ")) {
-    return rawPath;
+
+  const fileByPath = new Map(review.files.map((file) => [file.path, file]));
+  const toItems = (paths: string[], fallbackLabel: string) =>
+    paths.map((path) => {
+      const file = fileByPath.get(path);
+      return {
+        path,
+        label: file ? reviewFileLabel(file) : fallbackLabel,
+      };
+    });
+
+  return [
+    { title: "Conflicted", files: toItems(review.conflictedFiles, "conflicted") },
+    { title: "Staged", files: toItems(review.stagedFiles, "staged") },
+    { title: "Unstaged", files: toItems(review.unstagedFiles, "unstaged") },
+    { title: "Untracked", files: toItems(review.untrackedFiles, "untracked") },
+  ];
+}
+
+function reviewFileLabel(file: WorktreeReview["files"][number]): string {
+  if (file.conflicted) {
+    return "conflicted";
   }
-  const parts = rawPath.split(" -> ");
-  return parts[parts.length - 1] ?? rawPath;
-}
-
-function hasStagedChange(statusLine: string): boolean {
-  const staged = statusLine[0];
-  return staged !== " " && staged !== "?";
-}
-
-function hasUnstagedChange(statusLine: string): boolean {
-  return !statusLine.startsWith("?? ") && statusLine[1] !== " ";
-}
-
-function statusLabel(statusLine: string): string {
-  if (statusLine.startsWith("?? ")) {
+  if (file.untracked) {
     return "untracked";
   }
-  const staged = hasStagedChange(statusLine);
-  const unstaged = statusLine[1] !== " ";
-  if (staged && unstaged) {
+  if (file.staged && file.unstaged) {
     return "staged + unstaged";
   }
-  if (staged) {
-    return "staged";
+  if (file.staged) {
+    return file.renamed ? "renamed" : file.deleted ? "deleted" : "staged";
   }
-  if (unstaged) {
-    return "unstaged";
+  if (file.unstaged) {
+    return file.deleted ? "deleted" : "unstaged";
   }
   return "changed";
+}
+
+function formatAheadBehind(ahead?: number | null, behind?: number | null): string {
+  if (ahead == null && behind == null) {
+    return "unknown";
+  }
+  return `+${ahead ?? 0} / -${behind ?? 0}`;
 }
 
 function nextEmployeeName(): string {

@@ -298,7 +298,17 @@ fn review_counts_for_employee(
         return EmployeeReviewCounts::default();
     }
     match run_git(&worktree, &["status", "--porcelain"]) {
-        Ok(output) => review_counts_from_status(&parse_status_lines(&output)),
+        Ok(output) => {
+            let status = parse_status_lines(&output);
+            let conflicted = conflicted_files_from_status(&status);
+            if !conflicted.is_empty() {
+                blockers.push(format!(
+                    "worktree has {} conflicted file(s)",
+                    conflicted.len()
+                ));
+            }
+            review_counts_from_status(&status)
+        }
         Err(error) => {
             blockers.push(format!("worktree status unavailable: {error}"));
             EmployeeReviewCounts::default()
@@ -342,6 +352,33 @@ fn status_path(line: &str) -> String {
     path.split_once(" -> ")
         .map(|(_, to)| to.to_string())
         .unwrap_or_else(|| path.to_string())
+}
+
+fn conflicted_files_from_status(status: &[String]) -> Vec<String> {
+    status
+        .iter()
+        .filter(|line| status_line_is_conflicted(line))
+        .map(|line| status_path(line))
+        .collect()
+}
+
+fn status_line_is_conflicted(line: &str) -> bool {
+    let Some(staged) = line.as_bytes().first().copied() else {
+        return false;
+    };
+    let Some(unstaged) = line.as_bytes().get(1).copied() else {
+        return false;
+    };
+    matches!(
+        (staged, unstaged),
+        (b'D', b'D')
+            | (b'A', b'U')
+            | (b'U', b'D')
+            | (b'U', b'A')
+            | (b'D', b'U')
+            | (b'A', b'A')
+            | (b'U', b'U')
+    )
 }
 
 fn handoff_ready_for_employee(

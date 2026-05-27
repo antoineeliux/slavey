@@ -1428,6 +1428,19 @@ select:focus {
   min-width: 0;
 }
 
+.review-file-group {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.review-file-group-title {
+  color: #7f8796;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
 .review-file {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

@@ -21,7 +21,7 @@ use self::parsing::{
     commit_from_output, employee_worktree_is_clean, has_staged_changes,
     has_unstaged_change_for_path, is_untracked_file, main_workspace_has_uncommitted_changes,
     parse_ahead_behind, parse_changed_files, parse_commit_log, parse_staged_files,
-    parse_untracked_files, validate_commit_message,
+    validate_commit_message,
 };
 use self::runner::bounded_git_output;
 pub(crate) use self::{
@@ -30,6 +30,7 @@ pub(crate) use self::{
 };
 
 const MAX_UNTRACKED_PREVIEW_BYTES: usize = 64 * 1024;
+const MAX_REVIEW_RECENT_COMMITS: usize = 5;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,10 +50,65 @@ pub struct WorktreeReview {
     pub employee_id: String,
     pub worktree_path: String,
     pub branch_name: Option<String>,
+    pub base_branch: Option<String>,
+    pub upstream_branch: Option<String>,
+    pub remote: WorktreeRemoteInfo,
+    pub ahead: Option<u32>,
+    pub behind: Option<u32>,
+    pub upstream_ahead: Option<u32>,
+    pub upstream_behind: Option<u32>,
+    pub clean: bool,
     pub status: Vec<String>,
+    pub changed_files: Vec<String>,
+    pub files: Vec<WorktreeReviewFile>,
+    pub staged_files: Vec<String>,
+    pub unstaged_files: Vec<String>,
     pub unstaged_diff: String,
     pub staged_diff: String,
     pub untracked_files: Vec<String>,
+    pub conflicted_files: Vec<String>,
+    pub recent_commits: Vec<WorktreeCommit>,
+    pub handoff: Option<WorktreeHandoffPreflight>,
+    pub operation: WorktreeHandoffOperationState,
+    pub blockers: Vec<String>,
+    pub disabled_reasons: WorktreeReviewDisabledReasons,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeReviewFile {
+    pub path: String,
+    pub status: String,
+    pub staged: bool,
+    pub unstaged: bool,
+    pub untracked: bool,
+    pub conflicted: bool,
+    pub deleted: bool,
+    pub renamed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeRemoteInfo {
+    pub remote_name: Option<String>,
+    pub remote_url: Option<String>,
+    pub upstream_branch: Option<String>,
+    pub upstream_exists: bool,
+    pub ahead: Option<u32>,
+    pub behind: Option<u32>,
+    pub push_disabled_reason: Option<String>,
+    pub pull_request_disabled_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeReviewDisabledReasons {
+    pub commit: Option<String>,
+    pub discard: Option<String>,
+    pub delete_untracked: Option<String>,
+    pub handoff_apply: Option<String>,
+    pub push: Option<String>,
+    pub pull_request: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +162,7 @@ pub struct WorktreeHandoffPreflight {
     pub commits_to_apply: Vec<WorktreeCommit>,
     pub employee_clean: bool,
     pub main_clean: bool,
+    pub main_conflicted_files: Vec<String>,
     pub apply_strategy: String,
     pub main_operation: WorktreeHandoffOperationState,
     pub blockers: Vec<String>,
@@ -361,17 +418,101 @@ pub fn git_worktree_review_for_employee(
     }
     let workspace_root = state.workspace_root();
     let path = resolve_employee_execution_dir(&workspace_root, &employee, None)?;
+    let branch_name = employee
+        .branch_name
+        .clone()
+        .or_else(|| current_branch(&path).ok().flatten());
+    let base_branch = current_branch(&workspace_root).ok().flatten();
+    let upstream_branch = upstream_branch(&path).ok().flatten();
+    let (behind, ahead) = base_branch
+        .as_deref()
+        .and_then(|base| ahead_behind(&path, base).ok())
+        .unwrap_or((None, None));
+    let (upstream_behind, upstream_ahead) = upstream_branch
+        .as_deref()
+        .and_then(|upstream| ahead_behind(&path, upstream).ok())
+        .unwrap_or((None, None));
+    let remote = worktree_remote_info(
+        &path,
+        upstream_branch.clone(),
+        upstream_ahead,
+        upstream_behind,
+    );
     let status = parse_status_lines(&run_git(&path, &["status", "--porcelain"])?);
-    let untracked_files = parse_untracked_files(&status);
+    let files = review_files_from_status(&status);
+    let changed_files = parse_changed_files(&status);
+    let staged_files = files
+        .iter()
+        .filter(|file| file.staged)
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    let unstaged_files = files
+        .iter()
+        .filter(|file| file.unstaged)
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    let untracked_files = files
+        .iter()
+        .filter(|file| file.untracked)
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    let conflicted_files = files
+        .iter()
+        .filter(|file| file.conflicted)
+        .map(|file| file.path.clone())
+        .collect::<Vec<_>>();
+    let clean = status.is_empty();
+    let recent_commits = git_log(&path, MAX_REVIEW_RECENT_COMMITS).unwrap_or_default();
+    let operation = handoff_operation_state(&path);
+    let mut blockers = review_blockers(&path, &conflicted_files, &operation);
+    let handoff = match handoff_preflight_for_paths(
+        employee_id.clone(),
+        &workspace_root,
+        &path,
+        branch_name.clone(),
+    ) {
+        Ok(preflight) => Some(preflight),
+        Err(error) => {
+            blockers.push(format!("handoff preflight unavailable: {error}"));
+            None
+        }
+    };
+    let disabled_reasons = review_disabled_reasons(ReviewDisabledReasonInput {
+        staged_files: staged_files.len(),
+        unstaged_files: unstaged_files.len(),
+        untracked_files: untracked_files.len(),
+        conflicted_files: conflicted_files.len(),
+        operation: &operation,
+        handoff: handoff.as_ref(),
+        remote: &remote,
+    });
 
     Ok(WorktreeReview {
         employee_id,
         worktree_path: path.to_string_lossy().to_string(),
-        branch_name: employee.branch_name,
+        branch_name,
+        base_branch,
+        upstream_branch,
+        remote,
+        ahead,
+        behind,
+        upstream_ahead,
+        upstream_behind,
+        clean,
         status,
-        unstaged_diff: run_git(&path, &["diff"])?,
-        staged_diff: run_git(&path, &["diff", "--cached"])?,
+        changed_files,
+        files,
+        staged_files,
+        unstaged_files,
+        unstaged_diff: bounded_review_diff(&path, &["diff"]),
+        staged_diff: bounded_review_diff(&path, &["diff", "--cached"]),
         untracked_files,
+        conflicted_files,
+        recent_commits,
+        handoff,
+        operation,
+        blockers,
+        disabled_reasons,
     })
 }
 
@@ -392,9 +533,9 @@ pub fn git_worktree_file_diff_for_employee(
     path: String,
 ) -> Result<String, String> {
     let (worktree, _) = employee_worktree(&state, &employee_id)?;
-    let relative = resolve_worktree_relative_path(&worktree, &path)?;
-    let staged = run_git(&worktree, &["diff", "--cached", "--", &relative])?;
-    let unstaged = run_git(&worktree, &["diff", "--", &relative])?;
+    let relative = resolve_safe_worktree_relative_path(&worktree, &path)?;
+    let staged = file_diff_or_marker(&worktree, &["diff", "--cached", "--", &relative]);
+    let unstaged = file_diff_or_marker(&worktree, &["diff", "--", &relative]);
     let status = parse_status_lines(&run_git(&worktree, &["status", "--porcelain"])?);
     Ok(
         match (staged.trim().is_empty(), unstaged.trim().is_empty()) {
@@ -434,6 +575,13 @@ pub fn git_worktree_commit_for_employee(
     let message = validate_commit_message(&payload.message)?;
     let (worktree, _) = employee_worktree(&state, &payload.employee_id)?;
     let status = parse_status_lines(&run_git(&worktree, &["status", "--porcelain"])?);
+    let conflicted_files = conflicted_files_from_status(&status);
+    if !conflicted_files.is_empty() {
+        return Err(format!(
+            "commit is blocked until conflicted files are resolved: {}",
+            conflicted_files.join(", ")
+        ));
+    }
     if !has_staged_changes(&status) {
         return Err("commit requires staged changes".to_string());
     }
@@ -576,7 +724,7 @@ pub fn git_worktree_stage_file(
     path: String,
 ) -> Result<WorktreeReview, String> {
     let (worktree, _) = employee_worktree(&state, &employee_id)?;
-    let relative = resolve_worktree_relative_path(&worktree, &path)?;
+    let relative = resolve_safe_worktree_relative_path(&worktree, &path)?;
     run_git(&worktree, &["add", "--", &relative])?;
     emit_employee_activity_updated(&app, Some(employee_id.clone()));
     git_worktree_review_for_employee(state, employee_id)
@@ -623,7 +771,7 @@ pub fn git_worktree_unstage_file(
     path: String,
 ) -> Result<WorktreeReview, String> {
     let (worktree, _) = employee_worktree(&state, &employee_id)?;
-    let relative = resolve_worktree_relative_path(&worktree, &path)?;
+    let relative = resolve_safe_worktree_relative_path(&worktree, &path)?;
     run_git(&worktree, &["restore", "--staged", "--", &relative])?;
     emit_employee_activity_updated(&app, Some(employee_id.clone()));
     git_worktree_review_for_employee(state, employee_id)
@@ -664,6 +812,7 @@ fn handoff_preflight_for_paths(
     let main_status = parse_status_lines(&run_git(workspace_root, &["status", "--porcelain"])?);
     let employee_clean = employee_worktree_is_clean(&employee_status);
     let main_clean = !main_workspace_has_uncommitted_changes(&main_status);
+    let main_conflicted_files = conflicted_files_from_status(&main_status);
     let main_operation = handoff_operation_state(workspace_root);
     let blockers = build_handoff_blockers(HandoffBlockerInput {
         employee_branch: employee_branch.as_deref(),
@@ -689,6 +838,7 @@ fn handoff_preflight_for_paths(
         commits_to_apply,
         employee_clean,
         main_clean,
+        main_conflicted_files,
         apply_strategy: "cherry_pick".to_string(),
         main_operation,
         blockers,
@@ -878,6 +1028,243 @@ fn ahead_behind_between(
     Ok(parse_ahead_behind(&output))
 }
 
+fn worktree_remote_info(
+    worktree: &Path,
+    upstream_branch: Option<String>,
+    ahead: Option<u32>,
+    behind: Option<u32>,
+) -> WorktreeRemoteInfo {
+    let remote_name = upstream_branch
+        .as_deref()
+        .and_then(|branch| branch.split_once('/').map(|(remote, _)| remote.to_string()))
+        .or_else(|| first_remote(worktree));
+    let remote_url = remote_name
+        .as_deref()
+        .and_then(|remote| {
+            run_git(
+                worktree,
+                &["config", "--get", &format!("remote.{remote}.url")],
+            )
+            .ok()
+        })
+        .and_then(non_empty_trimmed);
+    let upstream_exists = run_git(worktree, &["rev-parse", "--verify", "@{upstream}"]).is_ok();
+    let push_disabled_reason = future_push_disabled_reason(
+        remote_name.as_deref(),
+        remote_url.as_deref(),
+        upstream_branch.as_deref(),
+    );
+    let pull_request_disabled_reason =
+        future_pull_request_disabled_reason(remote_name.as_deref(), upstream_branch.as_deref());
+
+    WorktreeRemoteInfo {
+        remote_name,
+        remote_url,
+        upstream_branch,
+        upstream_exists,
+        ahead,
+        behind,
+        push_disabled_reason,
+        pull_request_disabled_reason,
+    }
+}
+
+fn first_remote(worktree: &Path) -> Option<String> {
+    run_git(worktree, &["remote"]).ok().and_then(|output| {
+        output
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(ToString::to_string)
+    })
+}
+
+fn future_push_disabled_reason(
+    remote_name: Option<&str>,
+    remote_url: Option<&str>,
+    upstream_branch: Option<&str>,
+) -> Option<String> {
+    if upstream_branch.is_none() {
+        return Some("no upstream configured".to_string());
+    }
+    if remote_name.is_none() {
+        return Some("no remote configured".to_string());
+    }
+    if remote_url.is_none() {
+        return Some("remote URL unavailable".to_string());
+    }
+    Some("push is not implemented yet".to_string())
+}
+
+fn future_pull_request_disabled_reason(
+    remote_name: Option<&str>,
+    upstream_branch: Option<&str>,
+) -> Option<String> {
+    if upstream_branch.is_none() {
+        return Some("no upstream configured".to_string());
+    }
+    if remote_name.is_none() {
+        return Some("no remote configured".to_string());
+    }
+    Some("pull request creation is not implemented yet".to_string())
+}
+
+fn review_files_from_status(status: &[String]) -> Vec<WorktreeReviewFile> {
+    status
+        .iter()
+        .filter_map(|line| review_file_from_status_line(line))
+        .collect()
+}
+
+fn review_file_from_status_line(line: &str) -> Option<WorktreeReviewFile> {
+    let path = status_path_from_line(line)?;
+    let status = if line.len() >= 2 {
+        line[..2].to_string()
+    } else {
+        line.to_string()
+    };
+    let staged_code = line.as_bytes().first().copied().unwrap_or(b' ');
+    let unstaged_code = line.as_bytes().get(1).copied().unwrap_or(b' ');
+    let untracked = line.starts_with("?? ");
+    let conflicted = status_line_is_conflicted(line);
+    let staged = !untracked && staged_code != b' ' && staged_code != b'?';
+    let unstaged = !untracked && unstaged_code != b' ';
+    let deleted = staged_code == b'D' || unstaged_code == b'D';
+    let renamed = staged_code == b'R' || line.contains(" -> ");
+
+    Some(WorktreeReviewFile {
+        path,
+        status,
+        staged,
+        unstaged,
+        untracked,
+        conflicted,
+        deleted,
+        renamed,
+    })
+}
+
+fn status_path_from_line(line: &str) -> Option<String> {
+    if line.len() < 4 {
+        return None;
+    }
+    let path = &line[3..];
+    if let Some((_, to)) = path.split_once(" -> ") {
+        Some(to.to_string())
+    } else {
+        Some(path.to_string())
+    }
+}
+
+fn conflicted_files_from_status(status: &[String]) -> Vec<String> {
+    review_files_from_status(status)
+        .into_iter()
+        .filter(|file| file.conflicted)
+        .map(|file| file.path)
+        .collect()
+}
+
+fn status_line_is_conflicted(line: &str) -> bool {
+    let Some(staged) = line.as_bytes().first().copied() else {
+        return false;
+    };
+    let Some(unstaged) = line.as_bytes().get(1).copied() else {
+        return false;
+    };
+    matches!(
+        (staged, unstaged),
+        (b'D', b'D')
+            | (b'A', b'U')
+            | (b'U', b'D')
+            | (b'U', b'A')
+            | (b'D', b'U')
+            | (b'A', b'A')
+            | (b'U', b'U')
+    )
+}
+
+fn review_blockers(
+    worktree: &Path,
+    conflicted_files: &[String],
+    operation: &WorktreeHandoffOperationState,
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if !git_success(worktree, &["rev-parse", "--show-toplevel"]) {
+        blockers.push("employee worktree is not a git repository".to_string());
+    }
+    if !conflicted_files.is_empty() {
+        blockers.push(format!(
+            "worktree has {} conflicted file(s)",
+            conflicted_files.len()
+        ));
+    }
+    if operation.in_progress {
+        let operation = operation.operation.as_deref().unwrap_or("git");
+        blockers.push(format!("worktree has an in-progress {operation} operation"));
+    }
+    blockers
+}
+
+struct ReviewDisabledReasonInput<'a> {
+    staged_files: usize,
+    unstaged_files: usize,
+    untracked_files: usize,
+    conflicted_files: usize,
+    operation: &'a WorktreeHandoffOperationState,
+    handoff: Option<&'a WorktreeHandoffPreflight>,
+    remote: &'a WorktreeRemoteInfo,
+}
+
+fn review_disabled_reasons(input: ReviewDisabledReasonInput<'_>) -> WorktreeReviewDisabledReasons {
+    let commit = if input.conflicted_files > 0 {
+        Some("resolve conflicted files before committing".to_string())
+    } else if input.operation.in_progress {
+        Some("finish or abort the in-progress git operation before committing".to_string())
+    } else if input.staged_files == 0 {
+        Some("stage files before committing".to_string())
+    } else {
+        None
+    };
+    let discard = (input.unstaged_files == 0)
+        .then(|| "select a file with unstaged changes to discard".to_string());
+    let delete_untracked =
+        (input.untracked_files == 0).then(|| "select an untracked file to delete".to_string());
+    let handoff_apply = match input.handoff {
+        Some(handoff) if handoff.can_apply => None,
+        Some(handoff) if !handoff.blockers.is_empty() => Some(handoff.blockers.join("; ")),
+        Some(_) => Some("handoff apply is not ready".to_string()),
+        None => Some("handoff preflight is unavailable".to_string()),
+    };
+
+    WorktreeReviewDisabledReasons {
+        commit,
+        discard,
+        delete_untracked,
+        handoff_apply,
+        push: input.remote.push_disabled_reason.clone(),
+        pull_request: input.remote.pull_request_disabled_reason.clone(),
+    }
+}
+
+fn bounded_review_diff(cwd: &Path, args: &[&str]) -> String {
+    match run_git(cwd, args) {
+        Ok(output) => output,
+        Err(error) if error.contains("output exceeded") => format!("[diff omitted: {error}]"),
+        Err(error) => format!("[diff unavailable: {error}]"),
+    }
+}
+
+fn file_diff_or_marker(cwd: &Path, args: &[&str]) -> String {
+    match run_git(cwd, args) {
+        Ok(output) if output.contains("Binary files ") => {
+            format!("binary file diff omitted\n{output}")
+        }
+        Ok(output) => output,
+        Err(error) if error.contains("output exceeded") => format!("[diff omitted: {error}]"),
+        Err(error) => format!("[diff unavailable: {error}]"),
+    }
+}
+
 struct HandoffBlockerInput<'a> {
     employee_branch: Option<&'a str>,
     main_branch: Option<&'a str>,
@@ -945,6 +1332,18 @@ fn handoff_operation_state(cwd: &Path) -> WorktreeHandoffOperationState {
             head: None,
             can_abort: false,
             message: Some("rebase in progress".to_string()),
+        };
+    }
+    if git_state_path(cwd, "BISECT_LOG")
+        .map(|path| path.exists())
+        .unwrap_or(false)
+    {
+        return WorktreeHandoffOperationState {
+            in_progress: true,
+            operation: Some("bisect".to_string()),
+            head: None,
+            can_abort: false,
+            message: Some("bisect in progress".to_string()),
         };
     }
 
@@ -1188,9 +1587,12 @@ mod tests {
     use std::{fs as std_fs, path::PathBuf};
 
     use super::{
-        build_handoff_blockers, handoff_preflight_for_paths, is_cherry_pick_conflict,
-        parse_status_lines, remove_untracked_file, resolve_safe_worktree_relative_path, run_git,
-        untracked_file_preview, HandoffBlockerInput, WorktreeHandoffOperationState,
+        ahead_behind, build_handoff_blockers, conflicted_files_from_status, file_diff_or_marker,
+        handoff_operation_state, handoff_preflight_for_paths, is_cherry_pick_conflict,
+        parse_status_lines, remove_untracked_file, resolve_safe_worktree_relative_path,
+        review_disabled_reasons, review_files_from_status, run_git, untracked_file_preview,
+        upstream_branch, worktree_remote_info, HandoffBlockerInput, ReviewDisabledReasonInput,
+        WorktreeHandoffOperationState, WorktreeRemoteInfo,
     };
 
     fn test_root(name: &str) -> PathBuf {
@@ -1249,6 +1651,123 @@ mod tests {
             "",
             "fatal: bad revision 'missing-branch'"
         ));
+    }
+
+    #[test]
+    fn structured_review_groups_status_lines() {
+        let status = parse_status_lines(
+            "MM src/lib.rs\nA  staged.rs\n M unstaged.rs\n?? scratch.txt\nUU conflict.txt\nR  old.rs -> new.rs\n D deleted.rs\n",
+        );
+
+        let files = review_files_from_status(&status);
+        let conflicted = conflicted_files_from_status(&status);
+
+        assert!(files
+            .iter()
+            .any(|file| file.path == "src/lib.rs" && file.staged && file.unstaged));
+        assert!(files
+            .iter()
+            .any(|file| file.path == "scratch.txt" && file.untracked));
+        assert!(files
+            .iter()
+            .any(|file| file.path == "new.rs" && file.renamed));
+        assert!(files
+            .iter()
+            .any(|file| file.path == "deleted.rs" && file.deleted));
+        assert_eq!(conflicted, vec!["conflict.txt".to_string()]);
+    }
+
+    #[test]
+    fn review_disabled_reasons_report_blockers_and_remote_readiness() {
+        let operation = WorktreeHandoffOperationState {
+            in_progress: false,
+            operation: None,
+            head: None,
+            can_abort: false,
+            message: None,
+        };
+        let remote = WorktreeRemoteInfo {
+            remote_name: Some("origin".to_string()),
+            remote_url: Some("https://example.test/repo.git".to_string()),
+            upstream_branch: Some("origin/main".to_string()),
+            upstream_exists: true,
+            ahead: Some(1),
+            behind: Some(0),
+            push_disabled_reason: Some("push is not implemented yet".to_string()),
+            pull_request_disabled_reason: Some(
+                "pull request creation is not implemented yet".to_string(),
+            ),
+        };
+
+        let reasons = review_disabled_reasons(ReviewDisabledReasonInput {
+            staged_files: 0,
+            unstaged_files: 1,
+            untracked_files: 0,
+            conflicted_files: 1,
+            operation: &operation,
+            handoff: None,
+            remote: &remote,
+        });
+
+        assert_eq!(
+            reasons.commit.as_deref(),
+            Some("resolve conflicted files before committing")
+        );
+        assert!(reasons.discard.is_none());
+        assert!(reasons.delete_untracked.is_some());
+        assert_eq!(reasons.push.as_deref(), Some("push is not implemented yet"));
+        assert_eq!(
+            reasons.pull_request.as_deref(),
+            Some("pull request creation is not implemented yet")
+        );
+    }
+
+    #[test]
+    fn operation_state_detects_bisect() {
+        let root = test_root("bisect-state");
+        run_git(&root, &["init"]).unwrap();
+        std_fs::write(root.join(".git").join("BISECT_LOG"), "git bisect start\n").unwrap();
+
+        let operation = handoff_operation_state(&root);
+
+        assert!(operation.in_progress);
+        assert_eq!(operation.operation.as_deref(), Some("bisect"));
+    }
+
+    #[test]
+    fn remote_status_reports_upstream_and_read_only_push_state() {
+        let root = test_root("remote-status");
+        let remote = test_root("remote-status-bare");
+        run_git(&remote, &["init", "--bare"]).unwrap();
+        run_git(&root, &["init"]).unwrap();
+        run_git(&root, &["config", "user.name", "Slavey Test"]).unwrap();
+        run_git(&root, &["config", "user.email", "slavey@example.test"]).unwrap();
+        run_git(&root, &["checkout", "-B", "main"]).unwrap();
+        std_fs::write(root.join("README.md"), "base\n").unwrap();
+        run_git(&root, &["add", "README.md"]).unwrap();
+        run_git(&root, &["commit", "-m", "Initial"]).unwrap();
+        run_git(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        )
+        .unwrap();
+        run_git(&root, &["push", "-u", "origin", "main"]).unwrap();
+        std_fs::write(root.join("feature.txt"), "feature\n").unwrap();
+        run_git(&root, &["add", "feature.txt"]).unwrap();
+        run_git(&root, &["commit", "-m", "Local feature"]).unwrap();
+
+        let upstream = upstream_branch(&root).unwrap();
+        let (behind, ahead) = ahead_behind(&root, upstream.as_deref().unwrap()).unwrap();
+        let remote_info = worktree_remote_info(&root, upstream, ahead, behind);
+
+        assert_eq!(remote_info.remote_name.as_deref(), Some("origin"));
+        assert!(remote_info.upstream_exists);
+        assert_eq!(remote_info.ahead, Some(1));
+        assert_eq!(remote_info.behind, Some(0));
+        assert_eq!(
+            remote_info.push_disabled_reason.as_deref(),
+            Some("push is not implemented yet")
+        );
     }
 
     #[test]
@@ -1335,6 +1854,22 @@ mod tests {
         let preview = untracked_file_preview(&root, "binary.bin").unwrap();
 
         assert!(preview.contains("binary file omitted"));
+    }
+
+    #[test]
+    fn file_diff_marks_binary_content() {
+        let root = test_root("binary-diff");
+        run_git(&root, &["init"]).unwrap();
+        run_git(&root, &["config", "user.name", "Slavey Test"]).unwrap();
+        run_git(&root, &["config", "user.email", "slavey@example.test"]).unwrap();
+        std_fs::write(root.join("binary.bin"), b"abc\0def").unwrap();
+        run_git(&root, &["add", "binary.bin"]).unwrap();
+        run_git(&root, &["commit", "-m", "Add binary"]).unwrap();
+        std_fs::write(root.join("binary.bin"), b"abc\0changed").unwrap();
+
+        let diff = file_diff_or_marker(&root, &["diff", "--", "binary.bin"]);
+
+        assert!(diff.contains("binary file diff omitted"));
     }
 
     #[test]
