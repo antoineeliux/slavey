@@ -74,4 +74,8 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 ## Testing Expectations
 
 - Rust tests should cover path safety, process lifecycle, action transitions, git parsing, persistence restore behavior, approval gates, and terminal ownership/session behavior.
-- Frontend code must at least pass TypeScript validation until a frontend test framework is introduced.
+- Frontend helper, store, and component tests should cover UI infrastructure before adding visual or game work.
+- Frontend tests should mock Tauri APIs through the typed command boundary and shared test setup, not through scattered ad hoc mocks.
+- Avoid brittle visual snapshot tests for now; prefer state-driven render and smoke tests.
+- Future animated employee UI should include render tests driven by backend `EmployeeActivity` state.
+- Browser-level smoke/E2E coverage should be added in a dedicated phase once the web app can be tested without increasing local validation cost too much.

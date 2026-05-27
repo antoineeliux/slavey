@@ -7,6 +7,7 @@ MVP desktop app for managing AI coding-agent employees. The app uses Tauri 2, a 
 ```sh
 npm install
 npm run install-hooks
+npm run test:web:run
 npm run check
 npm run dev
 npm run build

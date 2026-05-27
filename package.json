@@ -9,11 +9,14 @@
     "build": "tauri build",
     "build:web": "tsc --noEmit && vite build",
     "check": "npm run check:web && npm run check:rust",
-    "check:web": "npm run typecheck && vite build",
+    "check:web": "npm run typecheck && npm run test:web:run && vite build",
     "check:rust": "npm run check:format && npm run check:clippy && npm run test:rust",
     "check:format": "cd src-tauri && cargo fmt -- --check",
     "check:clippy": "cd src-tauri && cargo clippy --all-targets -- -D warnings",
     "test:rust": "cd src-tauri && cargo test",
+    "test:web": "vitest",
+    "test:web:run": "vitest run",
+    "check:frontend-tests": "npm run test:web:run",
     "typecheck": "tsc --noEmit",
     "install-hooks": "git config core.hooksPath .githooks",
     "preview": "vite preview --host 127.0.0.1 --port 1420"
@@ -36,10 +39,14 @@
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.2",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
+    "jsdom": "^29.1.1",
     "typescript": "^6.0.3",
-    "vite": "^8.0.14"
+    "vite": "^8.0.14",
+    "vitest": "^4.1.7"
   }
 }
