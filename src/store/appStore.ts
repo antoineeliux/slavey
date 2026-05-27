@@ -88,6 +88,7 @@ type AppStore = {
   recentWorkspaces: string[];
   settings: AppSettings;
   workspaceLoading: boolean;
+  workspaceError: string | null;
   terminalBuffers: Record<string, string>;
   terminalSessions: TerminalSessionRecord[];
   logs: AppLog[];
@@ -188,6 +189,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   recentWorkspaces: [],
   settings: DEFAULT_SETTINGS,
   workspaceLoading: false,
+  workspaceError: null,
   terminalBuffers: {},
   terminalSessions: [],
   logs: [],
@@ -248,6 +250,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         recentWorkspaces: workspaceInfo.recentWorkspaces ?? snapshot.recentWorkspaces ?? [],
         settings,
         codexCliStatus: workspaceInfo.repoHealth.codexCliStatus,
+        workspaceError: null,
         activeTab: snapshot.activeTab ?? "terminal",
         recentFiles: snapshot.recentFiles ?? [],
         approvals,
@@ -312,7 +315,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   loadWorkspaceInfo: async () => {
-    set({ workspaceLoading: true });
+    set({ workspaceLoading: true, workspaceError: null });
     try {
       const workspaceInfo = await invoke<WorkspaceInfo>("workspace_info");
       set({
@@ -322,10 +325,12 @@ export const useAppStore = create<AppStore>((set, get) => ({
         settings: normalizeSettings(workspaceInfo.settings),
         codexCliStatus: workspaceInfo.repoHealth.codexCliStatus,
         workspaceLoading: false,
+        workspaceError: null,
       });
     } catch (error) {
-      set({ workspaceLoading: false });
-      get().addLog(localLog("warn", `workspace info failed: ${formatError(error)}`));
+      const message = formatError(error);
+      set({ workspaceLoading: false, workspaceError: message });
+      get().addLog(localLog("warn", `workspace info failed: ${message}`));
     }
   },
 
@@ -335,14 +340,15 @@ export const useAppStore = create<AppStore>((set, get) => ({
       get().addLog(localLog("warn", "workspace path is required"));
       return;
     }
-    set({ workspaceLoading: true });
+    set({ workspaceLoading: true, workspaceError: null });
     try {
       const workspaceInfo = await invoke<WorkspaceInfo>("workspace_set_root", { path: trimmed });
       resetWorkspaceFrontendState(set, workspaceInfo);
       await get().loadDir(workspaceInfo.workspaceRoot);
     } catch (error) {
-      set({ workspaceLoading: false });
-      get().addLog(localLog("error", `open workspace failed: ${formatError(error)}`));
+      const message = formatError(error);
+      set({ workspaceLoading: false, workspaceError: message });
+      get().addLog(localLog("error", `open workspace failed: ${message}`));
     }
   },
 
@@ -1202,6 +1208,7 @@ function resetWorkspaceFrontendState(
     recentWorkspaces: workspaceInfo.recentWorkspaces,
     settings: normalizeSettings(workspaceInfo.settings),
     workspaceLoading: false,
+    workspaceError: null,
     terminalBuffers: {},
     terminalSessions: [],
     approvals: [],

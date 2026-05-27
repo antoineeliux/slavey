@@ -133,6 +133,8 @@ export type RepoHealth = {
   gitUserEmailConfigured: boolean;
   worktreeSupported: boolean;
   worktreeSupportMessage: string;
+  worktreeBlockers: string[];
+  handoffBlockers: string[];
   codexCliStatus: CodexCliStatus;
 };
 

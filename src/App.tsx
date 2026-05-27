@@ -165,6 +165,7 @@ function SettingsPane() {
   const recentWorkspaces = useAppStore((state) => state.recentWorkspaces);
   const settings = useAppStore((state) => state.settings);
   const workspaceLoading = useAppStore((state) => state.workspaceLoading);
+  const workspaceError = useAppStore((state) => state.workspaceError);
   const setWorkspaceRoot = useAppStore((state) => state.setWorkspaceRoot);
   const loadWorkspaceInfo = useAppStore((state) => state.loadWorkspaceInfo);
   const clearRecentWorkspaces = useAppStore((state) => state.clearRecentWorkspaces);
@@ -271,6 +272,12 @@ function SettingsPane() {
             </div>
           ) : null}
 
+          {workspaceError ? (
+            <div className="inline-warning">{workspaceError}</div>
+          ) : null}
+
+          <WorkspaceFeatureBlockers health={health} />
+
           <section className="settings-section">
             <div className="section-heading compact-heading">
               <History size={15} />
@@ -305,6 +312,28 @@ function SettingsPane() {
           <SettingsForm settings={settings} onChange={updateSettings} />
         </div>
       </section>
+    </div>
+  );
+}
+
+function WorkspaceFeatureBlockers({ health }: { health: RepoHealth | null }) {
+  if (!health) {
+    return null;
+  }
+  const blockers = [
+    ...health.worktreeBlockers.map((blocker) => `Worktree: ${blocker}`),
+    ...health.handoffBlockers.map((blocker) => `Handoff: ${blocker}`),
+  ];
+  if (blockers.length === 0) {
+    return null;
+  }
+  return (
+    <div className="handoff-blockers">
+      {blockers.map((blocker) => (
+        <div className="inline-warning" key={blocker}>
+          {blocker}
+        </div>
+      ))}
     </div>
   );
 }
@@ -1374,7 +1403,7 @@ function repoCapabilityDisabledReason(health: RepoHealth | null): string | null 
     return `Configure git user.name and user.email for this workspace (${identityLabel(health)})`;
   }
   if (!health.worktreeSupported) {
-    return health.worktreeSupportMessage;
+    return health.worktreeBlockers[0] ?? health.worktreeSupportMessage;
   }
   return null;
 }
