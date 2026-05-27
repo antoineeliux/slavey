@@ -47,6 +47,9 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Remote status is read-only until a dedicated push/PR phase; do not auto-push or call hosting APIs from review code.
 - Employee and game UI must use backend employee activity state as the source of truth.
 - Terminal output must not be parsed for status unless a future explicit structured protocol is added.
+- Frontend raw Tauri `invoke` calls should live in the typed command layer, not directly in panels or store actions.
+- Split large frontend panels before adding new behavior, and avoid mixing visual redesign with infrastructure refactors.
+- Future animated employee UI must stay a presentation layer over backend activity/status state.
 - Terminal metadata may be persisted, but raw terminal output must not be persisted unless explicitly bounded and sanitized.
 - Terminal operations must validate employeeId and sessionId ownership at the backend boundary.
 - Future employee and game UI should be a presentation layer over backend state, not a second source of truth.
@@ -57,6 +60,7 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - New growth should split modules once a file is around 700-900 lines or has multiple responsibilities.
 - Prefer splitting by domain boundary: git runner/parsing/review/handoff, terminal session store/Codex status/PTY handling, filesystem path safety/file operations/search, and actions state/execution/approval transitions.
 - For large Rust command modules, keep Tauri commands at the module boundary and extract cohesive private submodules for pure helpers or runners.
+- For frontend state, keep the current Zustand store behavior stable; a future dedicated phase should split it by workspace, employees/activity, terminal, actions/approvals, review/git, editor/files, and process/log domains.
 - Do not mix large refactors with feature phases.
 
 ## Testing Expectations

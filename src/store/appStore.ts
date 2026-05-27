@@ -1,15 +1,36 @@
-import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { create } from "zustand";
 
+import * as commands from "../lib/tauriCommands";
+import type {
+  CreateActionInput,
+  CreateApprovalInput,
+  CreateEmployeeInput,
+} from "../lib/tauriCommands";
+import {
+  DEFAULT_SETTINGS,
+  activitiesByEmployee,
+  appendBoundedTerminalBuffer,
+  confirmDiscardIfNeeded,
+  formatError,
+  hasFileChangedOnDisk,
+  isMissingPathError,
+  localLog,
+  movedPathAfterRename,
+  normalizeSettings,
+  openFileFromPayload,
+  parentDir,
+  pathIsSameOrChild,
+  reviewFileKey,
+  shortPath,
+  type OpenFile,
+} from "./helpers";
 import type {
   Action,
-  ActionKind,
   ActionUpdatedPayload,
   AppLog,
   AppSettings,
   AppSettingsUpdate,
-  AppStateSnapshot,
   AppTab,
   ApprovalRequest,
   ApprovalUpdatedPayload,
@@ -17,10 +38,8 @@ import type {
   Employee,
   EmployeeActivity,
   EmployeeActivityUpdatedPayload,
-  EmployeeRole,
   EmployeeUpdatedPayload,
   FileMetadata,
-  FilePayload,
   FsEntry,
   FsSearchResult,
   ManagedProcess,
@@ -37,56 +56,6 @@ import type {
   WorktreeStatus,
   WorkspaceInfo,
 } from "../types";
-
-const MAX_TERMINAL_BUFFER_CHARS = 250_000;
-const TERMINAL_TRUNCATION_MARKER = "\n[... earlier output truncated ...]\n";
-const DEFAULT_SETTINGS: AppSettings = {
-  defaultTerminalProfile: "shell",
-  requireConfirmationDiscard: true,
-  requireConfirmationDelete: true,
-  requireConfirmationHandoffApply: true,
-  maxTerminalBufferChars: MAX_TERMINAL_BUFFER_CHARS,
-};
-
-type OpenFile = {
-  path: string;
-  savedContents: string;
-  contents: string;
-  dirty: boolean;
-  lastSavedAt: number | null;
-  saveError: string | null;
-  metadata: FileMetadata | null;
-  openedModified: number | null;
-};
-
-type CreateEmployeeInput = {
-  name: string;
-  role: EmployeeRole;
-  cwd?: string;
-};
-
-type CreateApprovalInput = {
-  employeeId: string;
-  actionId?: string | null;
-  kind: ApprovalRequest["kind"];
-  title: string;
-  description: string;
-  command?: string | null;
-  path?: string | null;
-  cwd?: string | null;
-};
-
-type CreateActionInput = {
-  employeeId: string;
-  kind: ActionKind;
-  title: string;
-  description: string;
-  cwd?: string | null;
-  command?: string | null;
-  path?: string | null;
-  contents?: string | null;
-  timeoutSecs?: number | null;
-};
 
 type AppStore = {
   employees: Employee[];
@@ -249,13 +218,13 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   bootstrap: async () => {
     try {
-      const snapshot = await invoke<AppStateSnapshot>("app_state_load");
-      const workspaceInfo = await invoke<WorkspaceInfo>("workspace_info");
-      const approvals = await invoke<ApprovalRequest[]>("approval_list", { filter: null });
-      const actions = await invoke<Action[]>("action_list", { filter: null });
-      const processes = await invoke<ManagedProcess[]>("process_list");
-      const employeeActivities = await invoke<EmployeeActivity[]>("employee_activity_list");
-      const rolePolicies = await invoke<RolePolicy[]>("employee_role_policies");
+      const snapshot = await commands.appStateLoad();
+      const workspaceInfo = await commands.workspaceInfo();
+      const approvals = await commands.approvalList();
+      const actions = await commands.actionList();
+      const processes = await commands.processList();
+      const employeeActivities = await commands.employeeActivityList();
+      const rolePolicies = await commands.employeeRolePolicies();
       const workspaceRoot = workspaceInfo.workspaceRoot || snapshot.workspaceRoot;
       const settings = normalizeSettings(workspaceInfo.settings ?? snapshot.settings);
       const selectedEmployeeId =
@@ -352,7 +321,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   loadWorkspaceInfo: async () => {
     set({ workspaceLoading: true, workspaceError: null });
     try {
-      const workspaceInfo = await invoke<WorkspaceInfo>("workspace_info");
+      const workspaceInfo = await commands.workspaceInfo();
       set({
         workspaceInfo,
         workspaceRoot: workspaceInfo.workspaceRoot,
@@ -371,7 +340,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   loadEmployeeActivities: async () => {
     try {
-      const activities = await invoke<EmployeeActivity[]>("employee_activity_list");
+      const activities = await commands.employeeActivityList();
       set({ employeeActivities: activitiesByEmployee(activities) });
     } catch (error) {
       get().addLog(localLog("warn", `employee activity failed: ${formatError(error)}`));
@@ -380,7 +349,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   refreshEmployeeActivity: async (employeeId) => {
     try {
-      const activity = await invoke<EmployeeActivity>("employee_activity_get", { employeeId });
+      const activity = await commands.employeeActivityGet(employeeId);
       set((state) => ({
         employeeActivities: {
           ...state.employeeActivities,
@@ -411,7 +380,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
     set({ workspaceLoading: true, workspaceError: null });
     try {
-      const workspaceInfo = await invoke<WorkspaceInfo>("workspace_set_root", { path: trimmed });
+      const workspaceInfo = await commands.workspaceSetRoot(trimmed);
       resetWorkspaceFrontendState(set, workspaceInfo);
       await get().loadDir(workspaceInfo.workspaceRoot);
     } catch (error) {
@@ -423,7 +392,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   clearRecentWorkspaces: async () => {
     try {
-      const recentWorkspaces = await invoke<string[]>("workspace_recent_clear");
+      const recentWorkspaces = await commands.workspaceRecentClear();
       set((state) => ({
         recentWorkspaces,
         workspaceInfo: state.workspaceInfo
@@ -438,7 +407,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   updateSettings: async (settingsUpdate) => {
     try {
       const settings = normalizeSettings(
-        await invoke<AppSettings>("settings_update", { payload: settingsUpdate }),
+        await commands.settingsUpdate(settingsUpdate),
       );
       set((state) => ({
         settings,
@@ -453,7 +422,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   createEmployee: async (input) => {
     try {
-      const employee = await invoke<Employee>("employee_create", { payload: input });
+      const employee = await commands.employeeCreate(input);
       get().upsertEmployee(employee);
       set({ selectedEmployeeId: employee.id });
       await get().loadDir(employee.cwd);
@@ -465,7 +434,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   removeEmployee: async (employeeId) => {
     try {
-      await invoke("employee_remove", { employeeId });
+      await commands.employeeRemove(employeeId);
       set((state) => {
         const employees = state.employees.filter((employee) => employee.id !== employeeId);
         const { [employeeId]: _activity, ...employeeActivities } = state.employeeActivities;
@@ -494,7 +463,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   startTerminal: async (employeeId) => {
     try {
-      const employee = await invoke<Employee>("employee_start_terminal", { employeeId });
+      const employee = await commands.employeeStartTerminal(employeeId);
       get().upsertEmployee(employee);
       void get().loadTerminalSessions();
     } catch (error) {
@@ -504,7 +473,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   startCodexTerminal: async (employeeId) => {
     try {
-      const employee = await invoke<Employee>("employee_start_codex_terminal", { employeeId });
+      const employee = await commands.employeeStartCodexTerminal(employeeId);
       get().upsertEmployee(employee);
       void get().loadTerminalSessions();
     } catch (error) {
@@ -515,7 +484,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   stopTerminal: async (employeeId) => {
     try {
-      const employee = await invoke<Employee>("employee_stop_terminal", { employeeId });
+      const employee = await commands.employeeStopTerminal(employeeId);
       get().upsertEmployee(employee);
       void get().loadTerminalSessions();
     } catch (error) {
@@ -525,10 +494,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   stopTerminalSession: async (employeeId, sessionId) => {
     try {
-      const session = await invoke<TerminalSessionRecord>("terminal_session_stop", {
-        employeeId,
-        sessionId,
-      });
+      const session = await commands.terminalSessionStop(employeeId, sessionId);
       get().upsertTerminalSession(session);
       void get().loadTerminalSessions();
     } catch (error) {
@@ -538,11 +504,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   renameTerminalSession: async (employeeId, sessionId, label) => {
     try {
-      const session = await invoke<TerminalSessionRecord>("terminal_session_rename", {
-        employeeId,
-        sessionId,
-        label,
-      });
+      const session = await commands.terminalSessionRename(employeeId, sessionId, label);
       get().upsertTerminalSession(session);
     } catch (error) {
       get().addLog(localLog("error", `rename terminal session failed: ${formatError(error)}`));
@@ -552,7 +514,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   loadCodexCliStatus: async () => {
     set({ codexCliStatus: null, codexCliStatusLoading: true });
     try {
-      const codexCliStatus = await invoke<CodexCliStatus>("codex_cli_status");
+      const codexCliStatus = await commands.codexCliStatus();
       set((state) => ({
         codexCliStatus,
         codexCliStatusLoading: false,
@@ -585,9 +547,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   loadTerminalSessions: async (employeeId = null) => {
     try {
-      const terminalSessions = await invoke<TerminalSessionRecord[]>("terminal_session_list", {
-        employeeId,
-      });
+      const terminalSessions = await commands.terminalSessionList(employeeId);
       set((state) => ({
         terminalSessions: employeeId
           ? [
@@ -605,9 +565,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   createWorktree: async (employeeId) => {
     try {
-      const employee = await invoke<Employee>("git_worktree_create_for_employee", {
-        employeeId,
-      });
+      const employee = await commands.gitWorktreeCreateForEmployee(employeeId);
       get().upsertEmployee(employee);
       await get().loadWorktreeStatus(employee.id);
       await get().loadWorktreeChangedFiles(employee.id);
@@ -619,9 +577,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   removeWorktree: async (employeeId) => {
     try {
-      const employee = await invoke<Employee>("git_worktree_remove_for_employee", {
-        employeeId,
-      });
+      const employee = await commands.gitWorktreeRemoveForEmployee(employeeId);
       get().upsertEmployee(employee);
       set((state) => {
         const { [employeeId]: _status, ...worktreeStatuses } = state.worktreeStatuses;
@@ -658,7 +614,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   createApproval: async (input) => {
     try {
-      const approval = await invoke<ApprovalRequest>("approval_create", { payload: input });
+      const approval = await commands.approvalCreate(input);
       get().upsertApproval(approval);
     } catch (error) {
       get().addLog(localLog("error", `create approval failed: ${formatError(error)}`));
@@ -667,7 +623,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   approveApproval: async (approvalId) => {
     try {
-      const approval = await invoke<ApprovalRequest>("approval_approve", { approvalId });
+      const approval = await commands.approvalApprove(approvalId);
       get().upsertApproval(approval);
     } catch (error) {
       get().addLog(localLog("error", `approve request failed: ${formatError(error)}`));
@@ -676,7 +632,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   rejectApproval: async (approvalId) => {
     try {
-      const approval = await invoke<ApprovalRequest>("approval_reject", { approvalId });
+      const approval = await commands.approvalReject(approvalId);
       get().upsertApproval(approval);
     } catch (error) {
       get().addLog(localLog("error", `reject request failed: ${formatError(error)}`));
@@ -685,7 +641,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   createAction: async (input) => {
     try {
-      const action = await invoke<Action>("action_create", { payload: input });
+      const action = await commands.actionCreate(input);
       get().upsertAction(action);
     } catch (error) {
       get().addLog(localLog("error", `create action failed: ${formatError(error)}`));
@@ -694,7 +650,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   requestActionApproval: async (actionId) => {
     try {
-      const action = await invoke<Action>("action_request_approval", { actionId });
+      const action = await commands.actionRequestApproval(actionId);
       get().upsertAction(action);
     } catch (error) {
       get().addLog(localLog("error", `request approval failed: ${formatError(error)}`));
@@ -703,7 +659,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   approveAction: async (actionId) => {
     try {
-      const action = await invoke<Action>("action_approve", { actionId });
+      const action = await commands.actionApprove(actionId);
       get().upsertAction(action);
     } catch (error) {
       get().addLog(localLog("error", `approve action failed: ${formatError(error)}`));
@@ -712,7 +668,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   rejectAction: async (actionId) => {
     try {
-      const action = await invoke<Action>("action_reject", { actionId });
+      const action = await commands.actionReject(actionId);
       get().upsertAction(action);
     } catch (error) {
       get().addLog(localLog("error", `reject action failed: ${formatError(error)}`));
@@ -721,7 +677,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   runAction: async (actionId) => {
     try {
-      const action = await invoke<Action>("action_run", { actionId });
+      const action = await commands.actionRun(actionId);
       get().upsertAction(action);
     } catch (error) {
       get().addLog(localLog("error", `run action failed: ${formatError(error)}`));
@@ -730,7 +686,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   cancelAction: async (actionId) => {
     try {
-      const action = await invoke<Action>("action_cancel", { actionId });
+      const action = await commands.actionCancel(actionId);
       get().upsertAction(action);
     } catch (error) {
       get().addLog(localLog("error", `cancel action failed: ${formatError(error)}`));
@@ -739,9 +695,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   loadWorktreeStatus: async (employeeId) => {
     try {
-      const status = await invoke<WorktreeStatus>("git_worktree_status_for_employee", {
-        employeeId,
-      });
+      const status = await commands.gitWorktreeStatusForEmployee(employeeId);
       set((state) => ({
         worktreeStatuses: { ...state.worktreeStatuses, [employeeId]: status },
       }));
@@ -752,7 +706,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   loadWorktreeDiff: async (employeeId) => {
     try {
-      const diff = await invoke<string>("git_worktree_diff_for_employee", { employeeId });
+      const diff = await commands.gitWorktreeDiffForEmployee(employeeId);
       set((state) => ({
         worktreeDiffs: { ...state.worktreeDiffs, [employeeId]: diff },
       }));
@@ -763,9 +717,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   loadWorktreeReview: async (employeeId) => {
     try {
-      const review = await invoke<WorktreeReview>("git_worktree_review_for_employee", {
-        employeeId,
-      });
+      const review = await commands.gitWorktreeReviewForEmployee(employeeId);
       const selected = get().selectedReviewFiles[employeeId];
       const nextSelected =
         selected && review.changedFiles.includes(selected)
@@ -792,10 +744,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   loadWorktreeCommits: async (employeeId) => {
     try {
-      const commits = await invoke<WorktreeCommit[]>("git_worktree_log_for_employee", {
-        employeeId,
-        limit: 5,
-      });
+      const commits = await commands.gitWorktreeLogForEmployee(employeeId, 5);
       set((state) => ({
         worktreeCommits: { ...state.worktreeCommits, [employeeId]: commits },
       }));
@@ -806,10 +755,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   loadWorktreeHandoff: async (employeeId) => {
     try {
-      const handoff = await invoke<WorktreeHandoffPreflight>(
-        "git_worktree_handoff_preflight_for_employee",
-        { employeeId },
-      );
+      const handoff = await commands.gitWorktreeHandoffPreflightForEmployee(employeeId);
       set((state) => ({
         worktreeHandoffs: { ...state.worktreeHandoffs, [employeeId]: handoff },
       }));
@@ -820,9 +766,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   loadWorktreeChangedFiles: async (employeeId) => {
     try {
-      const files = await invoke<string[]>("git_worktree_changed_files_for_employee", {
-        employeeId,
-      });
+      const files = await commands.gitWorktreeChangedFilesForEmployee(employeeId);
       const selected = get().selectedReviewFiles[employeeId];
       const nextSelected = selected && files.includes(selected) ? selected : files[0] ?? null;
       set((state) => ({
@@ -839,10 +783,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   loadWorktreeFileDiff: async (employeeId, path) => {
     try {
-      const diff = await invoke<string>("git_worktree_file_diff_for_employee", {
-        employeeId,
-        path,
-      });
+      const diff = await commands.gitWorktreeFileDiffForEmployee(employeeId, path);
       set((state) => ({
         selectedReviewFiles: { ...state.selectedReviewFiles, [employeeId]: path },
         worktreeFileDiffs: {
@@ -857,10 +798,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   stageWorktreeFile: async (employeeId, path) => {
     try {
-      const review = await invoke<WorktreeReview>("git_worktree_stage_file", {
-        employeeId,
-        path,
-      });
+      const review = await commands.gitWorktreeStageFile(employeeId, path);
       set((state) => ({
         worktreeReviews: { ...state.worktreeReviews, [employeeId]: review },
       }));
@@ -874,10 +812,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   unstageWorktreeFile: async (employeeId, path) => {
     try {
-      const review = await invoke<WorktreeReview>("git_worktree_unstage_file", {
-        employeeId,
-        path,
-      });
+      const review = await commands.gitWorktreeUnstageFile(employeeId, path);
       set((state) => ({
         worktreeReviews: { ...state.worktreeReviews, [employeeId]: review },
       }));
@@ -891,10 +826,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   discardWorktreeFile: async (employeeId, path) => {
     try {
-      const review = await invoke<WorktreeReview>("git_worktree_discard_file_for_employee", {
-        employeeId,
-        path,
-      });
+      const review = await commands.gitWorktreeDiscardFileForEmployee(employeeId, path);
       set((state) => ({
         worktreeReviews: { ...state.worktreeReviews, [employeeId]: review },
       }));
@@ -907,13 +839,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   deleteUntrackedWorktreeFile: async (employeeId, path) => {
     try {
-      const review = await invoke<WorktreeReview>(
-        "git_worktree_delete_untracked_file_for_employee",
-        {
-          employeeId,
-          path,
-        },
-      );
+      const review = await commands.gitWorktreeDeleteUntrackedFileForEmployee(employeeId, path);
       set((state) => ({
         worktreeReviews: { ...state.worktreeReviews, [employeeId]: review },
       }));
@@ -926,9 +852,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   commitWorktree: async (employeeId, message) => {
     try {
-      const commit = await invoke<WorktreeCommit>("git_worktree_commit_for_employee", {
-        payload: { employeeId, message },
-      });
+      const commit = await commands.gitWorktreeCommitForEmployee(employeeId, message);
       set((state) => ({
         worktreeCommits: {
           ...state.worktreeCommits,
@@ -949,12 +873,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   applyWorktreeHandoff: async (employeeId) => {
     try {
-      const result = await invoke<WorktreeHandoffApplyResult>(
-        "git_worktree_apply_handoff_for_employee",
-        {
-          payload: { employeeId, confirmed: true },
-        },
-      );
+      const result = await commands.gitWorktreeApplyHandoffForEmployee(employeeId);
       set((state) => ({
         worktreeHandoffResults: { ...state.worktreeHandoffResults, [employeeId]: result },
       }));
@@ -978,14 +897,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   abortWorktreeHandoff: async (employeeId) => {
     try {
-      const result = await invoke<{
-        employeeId: string;
-        aborted: boolean;
-        operation?: string | null;
-        stdout: string;
-        stderr: string;
-        message: string;
-      }>("git_worktree_abort_handoff_for_employee", { employeeId });
+      const result = await commands.gitWorktreeAbortHandoffForEmployee(employeeId);
       get().addLog(
         localLog(result.aborted ? "info" : "warn", result.message || "handoff abort checked"),
       );
@@ -1008,13 +920,11 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   spawnProcess: async (employeeId, command, cwd, title) => {
     try {
-      const process = await invoke<ManagedProcess>("process_spawn", {
-        payload: {
-          employeeId,
-          title: title ?? command,
-          command,
-          cwd,
-        },
+      const process = await commands.processSpawn({
+        employeeId,
+        title: title ?? command,
+        command,
+        cwd,
       });
       get().upsertProcess(process);
     } catch (error) {
@@ -1024,7 +934,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   killProcess: async (processId) => {
     try {
-      const process = await invoke<ManagedProcess>("process_kill", { processId });
+      const process = await commands.processKill(processId);
       get().upsertProcess(process);
     } catch (error) {
       get().addLog(localLog("error", `kill process failed: ${formatError(error)}`));
@@ -1033,7 +943,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   loadProcessLogs: async (processId, offset) => {
     try {
-      const logs = await invoke<ProcessLogs>("process_logs", { processId, offset });
+      const logs = await commands.processLogs(processId, offset);
       set((state) => ({
         processLogs: { ...state.processLogs, [processId]: logs },
       }));
@@ -1071,13 +981,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   searchFiles: async (mode, query, root) => {
     try {
-      const command =
-        mode === "grep" ? "fs_grep" : mode === "glob" ? "fs_glob" : "fs_search";
-      const payload =
-        mode === "search"
-          ? { query, root, limit: 100 }
-          : { pattern: query, root, limit: 100 };
-      return await invoke<FsSearchResult[]>(command, payload);
+      return await commands.fsSearchFiles(mode, query, root);
     } catch (error) {
       get().addLog(localLog("error", `${mode} failed: ${formatError(error)}`));
       return [];
@@ -1087,7 +991,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   createFile: async (path, contents = "") => {
     set({ fileOperationError: null });
     try {
-      const file = await invoke<FilePayload>("fs_create_file", { path, contents });
+      const file = await commands.fsCreateFile(path, contents);
       await get().loadDir(parentDir(file.path));
     } catch (error) {
       const message = formatError(error);
@@ -1099,7 +1003,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   createDir: async (path) => {
     set({ fileOperationError: null });
     try {
-      const entry = await invoke<FsEntry>("fs_create_dir", { path });
+      const entry = await commands.fsCreateDir(path);
       await get().loadDir(parentDir(entry.path));
     } catch (error) {
       const message = formatError(error);
@@ -1123,7 +1027,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
     set({ fileOperationError: null });
     try {
-      const entry = await invoke<FsEntry>("fs_rename", { from, to });
+      const entry = await commands.fsRename(from, to);
       await get().loadDir(parentDir(entry.path));
       const nextOpenPath = openFile ? movedPathAfterRename(openFile.path, from, entry.path) : null;
       if (nextOpenPath) {
@@ -1167,7 +1071,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
     set({ fileOperationError: null });
     try {
-      await invoke("fs_delete", { path });
+      await commands.fsDelete(path);
       await get().loadDir(parentDir(path));
       set((state) => ({
         openFile: affectsOpenFile ? null : state.openFile,
@@ -1195,7 +1099,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   writeTerminal: async (employeeId, sessionId, input) => {
     try {
-      await invoke("terminal_write", { employeeId, sessionId, input });
+      await commands.terminalWrite(employeeId, sessionId, input);
     } catch (error) {
       get().addLog(localLog("error", `terminal write failed: ${formatError(error)}`));
     }
@@ -1203,7 +1107,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   resizeTerminal: async (employeeId, sessionId, cols, rows) => {
     try {
-      await invoke("terminal_resize", { employeeId, sessionId, cols, rows });
+      await commands.terminalResize(employeeId, sessionId, cols, rows);
     } catch (error) {
       get().addLog(localLog("warn", `terminal resize failed: ${formatError(error)}`));
     }
@@ -1288,7 +1192,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   loadDir: async (path) => {
     try {
       const targetPath = path ?? get().selectedEmployee()?.cwd ?? get().workspaceRoot;
-      const fileEntries = await invoke<FsEntry[]>("fs_list_dir", { path: targetPath });
+      const fileEntries = await commands.fsListDir(targetPath);
       set({ fileEntries, currentDir: targetPath ?? null, fileOperationError: null });
     } catch (error) {
       const message = formatError(error);
@@ -1308,7 +1212,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
     set({ editorError: null });
     try {
-      const file = await invoke<FilePayload>("fs_read_file", { path });
+      const file = await commands.fsReadFile(path);
       const metadata = await fetchFileMetadata(file.path);
       const recentFiles = [file.path, ...get().recentFiles.filter((item) => item !== file.path)].slice(
         0,
@@ -1368,10 +1272,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
         }
       }
 
-      await invoke("fs_write_file", {
-        path: openFile.path,
-        contents: openFile.contents,
-      });
+      await commands.fsWriteFile(openFile.path, openFile.contents);
       const metadata = await fetchFileMetadata(openFile.path);
       const savedAt = Date.now();
       set((state) => {
@@ -1416,12 +1317,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
 
   persistUiState: async () => {
     try {
-      await invoke("app_state_save", {
-        payload: {
-          selectedEmployeeId: get().selectedEmployeeId,
-          activeTab: get().activeTab,
-          recentFiles: get().recentFiles,
-        },
+      await commands.appStateSave({
+        selectedEmployeeId: get().selectedEmployeeId,
+        activeTab: get().activeTab,
+        recentFiles: get().recentFiles,
       });
     } catch (error) {
       get().addLog(localLog("warn", `persist UI state failed: ${formatError(error)}`));
@@ -1429,68 +1328,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 }));
 
-function localLog(level: AppLog["level"], message: string): AppLog {
-  return {
-    id: crypto.randomUUID(),
-    level,
-    message,
-    timestamp: Date.now(),
-  };
-}
-
-function formatError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return String(error);
-}
-
-function shortPath(path: string): string {
-  const parts = path.split(/[\\/]/);
-  return parts.slice(-2).join("/");
-}
-
-function parentDir(path: string): string | null {
-  const trimmed = path.replace(/[\\/]$/, "");
-  const index = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
-  if (index <= 0) {
-    return null;
-  }
-  return trimmed.slice(0, index);
-}
-
-function openFileFromPayload(file: FilePayload, metadata: FileMetadata): OpenFile {
-  return {
-    path: file.path,
-    savedContents: file.contents,
-    contents: file.contents,
-    dirty: false,
-    lastSavedAt: null,
-    saveError: null,
-    metadata,
-    openedModified: metadata.modified ?? null,
-  };
-}
-
 async function fetchFileMetadata(path: string): Promise<FileMetadata> {
-  return invoke<FileMetadata>("fs_file_metadata", { path });
-}
-
-function hasFileChangedOnDisk(openFile: OpenFile, metadata: FileMetadata): boolean {
-  const openedModified = openFile.openedModified;
-  const diskModified = metadata.modified ?? null;
-  return openedModified !== null && diskModified !== null && openedModified !== diskModified;
-}
-
-function confirmDiscardIfNeeded(
-  openFile: OpenFile | null,
-  settings: AppSettings,
-  action: string,
-): boolean {
-  if (!openFile?.dirty || !settings.requireConfirmationDiscard) {
-    return true;
-  }
-  return confirm(`Discard unsaved changes in ${shortPath(openFile.path)} before ${action}?`);
+  return commands.fsFileMetadata(path);
 }
 
 function setOpenFileSaveError(
@@ -1509,34 +1348,6 @@ function setOpenFileSaveError(
         : state.openFile,
     editorError: message,
   }));
-}
-
-function pathIsSameOrChild(path: string, parent: string): boolean {
-  const normalizedPath = normalizePathForCompare(path);
-  const normalizedParent = normalizePathForCompare(parent);
-  return normalizedPath === normalizedParent || normalizedPath.startsWith(`${normalizedParent}/`);
-}
-
-function movedPathAfterRename(path: string, from: string, to: string): string | null {
-  if (!pathIsSameOrChild(path, from)) {
-    return null;
-  }
-  const normalizedPath = normalizePathForCompare(path);
-  const normalizedFrom = normalizePathForCompare(from);
-  const normalizedTo = normalizePathForCompare(to);
-  return `${normalizedTo}${normalizedPath.slice(normalizedFrom.length)}`;
-}
-
-function normalizePathForCompare(path: string): string {
-  return path.replace(/\\/g, "/").replace(/\/+$/, "");
-}
-
-function isMissingPathError(message: string): boolean {
-  return /no such file|not found|cannot find/i.test(message);
-}
-
-function reviewFileKey(employeeId: string, path: string): string {
-  return `${employeeId}:${path}`;
 }
 
 function resetWorkspaceFrontendState(
@@ -1583,10 +1394,6 @@ function resetWorkspaceFrontendState(
   });
 }
 
-function activitiesByEmployee(activities: EmployeeActivity[]): Record<string, EmployeeActivity> {
-  return Object.fromEntries(activities.map((activity) => [activity.employeeId, activity]));
-}
-
 async function refreshWorktreeReviewForEmployee(
   get: () => AppStore,
   employeeId: string,
@@ -1600,30 +1407,4 @@ async function refreshWorktreeReviewForEmployee(
     get().loadWorktreeStatus(employeeId),
     get().loadWorktreeReview(employeeId),
   ]);
-}
-
-function normalizeSettings(settings?: AppSettings | null): AppSettings {
-  return {
-    ...DEFAULT_SETTINGS,
-    ...settings,
-    maxTerminalBufferChars:
-      typeof settings?.maxTerminalBufferChars === "number"
-        ? settings.maxTerminalBufferChars
-        : DEFAULT_SETTINGS.maxTerminalBufferChars,
-  };
-}
-
-function appendBoundedTerminalBuffer(
-  previous: string,
-  chunk: string,
-  maxChars: number,
-): string {
-  const next = `${previous}${chunk}`;
-  const limit = Math.max(TERMINAL_TRUNCATION_MARKER.length + 1, maxChars);
-  if (next.length <= limit) {
-    return next;
-  }
-
-  const tailLength = limit - TERMINAL_TRUNCATION_MARKER.length;
-  return `${TERMINAL_TRUNCATION_MARKER}${next.slice(-tailLength)}`;
 }
