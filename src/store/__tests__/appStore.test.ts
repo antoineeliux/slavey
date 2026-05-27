@@ -111,13 +111,15 @@ describe("app store smoke behavior", () => {
 
   it("bootstrap preserves a user-selected tab while restore is in flight", async () => {
     const appStateLoad = deferred<AppStateSnapshot>();
-    mockBootstrapCommands({ activeTab: "editor", appStateLoad });
+    const workspaceInfoLoad = deferred<WorkspaceInfo>();
+    mockBootstrapCommands({ activeTab: "editor", appStateLoad, workspaceInfoLoad });
 
     const bootstrapPromise = useAppStore.getState().bootstrap();
+    appStateLoad.resolve(snapshot({ activeTab: "editor" }));
     act(() => {
       useAppStore.getState().setActiveTab("settings");
     });
-    appStateLoad.resolve(snapshot({ activeTab: "editor" }));
+    workspaceInfoLoad.resolve(workspaceInfo());
 
     await act(async () => {
       await bootstrapPromise;
@@ -131,9 +133,11 @@ describe("app store smoke behavior", () => {
 function mockBootstrapCommands({
   activeTab,
   appStateLoad,
+  workspaceInfoLoad,
 }: {
   activeTab: AppStateSnapshot["activeTab"];
   appStateLoad?: Deferred<AppStateSnapshot>;
+  workspaceInfoLoad?: Deferred<WorkspaceInfo>;
 }): void {
   const workspace = workspaceInfo();
   (mockTauriInvoke as InvokeMock).mockImplementation(async (command: string) => {
@@ -141,7 +145,7 @@ function mockBootstrapCommands({
       case "app_state_load":
         return appStateLoad ? appStateLoad.promise : snapshot({ activeTab });
       case "workspace_info":
-        return workspace;
+        return workspaceInfoLoad ? workspaceInfoLoad.promise : workspace;
       case "approval_list":
       case "action_list":
       case "process_list":

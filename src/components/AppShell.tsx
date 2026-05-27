@@ -15,10 +15,11 @@ const EditorPane = lazy(() =>
 
 export function AppShell() {
   const activeTab = useAppStore((state) => state.activeTab);
+  const backendReady = useAppStore((state) => state.backendReady);
   const setActiveTab = useAppStore((state) => state.setActiveTab);
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-backend-ready={backendReady} aria-busy={!backendReady}>
       <main className="workbench">
         <div className="tab-strip" role="tablist" aria-label="Workspace">
           <button
