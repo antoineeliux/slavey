@@ -394,11 +394,15 @@ mod tests {
             command: Some("pwd".to_string()),
             path: None,
             contents: None,
+            source: crate::actions::ActionSource::User,
             timeout_secs: 120,
+            output_cap_bytes: crate::actions::MAX_ACTION_OUTPUT_BYTES,
             approval_id: None,
             status,
             output: String::new(),
             error: None,
+            failure_reason: None,
+            cancellation_reason: None,
             created_at: 1,
             updated_at: 1,
             started_at: None,
@@ -591,8 +595,8 @@ mod tests {
         assert_eq!(state.workspace_root(), next);
         assert!(state.employees.list().is_empty());
         assert!(state.terminal_sessions.list(None).is_empty());
-        assert!(state.actions.list().is_empty());
-        assert!(state.approvals.list().is_empty());
+        assert!(state.actions.list(None).is_empty());
+        assert!(state.approvals.list(None).is_empty());
         assert!(state.processes.list().is_empty());
         assert_eq!(persisted.workspace_root, info.workspace_root);
         assert_eq!(persisted.selected_employee_id, None);

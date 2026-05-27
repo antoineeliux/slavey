@@ -81,8 +81,8 @@ pub(crate) fn employee_activity_list_impl(state: &AppState) -> Vec<EmployeeActiv
     let workspace_root = state.workspace_root();
     let employees = state.employees.list();
     let terminal_sessions = state.terminal_sessions.list(None);
-    let actions = state.actions.list();
-    let approvals = state.approvals.list();
+    let actions = state.actions.list(None);
+    let approvals = state.approvals.list(None);
     let processes = state.processes.list();
 
     employees
@@ -104,8 +104,8 @@ fn employee_activity_for_state(state: &AppState, employee_id: &str) -> Option<Em
     let employee = state.employees.get(employee_id)?;
     let workspace_root = state.workspace_root();
     let terminal_sessions = state.terminal_sessions.list(None);
-    let actions = state.actions.list();
-    let approvals = state.approvals.list();
+    let actions = state.actions.list(None);
+    let approvals = state.approvals.list(None);
     let processes = state.processes.list();
     Some(derive_employee_activity(ActivityDerivationInput {
         employee: &employee,
@@ -690,11 +690,15 @@ mod tests {
             command: Some("pwd".to_string()),
             path: None,
             contents: None,
+            source: crate::actions::ActionSource::User,
             timeout_secs: 120,
+            output_cap_bytes: crate::actions::MAX_ACTION_OUTPUT_BYTES,
             approval_id: None,
             status,
             output: String::new(),
             error: None,
+            failure_reason: None,
+            cancellation_reason: None,
             created_at: 1,
             updated_at: 2,
             started_at: None,

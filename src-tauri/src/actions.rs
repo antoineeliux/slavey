@@ -33,6 +33,7 @@ pub const DEFAULT_ACTION_TIMEOUT_SECS: u64 = 120;
 pub const MAX_ACTION_TIMEOUT_SECS: u64 = 600;
 pub const MAX_ACTION_OUTPUT_BYTES: usize = 1024 * 1024;
 pub const MAX_FILE_WRITE_CONTENT_BYTES: usize = 1024 * 1024;
+pub const MAX_PERSISTED_ACTIONS: usize = 250;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -55,6 +56,27 @@ pub enum ActionStatus {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionSource {
+    User,
+    Employee,
+    System,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionFailureReason {
+    CommandFailed,
+    TimedOut,
+    OutputLimitExceeded,
+    FailedToStart,
+    ValidationFailed,
+    Unsupported,
+    AppRestarted,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Action {
@@ -66,13 +88,22 @@ pub struct Action {
     pub cwd: Option<String>,
     pub command: Option<String>,
     pub path: Option<String>,
+    #[serde(default, skip_serializing)]
     pub contents: Option<String>,
+    #[serde(default = "default_action_source")]
+    pub source: ActionSource,
     #[serde(default = "default_action_timeout_secs")]
     pub timeout_secs: u64,
+    #[serde(default = "default_action_output_cap_bytes")]
+    pub output_cap_bytes: usize,
     pub approval_id: Option<String>,
     pub status: ActionStatus,
     pub output: String,
     pub error: Option<String>,
+    #[serde(default)]
+    pub failure_reason: Option<ActionFailureReason>,
+    #[serde(default)]
+    pub cancellation_reason: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
     pub started_at: Option<u64>,
@@ -91,6 +122,15 @@ pub struct ActionCreateRequest {
     pub path: Option<String>,
     pub contents: Option<String>,
     pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionListFilter {
+    pub employee_id: Option<String>,
+    pub status: Option<ActionStatus>,
+    pub kind: Option<ActionKind>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -119,11 +159,15 @@ impl ActionManager {
             command: payload.command,
             path: payload.path,
             contents: payload.contents,
+            source: ActionSource::User,
             timeout_secs,
+            output_cap_bytes: MAX_ACTION_OUTPUT_BYTES,
             approval_id: None,
             status: ActionStatus::Draft,
             output: String::new(),
             error: None,
+            failure_reason: None,
+            cancellation_reason: None,
             created_at: now,
             updated_at: now,
             started_at: None,
@@ -135,9 +179,17 @@ impl ActionManager {
         Ok(action)
     }
 
-    pub fn list(&self) -> Vec<Action> {
+    pub fn list(&self, filter: Option<&ActionListFilter>) -> Vec<Action> {
         let mut actions = self.actions.lock().values().cloned().collect::<Vec<_>>();
+        if let Some(filter) = filter {
+            actions.retain(|action| action_matches_filter(action, filter));
+        }
         actions.sort_by_key(|action| action.created_at);
+        if let Some(limit) = filter.and_then(|filter| filter.limit) {
+            let keep = limit.min(actions.len());
+            actions = actions.into_iter().rev().take(keep).collect::<Vec<_>>();
+            actions.reverse();
+        }
         actions
     }
 
@@ -167,6 +219,8 @@ impl ActionManager {
         self.transition(id, ActionStatus::PendingApproval, |action| {
             action.approval_id = Some(approval_id.to_string());
             action.error = None;
+            action.failure_reason = None;
+            action.cancellation_reason = None;
             Ok(())
         })
     }
@@ -179,6 +233,7 @@ impl ActionManager {
         self.transition(action_id, ActionStatus::Approved, |action| {
             ensure_action_approval(action, approval_id)?;
             action.error = None;
+            action.failure_reason = None;
             Ok(())
         })
     }
@@ -187,6 +242,7 @@ impl ActionManager {
         self.transition(action_id, ActionStatus::Rejected, |action| {
             ensure_action_approval(action, approval_id)?;
             action.error = Some("approval rejected".to_string());
+            action.failure_reason = None;
             action.finished_at = Some(now_ms());
             Ok(())
         })
@@ -198,14 +254,18 @@ impl ActionManager {
             action.finished_at = None;
             action.output.clear();
             action.error = None;
+            action.failure_reason = None;
+            action.cancellation_reason = None;
             Ok(())
         })
     }
 
     pub fn finish_success(&self, id: &str, output: String) -> Result<Action, String> {
         self.transition(id, ActionStatus::Succeeded, |action| {
-            action.output = output;
+            action.output = truncate_action_output(&output);
             action.error = None;
+            action.failure_reason = None;
+            action.cancellation_reason = None;
             action.finished_at = Some(now_ms());
             Ok(())
         })
@@ -214,20 +274,25 @@ impl ActionManager {
     pub fn finish_failure(
         &self,
         id: &str,
+        reason: ActionFailureReason,
         message: String,
         output: String,
     ) -> Result<Action, String> {
         self.transition(id, ActionStatus::Failed, |action| {
-            action.output = output;
+            action.output = truncate_action_output(&output);
             action.error = Some(message);
+            action.failure_reason = Some(reason);
             action.finished_at = Some(now_ms());
             Ok(())
         })
     }
 
-    pub fn cancel(&self, id: &str) -> Result<Action, String> {
+    pub fn cancel(&self, id: &str, reason: impl Into<String>) -> Result<Action, String> {
+        let reason = reason.into();
         self.transition(id, ActionStatus::Cancelled, |action| {
-            action.error = Some("action cancelled".to_string());
+            action.error = Some(reason.clone());
+            action.cancellation_reason = Some(reason);
+            action.failure_reason = Some(ActionFailureReason::Cancelled);
             action.finished_at = Some(now_ms());
             Ok(())
         })
@@ -273,24 +338,140 @@ impl ActionManager {
 }
 
 pub fn restore_actions(actions: &[Action]) -> Vec<Action> {
-    actions
-        .iter()
-        .cloned()
-        .map(|mut action| {
-            if action.status == ActionStatus::Running {
-                action.status = ActionStatus::Failed;
-                action.error = Some("app restarted before action completed".to_string());
-                action.output = "app restarted before action completed".to_string();
-                action.finished_at = Some(now_ms());
-                action.updated_at = now_ms();
-            }
-            action
-        })
-        .collect()
+    prune_action_history_for_persistence(
+        actions
+            .iter()
+            .cloned()
+            .map(|mut action| {
+                if action.status == ActionStatus::Running {
+                    action.status = ActionStatus::Failed;
+                    action.error = Some("app restarted before action completed".to_string());
+                    action.output = "app restarted before action completed".to_string();
+                    action.failure_reason = Some(ActionFailureReason::AppRestarted);
+                    action.finished_at = Some(now_ms());
+                    action.updated_at = now_ms();
+                }
+                if action.kind == ActionKind::FileWrite
+                    && action.contents.is_none()
+                    && !is_terminal_action_status(action.status)
+                {
+                    action.status = ActionStatus::Failed;
+                    action.error = Some(
+                        "file write contents are not persisted; recreate the action".to_string(),
+                    );
+                    action.failure_reason = Some(ActionFailureReason::ValidationFailed);
+                    action.finished_at = Some(now_ms());
+                    action.updated_at = now_ms();
+                }
+                action.output = truncate_action_output(&action.output);
+                if action.output_cap_bytes == 0 {
+                    action.output_cap_bytes = MAX_ACTION_OUTPUT_BYTES;
+                }
+                if matches!(action.status, ActionStatus::Cancelled)
+                    && action.cancellation_reason.is_none()
+                {
+                    action.cancellation_reason = Some(
+                        action
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "action cancelled".to_string()),
+                    );
+                }
+                action
+            })
+            .collect(),
+    )
 }
 
 fn default_action_timeout_secs() -> u64 {
     DEFAULT_ACTION_TIMEOUT_SECS
+}
+
+fn default_action_output_cap_bytes() -> usize {
+    MAX_ACTION_OUTPUT_BYTES
+}
+
+fn default_action_source() -> ActionSource {
+    ActionSource::User
+}
+
+pub fn prune_action_history_for_persistence(actions: Vec<Action>) -> Vec<Action> {
+    let mut normalized = actions
+        .into_iter()
+        .map(action_for_persistence)
+        .collect::<Vec<_>>();
+    let mut terminal = normalized
+        .iter()
+        .filter(|action| is_terminal_action_status(action.status))
+        .map(|action| action.id.clone())
+        .collect::<Vec<_>>();
+
+    if terminal.len() <= MAX_PERSISTED_ACTIONS {
+        normalized.sort_by_key(|action| action.created_at);
+        return normalized;
+    }
+
+    terminal.sort_by_key(|id| {
+        std::cmp::Reverse(
+            normalized
+                .iter()
+                .find(|action| action.id == *id)
+                .map(|action| action.updated_at.max(action.created_at))
+                .unwrap_or_default(),
+        )
+    });
+    let keep_terminal = terminal
+        .into_iter()
+        .take(MAX_PERSISTED_ACTIONS)
+        .collect::<std::collections::HashSet<_>>();
+    normalized.retain(|action| {
+        !is_terminal_action_status(action.status) || keep_terminal.contains(&action.id)
+    });
+    normalized.sort_by_key(|action| action.created_at);
+    normalized
+}
+
+pub fn action_for_persistence(mut action: Action) -> Action {
+    action.contents = None;
+    action.output = truncate_action_output(&action.output);
+    if action.output_cap_bytes == 0 {
+        action.output_cap_bytes = MAX_ACTION_OUTPUT_BYTES;
+    }
+    action
+}
+
+pub fn is_terminal_action_status(status: ActionStatus) -> bool {
+    matches!(
+        status,
+        ActionStatus::Succeeded
+            | ActionStatus::Failed
+            | ActionStatus::Rejected
+            | ActionStatus::Cancelled
+    )
+}
+
+fn action_matches_filter(action: &Action, filter: &ActionListFilter) -> bool {
+    filter
+        .employee_id
+        .as_deref()
+        .map(|employee_id| action.employee_id == employee_id)
+        .unwrap_or(true)
+        && filter
+            .status
+            .map(|status| action.status == status)
+            .unwrap_or(true)
+        && filter.kind.map(|kind| action.kind == kind).unwrap_or(true)
+}
+
+fn truncate_action_output(output: &str) -> String {
+    if output.len() <= MAX_ACTION_OUTPUT_BYTES {
+        return output.to_string();
+    }
+    let mut end = MAX_ACTION_OUTPUT_BYTES;
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    output[..end].to_string()
 }
 
 #[tauri::command]
@@ -312,8 +493,16 @@ pub fn action_create(
 }
 
 #[tauri::command]
-pub fn action_list(state: State<'_, AppState>) -> Vec<Action> {
-    state.actions.list()
+pub fn action_list(state: State<'_, AppState>, filter: Option<ActionListFilter>) -> Vec<Action> {
+    state.actions.list(filter.as_ref())
+}
+
+#[tauri::command]
+pub fn action_get(state: State<'_, AppState>, action_id: String) -> Result<Action, String> {
+    state
+        .actions
+        .get(&action_id)
+        .ok_or_else(|| "action not found".to_string())
 }
 
 #[tauri::command]
@@ -463,7 +652,9 @@ pub fn action_cancel(
         state.actions.cancel_running_process(&action_id);
     }
 
-    let updated = state.actions.cancel(&action_id)?;
+    let updated = state
+        .actions
+        .cancel(&action_id, "action cancelled by user")?;
     if action.status == ActionStatus::PendingApproval {
         if let Some(approval_id) = action.approval_id {
             match state
@@ -607,6 +798,7 @@ struct ActionRunContext {
 
 #[derive(Debug)]
 struct ActionFailure {
+    reason: ActionFailureReason,
     message: String,
     output: String,
 }
@@ -614,15 +806,17 @@ struct ActionFailure {
 type ActionExecutionResult = Result<String, ActionFailure>;
 
 impl ActionFailure {
-    fn new(message: impl Into<String>) -> Self {
+    fn new(reason: ActionFailureReason, message: impl Into<String>) -> Self {
         Self {
+            reason,
             message: message.into(),
             output: String::new(),
         }
     }
 
-    fn with_output(message: impl Into<String>, output: &[u8]) -> Self {
+    fn with_output(reason: ActionFailureReason, message: impl Into<String>, output: &[u8]) -> Self {
         Self {
+            reason,
             message: message.into(),
             output: bytes_to_string(output),
         }
@@ -631,7 +825,7 @@ impl ActionFailure {
 
 impl From<String> for ActionFailure {
     fn from(message: String) -> Self {
-        ActionFailure::new(message)
+        ActionFailure::new(ActionFailureReason::ValidationFailed, message)
     }
 }
 
@@ -641,13 +835,17 @@ fn run_action_impl(
     action: &Action,
 ) -> ActionExecutionResult {
     if action_is_cancelled(actions, &action.id) {
-        return Err(ActionFailure::new("action cancelled"));
+        return Err(ActionFailure::new(
+            ActionFailureReason::Cancelled,
+            "action cancelled",
+        ));
     }
 
     match action.kind {
         ActionKind::ShellCommand => run_shell_action(context, actions, action),
         ActionKind::FileWrite => run_file_write_action(context, action),
         ActionKind::GitOperation => Err(ActionFailure::new(
+            ActionFailureReason::Unsupported,
             "git_operation actions are approval-only in this phase",
         )),
     }
@@ -661,9 +859,12 @@ fn finish_background_action(
 ) {
     let updated = match result {
         Ok(output) => context.actions.finish_success(action_id, output),
-        Err(failure) => context
-            .actions
-            .finish_failure(action_id, failure.message, failure.output),
+        Err(failure) => context.actions.finish_failure(
+            action_id,
+            failure.reason,
+            failure.message,
+            failure.output,
+        ),
     };
 
     match updated {
@@ -699,8 +900,8 @@ fn persist_context_snapshot(context: &ActionRunContext) -> Result<(), String> {
         workspace_root,
         employees: context.employees.list(),
         terminal_sessions: context.terminal_sessions.list(None),
-        actions: context.actions.list(),
-        approvals: context.approvals.list(),
+        actions: context.actions.list(None),
+        approvals: context.approvals.list(None),
         processes: context.processes.list(),
         process_logs: context.processes.log_snapshots(),
     })
@@ -721,17 +922,18 @@ fn run_shell_action(
     actions: &ActionManager,
     action: &Action,
 ) -> ActionExecutionResult {
-    let employee = context
-        .employees
-        .get(&action.employee_id)
-        .ok_or_else(|| ActionFailure::new("employee not found"))?;
+    let employee = context.employees.get(&action.employee_id).ok_or_else(|| {
+        ActionFailure::new(ActionFailureReason::ValidationFailed, "employee not found")
+    })?;
     let cwd =
         resolve_employee_execution_dir(&context.execution_root, &employee, action.cwd.as_deref())
             .map_err(ActionFailure::from)?;
-    let command = action
-        .command
-        .as_deref()
-        .ok_or_else(|| ActionFailure::new("shell command action requires command"))?;
+    let command = action.command.as_deref().ok_or_else(|| {
+        ActionFailure::new(
+            ActionFailureReason::ValidationFailed,
+            "shell command action requires command",
+        )
+    })?;
 
     let mut command = shell_command(command);
     command
@@ -739,23 +941,30 @@ fn run_shell_action(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     configure_process_group(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|error| ActionFailure::new(error.to_string()))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| ActionFailure::new("failed to capture stdout"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| ActionFailure::new("failed to capture stderr"))?;
+    let mut child = command.spawn().map_err(|error| {
+        ActionFailure::new(ActionFailureReason::FailedToStart, error.to_string())
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        ActionFailure::new(
+            ActionFailureReason::FailedToStart,
+            "failed to capture stdout",
+        )
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        ActionFailure::new(
+            ActionFailureReason::FailedToStart,
+            "failed to capture stderr",
+        )
+    })?;
     let child = Arc::new(Mutex::new(child));
     let cancel = Arc::new(AtomicBool::new(false));
     actions.register_running_process(&action.id, Arc::clone(&child), Arc::clone(&cancel));
     if action_is_cancelled(actions, &action.id) {
         actions.cancel_running_process(&action.id);
-        return Err(ActionFailure::new("action cancelled"));
+        return Err(ActionFailure::new(
+            ActionFailureReason::Cancelled,
+            "action cancelled",
+        ));
     }
 
     let (sender, receiver) = mpsc::sync_channel::<Vec<u8>>(64);
@@ -775,14 +984,18 @@ fn run_shell_action(
         if cancel.load(Ordering::SeqCst) {
             terminate_child(&child);
             actions.remove_running_process(&action.id);
-            return Err(ActionFailure::with_output("action cancelled", &output));
+            return Err(ActionFailure::with_output(
+                ActionFailureReason::Cancelled,
+                "action cancelled",
+                &output,
+            ));
         }
 
         let status = {
             let mut child = child.lock();
-            child
-                .try_wait()
-                .map_err(|error| ActionFailure::new(error.to_string()))?
+            child.try_wait().map_err(|error| {
+                ActionFailure::new(ActionFailureReason::CommandFailed, error.to_string())
+            })?
         };
         if let Some(status) = status {
             if let Err(failure) = drain_remaining_output(&receiver, &mut output) {
@@ -796,6 +1009,7 @@ fn run_shell_action(
                 Ok(combined)
             } else {
                 Err(ActionFailure {
+                    reason: ActionFailureReason::CommandFailed,
                     message: format!("command exited with {status}"),
                     output: combined,
                 })
@@ -807,6 +1021,7 @@ fn run_shell_action(
             let _ = drain_remaining_output(&receiver, &mut output);
             actions.remove_running_process(&action.id);
             return Err(ActionFailure::with_output(
+                ActionFailureReason::TimedOut,
                 format!(
                     "action timed out after {} seconds; process killed",
                     action.timeout_secs
@@ -820,14 +1035,18 @@ fn run_shell_action(
 }
 
 fn run_file_write_action(context: &ActionRunContext, action: &Action) -> ActionExecutionResult {
-    let path = action
-        .path
-        .as_deref()
-        .ok_or_else(|| ActionFailure::new("file write action requires path"))?;
-    let contents = action
-        .contents
-        .as_deref()
-        .ok_or_else(|| ActionFailure::new("file write action requires contents"))?;
+    let path = action.path.as_deref().ok_or_else(|| {
+        ActionFailure::new(
+            ActionFailureReason::ValidationFailed,
+            "file write action requires path",
+        )
+    })?;
+    let contents = action.contents.as_deref().ok_or_else(|| {
+        ActionFailure::new(
+            ActionFailureReason::ValidationFailed,
+            "file write action requires contents",
+        )
+    })?;
     ensure_file_write_size(contents).map_err(ActionFailure::from)?;
     let root = resolve_file_write_action_root(context, action)?;
     write_file_in_workspace(&root, path, contents).map_err(ActionFailure::from)?;
@@ -838,10 +1057,9 @@ fn resolve_file_write_action_root(
     context: &ActionRunContext,
     action: &Action,
 ) -> Result<PathBuf, ActionFailure> {
-    let employee = context
-        .employees
-        .get(&action.employee_id)
-        .ok_or_else(|| ActionFailure::new("employee not found"))?;
+    let employee = context.employees.get(&action.employee_id).ok_or_else(|| {
+        ActionFailure::new(ActionFailureReason::ValidationFailed, "employee not found")
+    })?;
     resolve_employee_execution_dir(&context.execution_root, &employee, action.cwd.as_deref())
         .map_err(ActionFailure::from)
 }
@@ -900,6 +1118,7 @@ fn append_output(output: &mut Vec<u8>, chunk: &[u8]) -> Result<(), ActionFailure
         let remaining = MAX_ACTION_OUTPUT_BYTES.saturating_sub(output.len());
         output.extend_from_slice(&chunk[..remaining]);
         return Err(ActionFailure::with_output(
+            ActionFailureReason::OutputLimitExceeded,
             format!(
                 "action output exceeded {} bytes; process killed",
                 MAX_ACTION_OUTPUT_BYTES
@@ -1009,11 +1228,15 @@ mod tests {
             command: None,
             path: Some(path.into()),
             contents: Some("written by action".to_string()),
+            source: ActionSource::User,
             timeout_secs: DEFAULT_ACTION_TIMEOUT_SECS,
+            output_cap_bytes: MAX_ACTION_OUTPUT_BYTES,
             approval_id: None,
             status: ActionStatus::Approved,
             output: String::new(),
             error: None,
+            failure_reason: None,
+            cancellation_reason: None,
             created_at: 1,
             updated_at: 1,
             started_at: None,
@@ -1046,6 +1269,73 @@ mod tests {
         let error = manager.start_running(&action.id).unwrap_err();
 
         assert!(error.contains("invalid action transition"));
+    }
+
+    #[test]
+    fn action_manager_lists_filters_and_gets_actions() {
+        let manager = ActionManager::default();
+        let first = manager.create(sample_action_request()).unwrap();
+        let mut second_request = sample_action_request();
+        second_request.employee_id = "employee-2".to_string();
+        second_request.kind = ActionKind::FileWrite;
+        second_request.path = Some("note.txt".to_string());
+        second_request.contents = Some("ok".to_string());
+        second_request.command = None;
+        let second = manager.create(second_request).unwrap();
+        manager.request_approval(&second.id, "approval-2").unwrap();
+
+        let employee_two = manager.list(Some(&ActionListFilter {
+            employee_id: Some("employee-2".to_string()),
+            ..ActionListFilter::default()
+        }));
+        let pending = manager.list(Some(&ActionListFilter {
+            status: Some(ActionStatus::PendingApproval),
+            ..ActionListFilter::default()
+        }));
+
+        assert_eq!(manager.get(&first.id).unwrap().id, first.id);
+        assert_eq!(employee_two.len(), 1);
+        assert_eq!(employee_two[0].id, second.id);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, second.id);
+    }
+
+    #[test]
+    fn cancelled_action_cannot_finish_successfully_later() {
+        let manager = ActionManager::default();
+        let action = manager.create(sample_action_request()).unwrap();
+        manager.request_approval(&action.id, "approval-1").unwrap();
+        manager
+            .approve_by_approval(&action.id, "approval-1")
+            .unwrap();
+        manager.start_running(&action.id).unwrap();
+        manager.cancel(&action.id, "test cancellation").unwrap();
+
+        let error = manager
+            .finish_success(&action.id, "late success".to_string())
+            .unwrap_err();
+
+        assert!(error.contains("invalid action transition"));
+        let action = manager.get(&action.id).unwrap();
+        assert_eq!(action.status, ActionStatus::Cancelled);
+        assert_eq!(
+            action.cancellation_reason.as_deref(),
+            Some("test cancellation")
+        );
+    }
+
+    #[test]
+    fn persisted_action_history_is_capped_and_redacts_contents() {
+        let actions = (0..(MAX_PERSISTED_ACTIONS + 5))
+            .map(|index| shell_action_for_history(index as u64))
+            .collect::<Vec<_>>();
+
+        let pruned = prune_action_history_for_persistence(actions);
+
+        assert_eq!(pruned.len(), MAX_PERSISTED_ACTIONS);
+        assert!(pruned.iter().all(|action| action.contents.is_none()));
+        assert!(!pruned.iter().any(|action| action.id == "action-0"));
+        assert!(pruned.iter().any(|action| action.id == "action-254"));
     }
 
     #[test]
@@ -1161,5 +1451,32 @@ mod tests {
         );
         assert!(normalize_timeout_secs(Some(0)).is_err());
         assert!(normalize_timeout_secs(Some(MAX_ACTION_TIMEOUT_SECS + 1)).is_err());
+    }
+
+    fn shell_action_for_history(index: u64) -> Action {
+        Action {
+            id: format!("action-{index}"),
+            employee_id: "employee-1".to_string(),
+            kind: ActionKind::ShellCommand,
+            title: "History".to_string(),
+            description: "History".to_string(),
+            cwd: None,
+            command: Some("pwd".to_string()),
+            path: None,
+            contents: Some("redacted".to_string()),
+            source: ActionSource::User,
+            timeout_secs: DEFAULT_ACTION_TIMEOUT_SECS,
+            output_cap_bytes: MAX_ACTION_OUTPUT_BYTES,
+            approval_id: None,
+            status: ActionStatus::Succeeded,
+            output: String::new(),
+            error: None,
+            failure_reason: None,
+            cancellation_reason: None,
+            created_at: index,
+            updated_at: index,
+            started_at: Some(index),
+            finished_at: Some(index),
+        }
     }
 }

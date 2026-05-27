@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::{
-    actions::Action,
-    approvals::ApprovalRequest,
+    actions::{prune_action_history_for_persistence, Action},
+    approvals::{prune_approval_history_for_persistence, ApprovalRequest},
     employees::{Employee, EmployeeStatus},
     events::now_ms,
     fs::resolve_existing_dir,
@@ -160,12 +160,14 @@ impl PersistenceManager {
     pub fn snapshot(&self, input: AppStateSnapshotInput) -> PersistentAppState {
         let ui_state = self.ui_state.lock();
         let workspace_root = input.workspace_root.to_string_lossy().to_string();
+        let actions = prune_action_history_for_persistence(input.actions);
+        let approvals = prune_approval_history_for_persistence(input.approvals, &actions);
         PersistentAppState {
             workspace_root,
             employees: input.employees,
             terminal_sessions: input.terminal_sessions,
-            actions: input.actions,
-            approvals: input.approvals,
+            actions,
+            approvals,
             processes: input.processes,
             process_logs: input.process_logs,
             selected_employee_id: ui_state.selected_employee_id.clone(),
@@ -410,11 +412,15 @@ mod tests {
             command: Some("sleep 1".to_string()),
             path: None,
             contents: None,
+            source: crate::actions::ActionSource::User,
             timeout_secs: 120,
+            output_cap_bytes: crate::actions::MAX_ACTION_OUTPUT_BYTES,
             approval_id: None,
             status,
             output: String::new(),
             error: None,
+            failure_reason: None,
+            cancellation_reason: None,
             created_at: 1,
             updated_at: 1,
             started_at: Some(2),
@@ -522,6 +528,10 @@ mod tests {
         assert_eq!(
             restored[0].error.as_deref(),
             Some("app restarted before action completed")
+        );
+        assert_eq!(
+            restored[0].failure_reason,
+            Some(crate::actions::ActionFailureReason::AppRestarted)
         );
         assert!(restored[0].finished_at.is_some());
     }

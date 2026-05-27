@@ -13,7 +13,7 @@ mod workspace;
 use std::{path::PathBuf, sync::Arc};
 
 use actions::{restore_actions, ActionManager};
-use approvals::ApprovalManager;
+use approvals::{restore_approvals, ApprovalManager};
 use employees::EmployeeManager;
 use events::{emit_log, LogLevel};
 use parking_lot::RwLock;
@@ -61,8 +61,8 @@ impl AppState {
             workspace_root: self.workspace_root(),
             employees: self.employees.list(),
             terminal_sessions: self.terminal_sessions.list(None),
-            actions: self.actions.list(),
-            approvals: self.approvals.list(),
+            actions: self.actions.list(None),
+            approvals: self.approvals.list(None),
             processes: self.processes.list(),
             process_logs: self.processes.log_snapshots(),
         }
@@ -113,8 +113,10 @@ pub fn run() {
                 terminal_sessions.replace_all(terminal::restore_terminal_session_records(
                     &persisted.terminal_sessions,
                 ));
-                approvals.replace_all(persisted.approvals.clone());
-                actions.replace_all(restore_actions(&persisted.actions));
+                let restored_actions = restore_actions(&persisted.actions);
+                let restored_approvals = restore_approvals(&persisted.approvals, &restored_actions);
+                approvals.replace_all(restored_approvals);
+                actions.replace_all(restored_actions);
                 processes.replace_all(persisted.processes.clone(), persisted.process_logs.clone());
             }
             let persistence = PersistenceManager::new(persistence_path, persisted.as_ref());
@@ -159,10 +161,12 @@ pub fn run() {
             employees::employee_stop_terminal,
             approvals::approval_create,
             approvals::approval_list,
+            approvals::approval_get,
             approvals::approval_approve,
             approvals::approval_reject,
             actions::action_create,
             actions::action_list,
+            actions::action_get,
             actions::action_request_approval,
             actions::action_approve,
             actions::action_reject,

@@ -536,8 +536,8 @@ fn persist_process_snapshot(context: &ProcessPersistContext) -> Result<(), Strin
         workspace_root,
         employees: context.employees.list(),
         terminal_sessions: context.terminal_sessions.list(None),
-        actions: context.actions.list(),
-        approvals: context.approvals.list(),
+        actions: context.actions.list(None),
+        approvals: context.approvals.list(None),
         processes: context.processes.list(),
         process_logs: context.processes.log_snapshots(),
     })

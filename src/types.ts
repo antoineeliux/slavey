@@ -293,6 +293,18 @@ export type ApprovalUpdatedPayload = {
 
 export type ActionKind = "shell_command" | "file_write" | "git_operation";
 
+export type ActionSource = "user" | "employee" | "system";
+
+export type ActionFailureReason =
+  | "command_failed"
+  | "timed_out"
+  | "output_limit_exceeded"
+  | "failed_to_start"
+  | "validation_failed"
+  | "unsupported"
+  | "app_restarted"
+  | "cancelled";
+
 export type RolePolicy = {
   role: EmployeeRole;
   defaultActionKinds: ActionKind[];
@@ -321,11 +333,15 @@ export type Action = {
   command?: string | null;
   path?: string | null;
   contents?: string | null;
+  source: ActionSource;
   timeoutSecs: number;
+  outputCapBytes: number;
   approvalId?: string | null;
   status: ActionStatus;
   output: string;
   error?: string | null;
+  failureReason?: ActionFailureReason | null;
+  cancellationReason?: string | null;
   createdAt: number;
   updatedAt: number;
   startedAt?: number | null;

@@ -251,8 +251,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       const snapshot = await invoke<AppStateSnapshot>("app_state_load");
       const workspaceInfo = await invoke<WorkspaceInfo>("workspace_info");
-      const approvals = await invoke<ApprovalRequest[]>("approval_list");
-      const actions = await invoke<Action[]>("action_list");
+      const approvals = await invoke<ApprovalRequest[]>("approval_list", { filter: null });
+      const actions = await invoke<Action[]>("action_list", { filter: null });
       const processes = await invoke<ManagedProcess[]>("process_list");
       const employeeActivities = await invoke<EmployeeActivity[]>("employee_activity_list");
       const rolePolicies = await invoke<RolePolicy[]>("employee_role_policies");

@@ -6,10 +6,12 @@ use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::{
-    actions::Action,
+    actions::{Action, ActionStatus},
     events::{emit_action_updated, emit_approval_updated, emit_log, now_ms, LogLevel},
     AppState,
 };
+
+pub const MAX_PERSISTED_APPROVALS: usize = 250;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -58,6 +60,16 @@ pub struct ApprovalCreateRequest {
     pub cwd: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalListFilter {
+    pub employee_id: Option<String>,
+    pub status: Option<ApprovalStatus>,
+    pub kind: Option<ApprovalKind>,
+    pub pending_only: Option<bool>,
+    pub limit: Option<usize>,
+}
+
 #[derive(Clone, Default)]
 pub struct ApprovalManager {
     approvals: Arc<Mutex<HashMap<String, ApprovalRequest>>>,
@@ -90,14 +102,22 @@ impl ApprovalManager {
         approval
     }
 
-    pub fn list(&self) -> Vec<ApprovalRequest> {
+    pub fn list(&self, filter: Option<&ApprovalListFilter>) -> Vec<ApprovalRequest> {
         let mut approvals = self
             .approvals
             .lock()
             .values()
             .cloned()
             .collect::<Vec<ApprovalRequest>>();
+        if let Some(filter) = filter {
+            approvals.retain(|approval| approval_matches_filter(approval, filter));
+        }
         approvals.sort_by_key(|approval| approval.created_at);
+        if let Some(limit) = filter.and_then(|filter| filter.limit) {
+            let keep = limit.min(approvals.len());
+            approvals = approvals.into_iter().rev().take(keep).collect::<Vec<_>>();
+            approvals.reverse();
+        }
         approvals
     }
 
@@ -156,8 +176,22 @@ pub fn approval_create(
 }
 
 #[tauri::command]
-pub fn approval_list(state: State<'_, AppState>) -> Vec<ApprovalRequest> {
-    state.approvals.list()
+pub fn approval_list(
+    state: State<'_, AppState>,
+    filter: Option<ApprovalListFilter>,
+) -> Vec<ApprovalRequest> {
+    state.approvals.list(filter.as_ref())
+}
+
+#[tauri::command]
+pub fn approval_get(
+    state: State<'_, AppState>,
+    approval_id: String,
+) -> Result<ApprovalRequest, String> {
+    state
+        .approvals
+        .get(&approval_id)
+        .ok_or_else(|| "approval not found".to_string())
 }
 
 #[tauri::command]
@@ -257,6 +291,99 @@ fn approval_status_label(status: ApprovalStatus) -> &'static str {
     }
 }
 
+pub fn restore_approvals(
+    approvals: &[ApprovalRequest],
+    actions: &[Action],
+) -> Vec<ApprovalRequest> {
+    let action_by_id = actions
+        .iter()
+        .map(|action| (action.id.as_str(), action))
+        .collect::<HashMap<_, _>>();
+    prune_approval_history_for_persistence(
+        approvals
+            .iter()
+            .cloned()
+            .map(|mut approval| {
+                if approval.status == ApprovalStatus::Pending {
+                    if let Some(action_id) = approval.action_id.as_deref() {
+                        match action_by_id.get(action_id) {
+                            Some(action) if action.status == ActionStatus::PendingApproval => {}
+                            _ => {
+                                approval.status = ApprovalStatus::Rejected;
+                                approval.resolved_at = Some(now_ms());
+                            }
+                        }
+                    }
+                }
+                approval
+            })
+            .collect(),
+        actions,
+    )
+}
+
+pub fn prune_approval_history_for_persistence(
+    approvals: Vec<ApprovalRequest>,
+    actions: &[Action],
+) -> Vec<ApprovalRequest> {
+    let linked_approval_ids = actions
+        .iter()
+        .filter_map(|action| action.approval_id.as_deref())
+        .collect::<std::collections::HashSet<_>>();
+    let mut normalized = approvals;
+    let mut terminal = normalized
+        .iter()
+        .filter(|approval| {
+            approval.status != ApprovalStatus::Pending
+                && !linked_approval_ids.contains(approval.id.as_str())
+        })
+        .map(|approval| approval.id.clone())
+        .collect::<Vec<_>>();
+
+    if terminal.len() > MAX_PERSISTED_APPROVALS {
+        terminal.sort_by_key(|id| {
+            std::cmp::Reverse(
+                normalized
+                    .iter()
+                    .find(|approval| approval.id == *id)
+                    .map(|approval| approval.resolved_at.unwrap_or(approval.created_at))
+                    .unwrap_or_default(),
+            )
+        });
+        let keep_terminal = terminal
+            .into_iter()
+            .take(MAX_PERSISTED_APPROVALS)
+            .collect::<std::collections::HashSet<_>>();
+        normalized.retain(|approval| {
+            approval.status == ApprovalStatus::Pending
+                || linked_approval_ids.contains(approval.id.as_str())
+                || keep_terminal.contains(&approval.id)
+        });
+    }
+
+    normalized.sort_by_key(|approval| approval.created_at);
+    normalized
+}
+
+fn approval_matches_filter(approval: &ApprovalRequest, filter: &ApprovalListFilter) -> bool {
+    if filter.pending_only.unwrap_or(false) && approval.status != ApprovalStatus::Pending {
+        return false;
+    }
+    filter
+        .employee_id
+        .as_deref()
+        .map(|employee_id| approval.employee_id == employee_id)
+        .unwrap_or(true)
+        && filter
+            .status
+            .map(|status| approval.status == status)
+            .unwrap_or(true)
+        && filter
+            .kind
+            .map(|kind| approval.kind == kind)
+            .unwrap_or(true)
+}
+
 fn persist_or_log(app: &AppHandle, state: &State<'_, AppState>) {
     if let Err(error) = state.persist() {
         emit_log(
@@ -328,6 +455,34 @@ mod tests {
     }
 
     #[test]
+    fn approval_manager_lists_filters_and_gets_approvals() {
+        let approvals = ApprovalManager::default();
+        let first = approvals.create(approval_payload(None));
+        let mut second_payload = approval_payload(None);
+        second_payload.employee_id = "employee-2".to_string();
+        second_payload.kind = ApprovalKind::FileWrite;
+        let second = approvals.create(second_payload);
+        approvals
+            .resolve(&second.id, ApprovalStatus::Rejected)
+            .unwrap();
+
+        let pending = approvals.list(Some(&ApprovalListFilter {
+            pending_only: Some(true),
+            ..ApprovalListFilter::default()
+        }));
+        let employee_two = approvals.list(Some(&ApprovalListFilter {
+            employee_id: Some("employee-2".to_string()),
+            ..ApprovalListFilter::default()
+        }));
+
+        assert_eq!(approvals.get(&first.id).unwrap().id, first.id);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, first.id);
+        assert_eq!(employee_two.len(), 1);
+        assert_eq!(employee_two[0].id, second.id);
+    }
+
+    #[test]
     fn rejecting_already_approved_approval_fails() {
         let approvals = ApprovalManager::default();
         let approval = approvals.create(approval_payload(None));
@@ -376,5 +531,29 @@ mod tests {
             .unwrap();
 
         assert_eq!(updated.status, ActionStatus::Rejected);
+    }
+
+    #[test]
+    fn restore_rejects_pending_approval_for_terminal_action() {
+        let mut action = ActionManager::default().create(action_payload()).unwrap();
+        action.status = ActionStatus::Failed;
+        let approval = ApprovalManager::default().create(approval_payload(Some(action.id.clone())));
+
+        let restored = restore_approvals(&[approval], &[action]);
+
+        assert_eq!(restored[0].status, ApprovalStatus::Rejected);
+        assert!(restored[0].resolved_at.is_some());
+    }
+
+    #[test]
+    fn restore_rejects_pending_approval_for_already_approved_action() {
+        let mut action = ActionManager::default().create(action_payload()).unwrap();
+        action.status = ActionStatus::Approved;
+        let approval = ApprovalManager::default().create(approval_payload(Some(action.id.clone())));
+
+        let restored = restore_approvals(&[approval], &[action]);
+
+        assert_eq!(restored[0].status, ApprovalStatus::Rejected);
+        assert!(restored[0].resolved_at.is_some());
     }
 }

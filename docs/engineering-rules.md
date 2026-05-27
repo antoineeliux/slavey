@@ -39,6 +39,9 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Destructive file operations require visible errors and confirmation where configured.
 - Unsaved editor changes must be guarded before workspace switches, file switches, or editor close.
 - Terminal buffers and process logs must stay bounded.
+- Actions and approvals are the audit layer for structured risky operations.
+- Invalid action or approval UI controls should be driven by backend state and disabled reasons.
+- Persisted action history must stay bounded and must not contain secrets or raw file-write contents.
 - Employee and game UI must use backend employee activity state as the source of truth.
 - Terminal output must not be parsed for status unless a future explicit structured protocol is added.
 - Terminal metadata may be persisted, but raw terminal output must not be persisted unless explicitly bounded and sanitized.
