@@ -8,6 +8,7 @@ type ProcessPanelItem = {
   command: string;
   status: string;
   exitCode?: number | null;
+  employeeId?: string | null;
 };
 
 export function ProcessPanel({
@@ -41,6 +42,9 @@ export function ProcessPanel({
                 <span>{process.status}</span>
               </div>
               <code title={process.command}>{process.command}</code>
+              <div className="process-owner">
+                {process.employeeId ? "employee-owned" : "workspace process"}
+              </div>
               <div className="approval-actions">
                 <button
                   className="command-button compact"
@@ -51,6 +55,7 @@ export function ProcessPanel({
                 <button
                   className="command-button compact"
                   disabled={process.status !== "running"}
+                  title={process.status === "running" ? "Kill process" : "Process is not running"}
                   onClick={() => void killProcess(process.id)}
                 >
                   Kill

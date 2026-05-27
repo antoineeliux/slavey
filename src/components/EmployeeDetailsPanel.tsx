@@ -172,9 +172,11 @@ export function EmployeeDetailsPanel() {
             <dt>Worktree status</dt>
             <dd>
               {selectedEmployee.worktreePath
-                ? worktreeStatus?.dirty
-                  ? "dirty"
-                  : "clean"
+                ? worktreeStatus
+                  ? worktreeStatus.dirty
+                    ? "dirty"
+                    : "clean"
+                  : "loading"
                 : "none"}
             </dd>
           </div>
@@ -289,6 +291,9 @@ export function EmployeeDetailsPanel() {
         </div>
         {codexCliStatus?.available === false ? (
           <div className="inline-warning">{codexCliStatus.message}</div>
+        ) : null}
+        {activeSessionReason ? (
+          <div className="inline-note">{activeSessionReason}.</div>
         ) : null}
         {worktreeDisabledReason && !selectedEmployee.worktreePath ? (
           <div className="inline-warning">{worktreeDisabledReason}</div>

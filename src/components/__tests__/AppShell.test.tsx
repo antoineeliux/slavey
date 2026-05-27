@@ -31,8 +31,10 @@ describe("AppShell", () => {
   });
 
   it("renders the core workspace tabs and shell regions", async () => {
+    useAppStore.setState({ backendReady: true });
     render(<AppShell />);
 
+    expect(screen.getByText("Backend ready")).toBeInTheDocument();
     expect(screen.getByRole("tablist", { name: "Workspace" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Terminal/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Editor/i })).toBeInTheDocument();
@@ -49,5 +51,78 @@ describe("AppShell", () => {
 
     expect(useAppStore.getState().activeTab).toBe("editor");
     expect(await screen.findByText("Editor panel mock")).toBeInTheDocument();
+  });
+
+  it("surfaces active employee session and dirty editor state in the status strip", () => {
+    useAppStore.setState({
+      backendReady: true,
+      employees: [
+        {
+          id: "employee-1",
+          name: "Ada",
+          role: "frontend",
+          status: "running",
+          cwd: "/workspace",
+          worktreePath: null,
+          branchName: null,
+          terminalSessionId: "term-1",
+          currentCommand: null,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      ],
+      selectedEmployeeId: "employee-1",
+      workspaceInfo: {
+        workspaceRoot: "/workspace/project",
+        recentWorkspaces: [],
+        settings: useAppStore.getState().settings,
+        switchBlockers: [],
+        repoHealth: {
+          isExistingDirectory: true,
+          isGitRepo: true,
+          repoRoot: "/workspace/project",
+          currentBranch: "main",
+          dirty: false,
+          gitUserNameConfigured: true,
+          gitUserEmailConfigured: true,
+          worktreeSupported: true,
+          worktreeSupportMessage: "available",
+          worktreeBlockers: [],
+          handoffBlockers: [],
+          codexCliStatus: {
+            available: true,
+            version: "codex 1.0.0",
+            message: "available",
+          },
+        },
+      },
+      terminalSessions: [
+        {
+          sessionId: "term-1",
+          employeeId: "employee-1",
+          profile: "shell",
+          cwd: "/workspace",
+          status: "running",
+          startedAt: 1,
+          label: "Shell",
+        },
+      ],
+      openFile: {
+        path: "/workspace/project/src/App.tsx",
+        savedContents: "",
+        contents: "changed",
+        dirty: true,
+        lastSavedAt: null,
+        saveError: null,
+        metadata: null,
+        openedModified: null,
+      },
+    });
+
+    render(<AppShell />);
+
+    expect(screen.getByText("Ada · running")).toBeInTheDocument();
+    expect(screen.getByText("Shell")).toBeInTheDocument();
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
   });
 });

@@ -91,6 +91,10 @@
   padding: 6px;
 }
 
+.compact-empty {
+  padding: 8px;
+}
+
 .file-actions {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -223,6 +227,18 @@
 
 .editor-warning {
   margin: 8px 10px 0;
+}
+
+.editor-empty-state {
+  display: flex;
+  min-height: 42px;
+  flex: 0 0 auto;
+  align-items: center;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-panel-subtle);
+  padding: 0 10px;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .codemirror-host {

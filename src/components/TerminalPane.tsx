@@ -197,7 +197,19 @@ export function TerminalPane() {
           </button>
         </div>
       </div>
-      {activeSession ? <ActiveSessionSummary session={activeSession} /> : null}
+      {activeSession ? (
+        <ActiveSessionSummary session={activeSession} />
+      ) : sessionId ? (
+        <div className="terminal-session-bar pending">
+          <strong title={sessionId}>{sessionId}</strong>
+          <span>loading session record</span>
+        </div>
+      ) : (
+        <div className="terminal-empty-banner">No active terminal session.</div>
+      )}
+      {defaultTerminalDisabledReason ? (
+        <div className="terminal-disabled-reason">{defaultTerminalDisabledReason}</div>
+      ) : null}
       <div className="terminal-host" ref={hostRef} />
       <TerminalSessionPanel
         activeSessionId={sessionId}
@@ -219,9 +231,16 @@ function ActiveSessionSummary({ session }: { session: TerminalSessionRecord }) {
     <div className="terminal-session-bar">
       <strong>{session.label}</strong>
       <span>{formatLabel(session.profile)}</span>
+      <span>{session.status.replaceAll("_", " ")}</span>
       <span title={session.cwd}>{session.cwd}</span>
       <span>started {formatTimestamp(session.startedAt)}</span>
-      {session.lastOutputAt ? <span>output {formatTimestamp(session.lastOutputAt)}</span> : null}
+      {session.exitCode !== null && session.exitCode !== undefined ? (
+        <span>exit {session.exitCode}</span>
+      ) : session.lastOutputAt ? (
+        <span>output {formatTimestamp(session.lastOutputAt)}</span>
+      ) : (
+        <span>{session.stopReason?.replaceAll("_", " ") ?? "active"}</span>
+      )}
     </div>
   );
 }

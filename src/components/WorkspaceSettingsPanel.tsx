@@ -137,9 +137,9 @@ export function WorkspaceSettingsPanel() {
             <span>Current root</span>
             <strong title={workspaceRoot ?? ""}>{workspaceRoot ?? "none"}</strong>
             <span>Directory</span>
-            <strong>{health?.isExistingDirectory ? "exists" : "missing"}</strong>
+            <strong>{health ? (health.isExistingDirectory ? "exists" : "missing") : "unknown"}</strong>
             <span>Git repo</span>
-            <strong>{health?.isGitRepo ? "available" : "unavailable"}</strong>
+            <strong>{health ? (health.isGitRepo ? "available" : "unavailable") : "unknown"}</strong>
             <span>Repo root</span>
             <strong title={health?.repoRoot ?? ""}>{health?.repoRoot ?? "none"}</strong>
             <span>Branch</span>
@@ -186,7 +186,13 @@ export function WorkspaceSettingsPanel() {
                     className="recent-workspace"
                     key={recent}
                     disabled={workspaceLoading || recent === workspaceRoot}
-                    title={recent}
+                    title={
+                      recent === workspaceRoot
+                        ? "Current workspace"
+                        : workspaceLoading
+                          ? "Workspace change in progress"
+                          : recent
+                    }
                     onClick={() => void setWorkspaceRoot(recent)}
                   >
                     <span>{recent}</span>
@@ -347,7 +353,13 @@ function DiagnosticsSection({
           {diagnostics?.workspacePath ?? "unknown"}
         </strong>
         <span>Repo</span>
-        <strong>{diagnostics?.workspaceIsGitRepo ? "git repo" : "not a git repo"}</strong>
+        <strong>
+          {diagnostics
+            ? diagnostics.workspaceIsGitRepo
+              ? "git repo"
+              : "not a git repo"
+            : "not loaded"}
+        </strong>
         <span>Employees</span>
         <strong>{counts?.employees ?? 0}</strong>
         <span>Terminals</span>
@@ -356,6 +368,12 @@ function DiagnosticsSection({
         </strong>
         <span>Recent files</span>
         <strong>{counts?.recentFiles ?? 0}</strong>
+        <span>Actions</span>
+        <strong>{counts ? countSummary(counts.actionsByStatus) : "not loaded"}</strong>
+        <span>Approvals</span>
+        <strong>{counts ? countSummary(counts.approvalsByStatus) : "not loaded"}</strong>
+        <span>Processes</span>
+        <strong>{counts ? countSummary(counts.managedProcessesByStatus) : "not loaded"}</strong>
         <span>Codex CLI</span>
         <strong title={diagnostics?.codexCliMessage ?? ""}>
           {diagnostics?.codexCliAvailable
@@ -383,6 +401,7 @@ function DiagnosticsSection({
         <button
           className="command-button compact"
           disabled={loading}
+          title={loading ? "Diagnostics request in progress" : "Refresh diagnostics"}
           onClick={() => void onRefresh()}
         >
           <RefreshCw size={14} />
@@ -391,6 +410,7 @@ function DiagnosticsSection({
         <button
           className="command-button compact"
           disabled={loading}
+          title={loading ? "Diagnostics request in progress" : "Copy diagnostics JSON"}
           onClick={() => void onCopy()}
         >
           <Clipboard size={14} />
@@ -403,4 +423,12 @@ function DiagnosticsSection({
       {message ? <div className="inline-warning subtle-warning">{message}</div> : null}
     </section>
   );
+}
+
+function countSummary(counts: Record<string, number>): string {
+  const entries = Object.entries(counts).filter(([, count]) => count > 0);
+  if (entries.length === 0) {
+    return "none";
+  }
+  return entries.map(([status, count]) => `${status.replaceAll("_", " ")} ${count}`).join(", ");
 }

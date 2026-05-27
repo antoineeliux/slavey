@@ -54,6 +54,16 @@ describe("WorkspaceSettingsPanel", () => {
     expect(screen.getByText(/Local-only export/)).toBeInTheDocument();
     expect(screen.getByText(/Secrets, terminal output, environment variables/)).toBeInTheDocument();
     expect(await screen.findByText(/0.1.0 \(test-os\/test-arch\)/)).toBeInTheDocument();
+    expect(screen.getAllByText("none").length).toBeGreaterThan(0);
     await waitFor(() => expect(mockTauriInvoke).toHaveBeenCalledWith("diagnostics_summary"));
+  });
+
+  it("uses unknown language before workspace health is loaded", () => {
+    useAppStore.setState({ workspaceInfo: null });
+
+    render(<WorkspaceSettingsPanel />);
+
+    expect(screen.getAllByText("unknown").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("not loaded").length).toBeGreaterThan(0);
   });
 });

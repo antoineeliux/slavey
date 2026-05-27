@@ -35,6 +35,9 @@ export function EditorPane() {
   const [searchResults, setSearchResults] = useState<
     Array<{ path: string; lineNumber?: number | null; line?: string | null }>
   >([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchHasRun, setSearchHasRun] = useState(false);
 
   useEffect(() => {
     if (selectedEmployee) {
@@ -46,6 +49,25 @@ export function EditorPane() {
 
   const parentPath = currentDir ? parentDir(currentDir) : null;
   const openError = openFile?.saveError ?? editorError;
+  const searchRoot = selectedEmployee?.cwd ?? workspaceRoot;
+  const searchDisabledReason = searchDisabledReasonFor(searchRoot, searchQuery);
+
+  const runSearch = async () => {
+    if (searchDisabledReason) {
+      return;
+    }
+    setSearchLoading(true);
+    setSearchError(null);
+    setSearchHasRun(true);
+    try {
+      setSearchResults(await searchFiles(searchMode, searchQuery, searchRoot));
+    } catch (error) {
+      setSearchResults([]);
+      setSearchError(String(error));
+    } finally {
+      setSearchLoading(false);
+    }
+  };
 
   return (
     <div className="editor-pane">
@@ -58,7 +80,7 @@ export function EditorPane() {
           <button
             className="icon-button"
             disabled={!parentPath}
-            title="Parent directory"
+            title={parentPath ? "Parent directory" : "No parent directory"}
             onClick={() => parentPath && void loadDir(parentPath)}
           >
             <ChevronLeft size={15} />
@@ -112,20 +134,26 @@ export function EditorPane() {
           </div>
         </div>
         <div className="file-list">
-          {fileEntries.map((entry) => (
-            <FileTreeRow
-              entry={entry}
-              key={entry.path}
-              onOpen={() => (entry.isDir ? void loadDir(entry.path) : void readFile(entry.path))}
-              onRename={() => {
-                const nextPath = prompt("Rename path", entry.path);
-                if (nextPath?.trim() && nextPath.trim() !== entry.path) {
-                  void renamePath(entry.path, nextPath.trim());
-                }
-              }}
-              onDelete={() => void deletePath(entry.path)}
-            />
-          ))}
+          {fileEntries.length === 0 ? (
+            <div className="empty-panel compact-empty">
+              No files listed for this directory.
+            </div>
+          ) : (
+            fileEntries.map((entry) => (
+              <FileTreeRow
+                entry={entry}
+                key={entry.path}
+                onOpen={() => (entry.isDir ? void loadDir(entry.path) : void readFile(entry.path))}
+                onRename={() => {
+                  const nextPath = prompt("Rename path", entry.path);
+                  if (nextPath?.trim() && nextPath.trim() !== entry.path) {
+                    void renamePath(entry.path, nextPath.trim());
+                  }
+                }}
+                onDelete={() => void deletePath(entry.path)}
+              />
+            ))
+          )}
         </div>
         {fileOperationError ? (
           <div className="inline-warning file-error">{fileOperationError}</div>
@@ -134,6 +162,7 @@ export function EditorPane() {
           <button
             className="command-button compact"
             disabled={!currentDir}
+            title={currentDir ? "Create file in current directory" : "Open a directory first"}
             onClick={() =>
               currentDir && void createFile(`${currentDir}/untitled-${Date.now()}.txt`, "")
             }
@@ -143,6 +172,7 @@ export function EditorPane() {
           <button
             className="command-button compact"
             disabled={!currentDir}
+            title={currentDir ? "Create directory in current directory" : "Open a directory first"}
             onClick={() =>
               currentDir && void createDir(`${currentDir}/folder-${Date.now()}`)
             }
@@ -167,21 +197,23 @@ export function EditorPane() {
             onChange={(event) => setSearchQuery(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter") {
-                void searchFiles(searchMode, searchQuery, selectedEmployee?.cwd ?? workspaceRoot)
-                  .then(setSearchResults);
+                void runSearch();
               }
             }}
           />
           <button
             className="command-button compact"
-            onClick={() =>
-              void searchFiles(searchMode, searchQuery, selectedEmployee?.cwd ?? workspaceRoot)
-                .then(setSearchResults)
-            }
+            disabled={Boolean(searchDisabledReason) || searchLoading}
+            title={searchDisabledReason ?? `Run ${searchMode}`}
+            onClick={() => void runSearch()}
           >
-            Go
+            {searchLoading ? "..." : "Go"}
           </button>
           <div className="search-results">
+            {searchError ? <div className="inline-warning file-error">{searchError}</div> : null}
+            {searchHasRun && !searchLoading && !searchError && searchResults.length === 0 ? (
+              <div className="empty-line compact">No search results</div>
+            ) : null}
             {searchResults.map((result) => (
               <button
                 className="search-result"
@@ -200,12 +232,19 @@ export function EditorPane() {
           <div className="toolbar-title">
             <File size={15} />
             {openFile ? shortPath(openFile.path) : "No file open"}
-            {openFile?.dirty ? <span className="dirty-dot" /> : null}
+            {openFile?.dirty ? <span className="dirty-dot" title="Unsaved changes" /> : null}
           </div>
           <div className="toolbar-actions">
             <button
               className="command-button compact"
               disabled={!openFile || !openFile.dirty}
+              title={
+                !openFile
+                  ? "Open a file before saving"
+                  : openFile.dirty
+                    ? "Save changes"
+                    : "No unsaved changes"
+              }
               onClick={() => void saveOpenFile()}
             >
               <Save size={14} />
@@ -234,6 +273,11 @@ export function EditorPane() {
           </div>
         ) : null}
         {openError ? <div className="inline-warning editor-warning">{openError}</div> : null}
+        {!openFile ? (
+          <div className="editor-empty-state">
+            Select a file from the tree or recent files to start editing.
+          </div>
+        ) : null}
         <CodeMirrorEditor
           value={openFile?.contents ?? ""}
           disabled={!openFile}
@@ -407,4 +451,14 @@ function formatFileSize(size?: number | null): string {
 
 function formatModified(modified?: number | null): string {
   return modified ? new Date(modified).toLocaleString() : "modified unknown";
+}
+
+function searchDisabledReasonFor(root: string | null, query: string): string | null {
+  if (!root) {
+    return "Open a workspace before searching";
+  }
+  if (query.trim().length === 0) {
+    return "Enter a search query";
+  }
+  return null;
 }

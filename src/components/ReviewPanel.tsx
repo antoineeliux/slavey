@@ -54,14 +54,30 @@ export function ReviewPanel({
     ? review?.files.find((file) => file.path === selectedFile) ?? null
     : null;
   const fileDiff = selectedFile ? fileDiffs[reviewFileKey(employeeId, selectedFile)] ?? "" : "";
-  const canStage = Boolean(selectedFile && !selectedReviewFile?.conflicted);
-  const canUnstage = Boolean(
-    selectedFile && selectedReviewFile?.staged && !selectedReviewFile.conflicted,
+  const stageDisabledReason = reviewFileActionDisabledReason(
+    selectedFile,
+    selectedReviewFile,
+    "stage",
   );
-  const canDiscard = Boolean(
-    selectedFile && selectedReviewFile?.unstaged && !selectedReviewFile.conflicted,
+  const unstageDisabledReason = reviewFileActionDisabledReason(
+    selectedFile,
+    selectedReviewFile,
+    "unstage",
   );
-  const canDeleteUntracked = Boolean(selectedFile && selectedReviewFile?.untracked);
+  const discardDisabledReason = reviewFileActionDisabledReason(
+    selectedFile,
+    selectedReviewFile,
+    "discard",
+  );
+  const deleteDisabledReason = reviewFileActionDisabledReason(
+    selectedFile,
+    selectedReviewFile,
+    "delete",
+  );
+  const canStage = !stageDisabledReason;
+  const canUnstage = !unstageDisabledReason;
+  const canDiscard = !discardDisabledReason;
+  const canDeleteUntracked = !deleteDisabledReason;
   const commitDisabledReason = review?.disabledReasons.commit ?? null;
   const canCommit = !commitDisabledReason && commitMessage.trim().length > 0;
   const reviewHandoff = review?.handoff ?? handoff;
@@ -130,7 +146,7 @@ export function ReviewPanel({
         <span>Remote</span>
         <strong title={review?.remote.remoteUrl ?? ""}>{review?.remote.remoteName ?? "none"}</strong>
         <span>State</span>
-        <strong>{review?.clean ? "clean" : "dirty"}</strong>
+        <strong>{review ? (review.clean ? "clean" : "dirty") : "unknown"}</strong>
         <span>Operation</span>
         <strong>{review?.operation.message ?? "ready"}</strong>
         <span>Push</span>
@@ -191,7 +207,7 @@ export function ReviewPanel({
             <button
               className="command-button compact"
               disabled={!canStage}
-              title={selectedReviewFile?.conflicted ? "Resolve conflicts before staging" : "Stage file"}
+              title={stageDisabledReason ?? "Stage file"}
               onClick={() => selectedFile && void stageWorktreeFile(employeeId, selectedFile)}
             >
               Stage
@@ -199,9 +215,7 @@ export function ReviewPanel({
             <button
               className="command-button compact"
               disabled={!canUnstage}
-              title={
-                canUnstage ? "Unstage file" : (review?.disabledReasons.commit ?? "Select a staged file")
-              }
+              title={unstageDisabledReason ?? "Unstage file"}
               onClick={() => selectedFile && void unstageWorktreeFile(employeeId, selectedFile)}
             >
               Unstage
@@ -209,11 +223,7 @@ export function ReviewPanel({
             <button
               className="command-button compact"
               disabled={!canDiscard}
-              title={
-                canDiscard
-                  ? "Discard unstaged changes"
-                  : (review?.disabledReasons.discard ?? "Select an unstaged file")
-              }
+              title={discardDisabledReason ?? "Discard unstaged changes"}
               onClick={() => {
                 if (
                   selectedFile &&
@@ -229,11 +239,7 @@ export function ReviewPanel({
             <button
               className="command-button compact danger"
               disabled={!canDeleteUntracked}
-              title={
-                canDeleteUntracked
-                  ? "Delete untracked file"
-                  : (review?.disabledReasons.deleteUntracked ?? "Select an untracked file")
-              }
+              title={deleteDisabledReason ?? "Delete untracked file"}
               onClick={() => {
                 if (
                   selectedFile &&
@@ -281,6 +287,9 @@ export function ReviewPanel({
         <div className="section-heading compact-heading">
           <GitBranch size={15} />
           Handoff
+        </div>
+        <div className={canApplyHandoff ? "handoff-state ready" : "handoff-state blocked"}>
+          {canApplyHandoff ? "Ready to apply" : "Blocked"}
         </div>
         <div className="policy-grid">
           <span>Branch</span>
@@ -431,6 +440,32 @@ function reviewFileLabel(file: WorktreeReview["files"][number]): string {
     return file.deleted ? "deleted" : "unstaged";
   }
   return "changed";
+}
+
+function reviewFileActionDisabledReason(
+  selectedFile: string | null,
+  file: WorktreeReview["files"][number] | null,
+  action: "stage" | "unstage" | "discard" | "delete",
+): string | null {
+  if (!selectedFile) {
+    return "Select a changed file";
+  }
+  if (!file) {
+    return "Selected file is not in the current review";
+  }
+  if (file.conflicted && action !== "delete") {
+    return "Resolve conflicts before changing file staging";
+  }
+  if (action === "unstage" && !file.staged) {
+    return "Select a staged file";
+  }
+  if (action === "discard" && !file.unstaged) {
+    return "Select an unstaged file";
+  }
+  if (action === "delete" && !file.untracked) {
+    return "Select an untracked file";
+  }
+  return null;
 }
 
 function formatAheadBehind(ahead?: number | null, behind?: number | null): string {

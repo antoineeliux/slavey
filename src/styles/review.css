@@ -27,6 +27,29 @@
 .handoff-result.warning {
   border-color: var(--warning);
 }
+
+.handoff-state {
+  width: fit-content;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-pill);
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 800;
+  padding: 5px 9px;
+  text-transform: uppercase;
+}
+
+.handoff-state.ready {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.handoff-state.blocked {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+
 .review-block {
   display: grid;
   gap: 6px;

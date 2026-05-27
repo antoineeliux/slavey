@@ -11,7 +11,7 @@
 
 .terminal-session-bar {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(70px, 0.4fr) minmax(0, 1.5fr) auto auto;
+  grid-template-columns: minmax(0, 1.2fr) minmax(70px, 0.4fr) minmax(78px, 0.5fr) minmax(0, 1.5fr) auto;
   gap: 10px;
   align-items: center;
   min-height: 32px;
@@ -31,6 +31,25 @@
 
 .terminal-session-bar strong {
   color: var(--text-primary);
+}
+
+.terminal-session-bar.pending,
+.terminal-empty-banner,
+.terminal-disabled-reason {
+  min-height: 30px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-panel-subtle);
+  padding: 7px 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.terminal-session-bar.pending {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.terminal-disabled-reason {
+  color: var(--warning);
 }
 
 .terminal-session-panel {

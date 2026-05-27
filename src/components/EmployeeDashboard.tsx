@@ -71,6 +71,7 @@ export function EmployeeDashboard() {
                 }
                 key={employee.id}
                 onClick={() => void selectEmployee(employee.id)}
+                aria-pressed={employee.id === selectedEmployeeId}
               >
               <div className="employee-visual" aria-hidden="true">
                 <div className="employee-head">
@@ -88,6 +89,9 @@ export function EmployeeDashboard() {
                   <strong>{employee.name}</strong>
                   <span>{employee.role}</span>
                 </div>
+                {employee.id === selectedEmployeeId ? (
+                  <div className="selected-employee-badge">Selected</div>
+                ) : null}
                 <div className="employee-meta">
                   <span>{activity?.label ?? employee.status.replace("_", " ")}</span>
                   <span>{employee.worktreePath ? "worktree" : "root"}</span>

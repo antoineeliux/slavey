@@ -112,6 +112,17 @@
   font-size: 11px;
 }
 
+.process-owner {
+  width: fit-content;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-pill);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 800;
+  padding: 4px 7px;
+  text-transform: uppercase;
+}
+
 .approval-actions {
   display: flex;
   flex-wrap: wrap;

@@ -10,6 +10,7 @@ test.describe("app shell browser smoke", () => {
     await expect(page.getByRole("tablist", { name: "Workspace" })).toBeVisible();
     await expect(page.getByRole("button", { name: /Terminal/i })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Slavey" })).toBeVisible();
+    await expect(page.getByText("Backend ready")).toBeVisible();
     await expect(page.getByRole("heading", { name: "Mira Frontend" })).toBeVisible();
     await expect(page.getByText("Review needed").first()).toBeVisible();
     await expect.poll(() => consoleErrors).toEqual([]);
@@ -22,6 +23,7 @@ test.describe("app shell browser smoke", () => {
 
     await expect(page.locator(".terminal-pane")).toBeVisible();
     await expect(page.locator(".terminal-host")).toBeVisible();
+    await expect(page.locator(".terminal-session-bar").getByText("running")).toBeVisible();
     await expect(page.locator(".terminal-pane").getByText("Mock shell").first()).toBeVisible();
     await expect(page.getByText("Sessions").first()).toBeVisible();
   });
@@ -33,7 +35,7 @@ test.describe("app shell browser smoke", () => {
 
     await expect(page.locator(".editor-pane")).toBeVisible();
     await expect(page.locator(".file-tree .toolbar-title").getByText("Files")).toBeVisible();
-    await expect(page.getByText("Recent files")).toBeVisible();
+    await expect(page.getByText("Recent files", { exact: true })).toBeVisible();
     await expect(page.getByText("smoke-fixture.ts")).toBeVisible();
     await expect(page.locator(".cm-editor")).toBeVisible();
   });
@@ -47,6 +49,9 @@ test.describe("app shell browser smoke", () => {
     await expect(page.getByText("Current root")).toBeVisible();
     await expect(page.getByText("/workspace").first()).toBeVisible();
     await expect(page.getByText("Diagnostics", { exact: true })).toBeVisible();
+    await expect(page.getByText("pending approval 1")).toBeVisible();
+    await expect(page.getByText("pending 1")).toBeVisible();
+    await expect(page.getByText("running 1")).toBeVisible();
     await expect(page.getByRole("button", { name: /Copy diagnostics JSON/i })).toBeVisible();
   });
 

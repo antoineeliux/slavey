@@ -155,6 +155,16 @@
   line-height: 1.35;
 }
 
+.inline-note {
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  padding: 8px 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .section-heading {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) 32px;

@@ -188,6 +188,18 @@
   margin-top: 6px;
 }
 
+.selected-employee-badge {
+  width: fit-content;
+  margin-top: 6px;
+  border: 1px solid var(--success);
+  border-radius: var(--radius-pill);
+  color: var(--success);
+  font-size: 10px;
+  font-weight: 800;
+  padding: 3px 7px;
+  text-transform: uppercase;
+}
+
 .employee-activity-line {
   display: flex;
   flex-wrap: wrap;
