@@ -34,7 +34,7 @@ If Chromium is not installed locally, install it with:
 npx playwright install chromium
 ```
 
-The E2E harness sets `VITE_SLAVEY_E2E=true`, which keeps browser tests on mock workspace, diagnostics, employee, activity, terminal, action, approval, and review data. These tests are app-shell regression smoke tests, not backend validation.
+The E2E harness sets `VITE_SLAVEY_E2E=true` through Playwright's web server environment, which keeps browser tests on mock workspace, diagnostics, employee, activity, terminal, action, approval, and review data. These tests are app-shell regression smoke tests, not backend validation. Playwright output folders are ignored by Git, and `npm run check` includes a production bundle guard that fails if E2E fixture strings leak into `dist/`.
 
 See [Engineering Rules](docs/engineering-rules.md) for validation, Git workflow, and safety standards.
 

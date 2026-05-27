@@ -13,7 +13,10 @@ export default defineConfig({
     trace: "on-first-retry",
   },
   webServer: {
-    command: "VITE_SLAVEY_E2E=true npm run dev:web",
+    command: "npm run dev:web",
+    env: {
+      VITE_SLAVEY_E2E: "true",
+    },
     url: "http://127.0.0.1:1420",
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,

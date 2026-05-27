@@ -33,8 +33,6 @@ import type {
 
 type InvokeArgs = Record<string, unknown>;
 
-export const e2eTauriMockEnabled = import.meta.env.VITE_SLAVEY_E2E === "true";
-
 const now = 1_713_555_600_000;
 const workspaceRoot = "/workspace";
 const frontendCwd = `${workspaceRoot}/.slavey/worktrees/frontend-smoke`;

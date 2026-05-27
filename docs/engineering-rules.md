@@ -7,6 +7,7 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Run `npm run check` before pushing.
 - Run `npm run build` before release-like changes.
 - Run `npm run test:e2e:run` when touching app-shell, tab loading, Tauri command plumbing, or future animated employee UI.
+- `npm run check` runs the production bundle guard after Vite build to catch E2E fixture leakage into `dist/`.
 - The existing Vite large chunk warning is acceptable until frontend splitting is handled separately.
 
 ## Local Hooks
@@ -15,6 +16,7 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - The pre-commit hook is intentionally fast and runs formatting plus TypeScript validation.
 - The pre-push hook runs full local validation with `npm run check`.
 - Browser E2E smoke tests are not part of pre-push yet; add them only after they are proven extremely stable and fast.
+- Playwright artifact folders (`test-results/`, `playwright-report/`, and `blob-report/`) are ignored and should not be committed.
 - Use `--no-verify` only for clearly documented exceptions, such as an external outage or a deliberately staged infrastructure step.
 
 ## Git Workflow
@@ -84,6 +86,7 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Avoid brittle visual snapshot tests for now; prefer state-driven render and smoke tests.
 - Future animated employee UI should include render tests driven by backend `EmployeeActivity` state.
 - Browser-level smoke/E2E coverage should be added in a dedicated phase once the web app can be tested without increasing local validation cost too much.
-- Browser smoke/E2E runs with `VITE_SLAVEY_E2E=true` and explicit mock Tauri data at the typed command boundary.
+- Browser smoke/E2E runs with explicit browser-only `VITE_SLAVEY_E2E=true` mock Tauri data at the typed command boundary.
 - Browser smoke/E2E is for blank screens, broken tab/lazy-loading paths, employee activity rendering, diagnostics actions, and app-shell regressions, not backend behavior validation.
+- Production bundles must not include E2E fixture data; keep E2E mock imports guarded and centralized around `src/lib/tauriCommands.ts` and `src/lib/e2eTauriMock.ts`.
 - Future animated employee UI should add state-driven browser smoke coverage here, using backend-shaped `EmployeeActivity` mock data rather than animation timing or pixel-perfect assertions.

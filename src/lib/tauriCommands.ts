@@ -1,9 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import {
-  e2eTauriMockEnabled,
-  invokeE2eTauriCommand,
-} from "./e2eTauriMock";
 import type {
   Action,
   ActionKind,
@@ -35,10 +31,11 @@ import type {
 
 type InvokeArgs = Record<string, unknown>;
 
-export { e2eTauriMockEnabled };
+export const e2eTauriMockEnabled = import.meta.env.VITE_SLAVEY_E2E === "true";
 
-function invokeCommand<T>(command: string, args?: InvokeArgs): Promise<T> {
+async function invokeCommand<T>(command: string, args?: InvokeArgs): Promise<T> {
   if (e2eTauriMockEnabled) {
+    const { invokeE2eTauriCommand } = await import("./e2eTauriMock");
     return invokeE2eTauriCommand<T>(command, args);
   }
   if (args === undefined) {
