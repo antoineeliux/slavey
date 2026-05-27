@@ -13,6 +13,9 @@ test.describe("app shell browser smoke", () => {
     await expect(page.getByText("Backend ready")).toBeVisible();
     await expect(page.getByRole("heading", { name: "Mira Frontend" })).toBeVisible();
     await expect(page.getByText("Review needed").first()).toBeVisible();
+    await expect(page.locator(".employee-scene")).toBeVisible();
+    await expect(page.locator(".employee-station.selected").getByText("Mira Frontend")).toBeVisible();
+    await expect(page.locator(".employee-station").first()).toHaveAttribute("data-state", /waiting_approval|review_needed/);
     await expect.poll(() => consoleErrors).toEqual([]);
   });
 
