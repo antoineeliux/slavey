@@ -1,11 +1,17 @@
+import { lazy, Suspense } from "react";
 import { FileCode2, Settings2, TerminalSquare } from "lucide-react";
 
 import { useAppStore } from "../store/appStore";
-import { EditorPane } from "./EditorPane";
 import { EmployeeDetailsPanel } from "./EmployeeDetailsPanel";
 import { EventLogPanel } from "./EventLogPanel";
-import { TerminalPane } from "./TerminalPane";
 import { WorkspaceSettingsPanel } from "./WorkspaceSettingsPanel";
+
+const TerminalPane = lazy(() =>
+  import("./TerminalPane").then((module) => ({ default: module.TerminalPane })),
+);
+const EditorPane = lazy(() =>
+  import("./EditorPane").then((module) => ({ default: module.EditorPane })),
+);
 
 export function AppShell() {
   const activeTab = useAppStore((state) => state.activeTab);
@@ -39,9 +45,13 @@ export function AppShell() {
         </div>
         <section className="workspace-panel">
           {activeTab === "terminal" ? (
-            <TerminalPane />
+            <Suspense fallback={<WorkspacePanelFallback />}>
+              <TerminalPane />
+            </Suspense>
           ) : activeTab === "editor" ? (
-            <EditorPane />
+            <Suspense fallback={<WorkspacePanelFallback />}>
+              <EditorPane />
+            </Suspense>
           ) : (
             <WorkspaceSettingsPanel />
           )}
@@ -53,6 +63,14 @@ export function AppShell() {
       </aside>
 
       <EventLogPanel />
+    </div>
+  );
+}
+
+function WorkspacePanelFallback() {
+  return (
+    <div className="panel-loading" role="status" aria-live="polite">
+      Loading...
     </div>
   );
 }

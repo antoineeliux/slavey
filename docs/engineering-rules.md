@@ -51,6 +51,9 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Split large frontend panels before adding new behavior, and avoid mixing visual redesign with infrastructure refactors.
 - Store growth should move into domain slices before adding new workflows; preserve the public `useAppStore` API unless a dedicated migration is planned.
 - CSS should be split by UI domain before adding new visual systems or animated surfaces.
+- Heavy editor, terminal, and future game UI dependencies should be lazy-loaded behind component boundaries.
+- Do not add large visual/runtime dependencies to the initial shell bundle without review.
+- Bundle chunk warnings should be fixed by splitting lazy paths or vendor chunks, not hidden by only raising warning limits.
 - Future animated employee UI must stay a presentation layer over backend activity/status state.
 - Future animated/game UI should live behind component boundaries and consume backend activity state.
 - Terminal metadata may be persisted, but raw terminal output must not be persisted unless explicitly bounded and sanitized.
