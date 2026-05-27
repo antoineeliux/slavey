@@ -78,8 +78,8 @@ export function ReviewPanel({
   const canUnstage = !unstageDisabledReason;
   const canDiscard = !discardDisabledReason;
   const canDeleteUntracked = !deleteDisabledReason;
-  const commitDisabledReason = review?.disabledReasons.commit ?? null;
-  const canCommit = !commitDisabledReason && commitMessage.trim().length > 0;
+  const commitDisabledReason = commitControlDisabledReason(review, commitMessage);
+  const canCommit = !commitDisabledReason;
   const reviewHandoff = review?.handoff ?? handoff;
   const latestCommit = (review?.recentCommits ?? commits)[0] ?? null;
   const commitsToApply = reviewHandoff?.commitsToApply ?? [];
@@ -87,6 +87,11 @@ export function ReviewPanel({
     review?.disabledReasons.handoffApply ?? handoffApplyDisabledReason(repoHealth, reviewHandoff);
   const canApplyHandoff = reviewHandoff?.canApply === true && !handoffDisabledReason;
   const canAbortHandoff = reviewHandoff?.mainOperation.canAbort === true;
+  const handoffStateLabel = !reviewHandoff
+    ? "Preflight pending"
+    : canApplyHandoff
+      ? "Ready to apply"
+      : "Blocked";
   const groupedFiles = reviewFileGroups(review, changedFiles);
   const hasReviewConflicts = Boolean(
     review?.conflictedFiles.length || reviewHandoff?.mainConflictedFiles.length,
@@ -148,7 +153,7 @@ export function ReviewPanel({
         <span>State</span>
         <strong>{review ? (review.clean ? "clean" : "dirty") : "unknown"}</strong>
         <span>Operation</span>
-        <strong>{review?.operation.message ?? "ready"}</strong>
+        <strong>{review?.operation.message ?? "unknown"}</strong>
         <span>Push</span>
         <strong>{review?.disabledReasons.push ?? "read-only"}</strong>
       </div>
@@ -288,8 +293,16 @@ export function ReviewPanel({
           <GitBranch size={15} />
           Handoff
         </div>
-        <div className={canApplyHandoff ? "handoff-state ready" : "handoff-state blocked"}>
-          {canApplyHandoff ? "Ready to apply" : "Blocked"}
+        <div
+          className={
+            !reviewHandoff
+              ? "handoff-state pending"
+              : canApplyHandoff
+                ? "handoff-state ready"
+                : "handoff-state blocked"
+          }
+        >
+          {handoffStateLabel}
         </div>
         <div className="policy-grid">
           <span>Branch</span>
@@ -311,7 +324,7 @@ export function ReviewPanel({
           <span>Main clean</span>
           <strong>{reviewHandoff ? (reviewHandoff.mainClean ? "clean" : "dirty") : "unknown"}</strong>
           <span>State</span>
-          <strong>{reviewHandoff?.mainOperation.message ?? "ready"}</strong>
+          <strong>{reviewHandoff?.mainOperation.message ?? "unknown"}</strong>
           <span>Latest</span>
           <strong title={latestCommit?.message ?? ""}>
             {latestCommit ? `${latestCommit.shortHash} ${latestCommit.message}` : "none"}
@@ -464,6 +477,22 @@ function reviewFileActionDisabledReason(
   }
   if (action === "delete" && !file.untracked) {
     return "Select an untracked file";
+  }
+  return null;
+}
+
+function commitControlDisabledReason(
+  review: WorktreeReview | undefined,
+  commitMessage: string,
+): string | null {
+  if (!review) {
+    return "Review is not loaded";
+  }
+  if (review.disabledReasons.commit) {
+    return review.disabledReasons.commit;
+  }
+  if (commitMessage.trim().length === 0) {
+    return "Enter a commit message";
   }
   return null;
 }

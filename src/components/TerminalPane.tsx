@@ -22,7 +22,6 @@ export function TerminalPane() {
   const startCodexTerminal = useAppStore((state) => state.startCodexTerminal);
   const stopTerminalSession = useAppStore((state) => state.stopTerminalSession);
   const renameTerminalSession = useAppStore((state) => state.renameTerminalSession);
-  const settings = useAppStore((state) => state.settings);
   const codexCliStatus = useAppStore((state) => state.codexCliStatus);
   const terminalSessions = useAppStore((state) => state.terminalSessions);
   const sessionId = selectedEmployee?.terminalSessionId ?? null;
@@ -147,11 +146,16 @@ export function TerminalPane() {
     void resizeTerminal(selectedEmployee.id, sessionId, terminal.cols, terminal.rows);
   }, [resizeTerminal, selectedEmployee?.id, sessionId]);
 
-  const defaultProfile = settings.defaultTerminalProfile;
-  const defaultTerminalDisabledReason = terminalStartDisabledReason(
+  const shellDisabledReason = terminalStartDisabledReason(
     selectedEmployee,
     sessionId,
-    defaultProfile,
+    "shell",
+    codexCliStatus,
+  );
+  const codexDisabledReason = terminalStartDisabledReason(
+    selectedEmployee,
+    sessionId,
+    "codex",
     codexCliStatus,
   );
 
@@ -166,21 +170,29 @@ export function TerminalPane() {
         <div className="toolbar-actions">
           <button
             className="command-button compact"
-            disabled={Boolean(defaultTerminalDisabledReason)}
-            title={defaultTerminalDisabledReason ?? `Start ${defaultProfile}`}
+            disabled={Boolean(shellDisabledReason)}
+            title={shellDisabledReason ?? "Start shell"}
             onClick={() => {
-              if (!selectedEmployee) {
-                return;
-              }
-              if (defaultProfile === "codex") {
-                void startCodexTerminal(selectedEmployee.id);
-              } else {
+              if (selectedEmployee) {
                 void startTerminal(selectedEmployee.id);
               }
             }}
           >
             <Play size={14} />
-            Start {defaultProfile}
+            Start shell
+          </button>
+          <button
+            className="command-button compact"
+            disabled={Boolean(codexDisabledReason)}
+            title={codexDisabledReason ?? "Start Codex"}
+            onClick={() => {
+              if (selectedEmployee) {
+                void startCodexTerminal(selectedEmployee.id);
+              }
+            }}
+          >
+            <Play size={14} />
+            Start Codex
           </button>
           <button
             className="command-button compact"
@@ -207,8 +219,13 @@ export function TerminalPane() {
       ) : (
         <div className="terminal-empty-banner">No active terminal session.</div>
       )}
-      {defaultTerminalDisabledReason ? (
-        <div className="terminal-disabled-reason">{defaultTerminalDisabledReason}</div>
+      {shellDisabledReason || codexDisabledReason ? (
+        <div className="terminal-disabled-reasons">
+          {shellDisabledReason ? <span>Shell: {shellDisabledReason}</span> : null}
+          {codexDisabledReason && codexDisabledReason !== shellDisabledReason ? (
+            <span>Codex: {codexDisabledReason}</span>
+          ) : null}
+        </div>
       ) : null}
       <div className="terminal-host" ref={hostRef} />
       <TerminalSessionPanel

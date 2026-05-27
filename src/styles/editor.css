@@ -229,6 +229,16 @@
   margin: 8px 10px 0;
 }
 
+.editor-save-guidance {
+  min-height: 30px;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-panel-subtle);
+  padding: 8px 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .editor-empty-state {
   display: flex;
   min-height: 42px;

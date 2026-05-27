@@ -45,6 +45,11 @@
   color: var(--success);
 }
 
+.handoff-state.pending {
+  border-color: var(--border-strong);
+  color: var(--text-muted);
+}
+
 .handoff-state.blocked {
   border-color: var(--warning);
   color: var(--warning);

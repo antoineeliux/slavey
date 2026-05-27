@@ -49,6 +49,7 @@ export function EditorPane() {
 
   const parentPath = currentDir ? parentDir(currentDir) : null;
   const openError = openFile?.saveError ?? editorError;
+  const saveConflict = Boolean(openFile?.saveError?.toLowerCase().includes("changed on disk"));
   const searchRoot = selectedEmployee?.cwd ?? workspaceRoot;
   const searchDisabledReason = searchDisabledReasonFor(searchRoot, searchQuery);
 
@@ -273,6 +274,13 @@ export function EditorPane() {
           </div>
         ) : null}
         {openError ? <div className="inline-warning editor-warning">{openError}</div> : null}
+        {saveConflict ? (
+          <div className="editor-save-guidance">
+            Save conflict detected. Review the file on disk before overwriting this editor buffer.
+          </div>
+        ) : openFile?.dirty ? (
+          <div className="editor-save-guidance">Unsaved changes are only in this editor buffer.</div>
+        ) : null}
         {!openFile ? (
           <div className="editor-empty-state">
             Select a file from the tree or recent files to start editing.

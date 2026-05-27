@@ -35,7 +35,7 @@
 
 .terminal-session-bar.pending,
 .terminal-empty-banner,
-.terminal-disabled-reason {
+.terminal-disabled-reasons {
   min-height: 30px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-panel-subtle);
@@ -44,11 +44,17 @@
   font-size: 12px;
 }
 
+.terminal-disabled-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
 .terminal-session-bar.pending {
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
-.terminal-disabled-reason {
+.terminal-disabled-reasons {
   color: var(--warning);
 }
 
