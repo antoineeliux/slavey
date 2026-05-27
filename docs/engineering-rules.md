@@ -35,6 +35,9 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 
 - The frontend must not trust raw filesystem paths without backend validation.
 - Render backend-provided blockers and disabled reasons instead of guessing.
+- Editor state must treat backend filesystem validation and metadata as canonical.
+- Destructive file operations require visible errors and confirmation where configured.
+- Unsaved editor changes must be guarded before workspace switches, file switches, or editor close.
 - Terminal buffers and process logs must stay bounded.
 - Employee and game UI must use backend employee activity state as the source of truth.
 - Terminal output must not be parsed for status unless a future explicit structured protocol is added.

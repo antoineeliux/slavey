@@ -3,9 +3,10 @@ import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { javascript } from "@codemirror/lang-javascript";
 import { basicSetup } from "codemirror";
-import { ChevronLeft, File, Folder, Save } from "lucide-react";
+import { ChevronLeft, File, Folder, History, Pencil, Save, Trash2, X } from "lucide-react";
 
 import { useAppStore } from "../store/appStore";
+import type { FsEntry } from "../types";
 
 export function EditorPane() {
   const selectedEmployee = useAppStore((state) => state.selectedEmployee());
@@ -13,13 +14,21 @@ export function EditorPane() {
   const fileEntries = useAppStore((state) => state.fileEntries);
   const currentDir = useAppStore((state) => state.currentDir);
   const openFile = useAppStore((state) => state.openFile);
+  const recentFiles = useAppStore((state) => state.recentFiles);
+  const editorError = useAppStore((state) => state.editorError);
+  const fileOperationError = useAppStore((state) => state.fileOperationError);
   const loadDir = useAppStore((state) => state.loadDir);
   const readFile = useAppStore((state) => state.readFile);
   const saveOpenFile = useAppStore((state) => state.saveOpenFile);
+  const closeOpenFile = useAppStore((state) => state.closeOpenFile);
   const updateOpenFileContents = useAppStore((state) => state.updateOpenFileContents);
   const searchFiles = useAppStore((state) => state.searchFiles);
   const createFile = useAppStore((state) => state.createFile);
   const createDir = useAppStore((state) => state.createDir);
+  const renamePath = useAppStore((state) => state.renamePath);
+  const deletePath = useAppStore((state) => state.deletePath);
+  const clearRecentFiles = useAppStore((state) => state.clearRecentFiles);
+  const removeRecentFile = useAppStore((state) => state.removeRecentFile);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchMode, setSearchMode] = useState<"search" | "grep" | "glob">("search");
   const [searchResults, setSearchResults] = useState<
@@ -35,6 +44,7 @@ export function EditorPane() {
   }, [currentDir, loadDir, selectedEmployee?.id, selectedEmployee?.cwd, workspaceRoot]);
 
   const parentPath = currentDir ? parentDir(currentDir) : null;
+  const openError = openFile?.saveError ?? editorError;
 
   return (
     <div className="editor-pane">
@@ -59,18 +69,66 @@ export function EditorPane() {
         >
           {currentDir ?? selectedEmployee?.cwd ?? workspaceRoot ?? "No workspace"}
         </div>
+        <div className="recent-files-panel">
+          <div className="compact-panel-heading">
+            <span>
+              <History size={14} />
+              Recent files
+            </span>
+            <button
+              className="icon-button mini"
+              disabled={recentFiles.length === 0}
+              title="Clear recent files"
+              onClick={() => void clearRecentFiles()}
+            >
+              <X size={13} />
+            </button>
+          </div>
+          <div className="recent-file-list">
+            {recentFiles.length === 0 ? (
+              <div className="empty-line compact">No recent files</div>
+            ) : (
+              recentFiles.map((path) => (
+                <div className="recent-file-row" key={path}>
+                  <button
+                    className="recent-file-main"
+                    title={path}
+                    onClick={() => void readFile(path)}
+                  >
+                    <File size={14} />
+                    <span>{shortPath(path)}</span>
+                  </button>
+                  <button
+                    className="icon-button mini"
+                    title="Remove from recent files"
+                    onClick={() => void removeRecentFile(path)}
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
         <div className="file-list">
           {fileEntries.map((entry) => (
-            <button
-              className={entry.isDir ? "file-row dir" : "file-row"}
+            <FileTreeRow
+              entry={entry}
               key={entry.path}
-              onClick={() => (entry.isDir ? void loadDir(entry.path) : void readFile(entry.path))}
-            >
-              {entry.isDir ? <Folder size={15} /> : <File size={15} />}
-              <span title={entry.path}>{entry.name}</span>
-            </button>
+              onOpen={() => (entry.isDir ? void loadDir(entry.path) : void readFile(entry.path))}
+              onRename={() => {
+                const nextPath = prompt("Rename path", entry.path);
+                if (nextPath?.trim() && nextPath.trim() !== entry.path) {
+                  void renamePath(entry.path, nextPath.trim());
+                }
+              }}
+              onDelete={() => void deletePath(entry.path)}
+            />
           ))}
         </div>
+        {fileOperationError ? (
+          <div className="inline-warning file-error">{fileOperationError}</div>
+        ) : null}
         <div className="file-actions">
           <button
             className="command-button compact"
@@ -143,21 +201,74 @@ export function EditorPane() {
             {openFile ? shortPath(openFile.path) : "No file open"}
             {openFile?.dirty ? <span className="dirty-dot" /> : null}
           </div>
-          <button
-            className="command-button compact"
-            disabled={!openFile || !openFile.dirty}
-            onClick={() => void saveOpenFile()}
-          >
-            <Save size={14} />
-            Save
-          </button>
+          <div className="toolbar-actions">
+            <button
+              className="command-button compact"
+              disabled={!openFile || !openFile.dirty}
+              onClick={() => void saveOpenFile()}
+            >
+              <Save size={14} />
+              Save
+            </button>
+            <button
+              className="icon-button"
+              disabled={!openFile}
+              title="Close file"
+              onClick={() => closeOpenFile()}
+            >
+              <X size={14} />
+            </button>
+          </div>
         </div>
+        {openFile ? (
+          <div className="editor-meta">
+            <span>{openFile.dirty ? "unsaved" : "saved"}</span>
+            <span>{formatFileSize(openFile.metadata?.size)}</span>
+            <span>{openFile.metadata?.readonly ? "readonly" : "writable"}</span>
+            <span>{formatModified(openFile.metadata?.modified)}</span>
+            <span>{openFile.metadata?.insideWorkspace ? "workspace" : "outside"}</span>
+            {openFile.lastSavedAt ? (
+              <span>saved {new Date(openFile.lastSavedAt).toLocaleTimeString()}</span>
+            ) : null}
+          </div>
+        ) : null}
+        {openError ? <div className="inline-warning editor-warning">{openError}</div> : null}
         <CodeMirrorEditor
           value={openFile?.contents ?? ""}
           disabled={!openFile}
           onChange={updateOpenFileContents}
         />
       </section>
+    </div>
+  );
+}
+
+function FileTreeRow({
+  entry,
+  onOpen,
+  onRename,
+  onDelete,
+}: {
+  entry: FsEntry;
+  onOpen: () => void;
+  onRename: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className={entry.isDir ? "file-row-shell dir" : "file-row-shell"}>
+      <button
+        className={entry.isDir ? "file-row dir" : "file-row"}
+        onClick={onOpen}
+      >
+        {entry.isDir ? <Folder size={15} /> : <File size={15} />}
+        <span title={entry.path}>{entry.name}</span>
+      </button>
+      <button className="icon-button mini file-op-button" title="Rename" onClick={onRename}>
+        <Pencil size={12} />
+      </button>
+      <button className="icon-button mini file-op-button" title="Delete" onClick={onDelete}>
+        <Trash2 size={12} />
+      </button>
     </div>
   );
 }
@@ -272,4 +383,21 @@ function parentDir(path: string): string | null {
     return null;
   }
   return trimmed.slice(0, index);
+}
+
+function formatFileSize(size?: number | null): string {
+  if (typeof size !== "number") {
+    return "size unknown";
+  }
+  if (size < 1024) {
+    return `${size} B`;
+  }
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatModified(modified?: number | null): string {
+  return modified ? new Date(modified).toLocaleString() : "modified unknown";
 }

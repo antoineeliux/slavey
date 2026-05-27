@@ -138,6 +138,18 @@ export type FilePayload = {
   contents: string;
 };
 
+export type FileMetadata = {
+  path: string;
+  size?: number | null;
+  modified?: number | null;
+  readonly: boolean;
+  writable: boolean;
+  isFile: boolean;
+  isDir: boolean;
+  isSymlink: boolean;
+  insideWorkspace: boolean;
+};
+
 export type AppTab = "terminal" | "editor" | "settings";
 
 export type AppSettings = {

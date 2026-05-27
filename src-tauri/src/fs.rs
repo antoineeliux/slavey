@@ -35,6 +35,20 @@ pub struct FilePayload {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FileMetadata {
+    pub path: String,
+    pub size: Option<u64>,
+    pub modified: Option<u64>,
+    pub readonly: bool,
+    pub writable: bool,
+    pub is_file: bool,
+    pub is_dir: bool,
+    pub is_symlink: bool,
+    pub inside_workspace: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FsSearchResult {
     pub path: String,
     pub line_number: Option<u64>,
@@ -119,6 +133,12 @@ pub fn fs_read_file(state: State<'_, AppState>, path: String) -> Result<FilePayl
         path: file.to_string_lossy().to_string(),
         contents,
     })
+}
+
+#[tauri::command]
+pub fn fs_file_metadata(state: State<'_, AppState>, path: String) -> Result<FileMetadata, String> {
+    let workspace_root = state.workspace_root();
+    file_metadata_in_workspace(&workspace_root, &path)
 }
 
 #[tauri::command]
@@ -585,6 +605,33 @@ fn resolve_deletable_path(root: &Path, input: &str) -> Result<PathBuf, String> {
     resolve_existing_path(root, input)
 }
 
+fn file_metadata_in_workspace(root: &Path, input: &str) -> Result<FileMetadata, String> {
+    let candidate = join_workspace_path(root, input);
+    ensure_not_sensitive(&candidate)?;
+    let link_metadata = std_fs::symlink_metadata(&candidate).map_err(|error| error.to_string())?;
+    let is_symlink = link_metadata.file_type().is_symlink();
+    let resolved = candidate
+        .canonicalize()
+        .map_err(|error| error.to_string())?;
+    ensure_inside_workspace(root, &resolved)?;
+    ensure_not_sensitive(&resolved)?;
+
+    let metadata = std_fs::metadata(&candidate).map_err(|error| error.to_string())?;
+    let file_type = metadata.file_type();
+    let readonly = metadata.permissions().readonly();
+    Ok(FileMetadata {
+        path: resolved.to_string_lossy().to_string(),
+        size: file_type.is_file().then_some(metadata.len()),
+        modified: metadata.modified().ok().and_then(system_time_to_ms),
+        readonly,
+        writable: !readonly,
+        is_file: file_type.is_file(),
+        is_dir: file_type.is_dir(),
+        is_symlink,
+        inside_workspace: true,
+    })
+}
+
 fn fs_entry_for_path(path: &Path) -> Result<FsEntry, String> {
     let metadata = std_fs::symlink_metadata(path).map_err(|error| error.to_string())?;
     Ok(FsEntry {
@@ -699,6 +746,51 @@ mod tests {
 
         let resolved = resolve_existing_file(&root, "inside.txt").unwrap();
         assert_eq!(std_fs::read_to_string(resolved).unwrap(), "ok");
+    }
+
+    #[test]
+    fn file_metadata_reports_safe_file_state() {
+        let root = test_root("metadata-file");
+        std_fs::write(root.join("inside.txt"), "hello").unwrap();
+
+        let metadata = file_metadata_in_workspace(&root, "inside.txt").unwrap();
+
+        assert!(metadata.path.ends_with("inside.txt"));
+        assert_eq!(metadata.size, Some(5));
+        assert!(metadata.modified.is_some());
+        assert!(metadata.writable);
+        assert!(!metadata.readonly);
+        assert!(metadata.is_file);
+        assert!(!metadata.is_dir);
+        assert!(!metadata.is_symlink);
+        assert!(metadata.inside_workspace);
+    }
+
+    #[test]
+    fn file_metadata_rejects_workspace_escape() {
+        let root = test_root("metadata-escape");
+        let outside =
+            std::env::temp_dir().join(format!("slavey-outside-{}.txt", uuid::Uuid::new_v4()));
+        std_fs::write(&outside, "no").unwrap();
+
+        let error = file_metadata_in_workspace(&root, outside.to_str().unwrap()).unwrap_err();
+
+        assert!(error.contains("outside the workspace"));
+        let _ = std_fs::remove_file(outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_metadata_reports_symlink_to_safe_target() {
+        let root = test_root("metadata-symlink");
+        std_fs::write(root.join("target.txt"), "ok").unwrap();
+        std::os::unix::fs::symlink(root.join("target.txt"), root.join("link.txt")).unwrap();
+
+        let metadata = file_metadata_in_workspace(&root, "link.txt").unwrap();
+
+        assert!(metadata.is_file);
+        assert!(metadata.is_symlink);
+        assert!(metadata.inside_workspace);
     }
 
     #[test]

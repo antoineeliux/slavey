@@ -19,6 +19,7 @@ import type {
   EmployeeActivityUpdatedPayload,
   EmployeeRole,
   EmployeeUpdatedPayload,
+  FileMetadata,
   FilePayload,
   FsEntry,
   FsSearchResult,
@@ -49,8 +50,13 @@ const DEFAULT_SETTINGS: AppSettings = {
 
 type OpenFile = {
   path: string;
+  savedContents: string;
   contents: string;
   dirty: boolean;
+  lastSavedAt: number | null;
+  saveError: string | null;
+  metadata: FileMetadata | null;
+  openedModified: number | null;
 };
 
 type CreateEmployeeInput = {
@@ -116,6 +122,8 @@ type AppStore = {
   fileEntries: FsEntry[];
   currentDir: string | null;
   openFile: OpenFile | null;
+  editorError: string | null;
+  fileOperationError: string | null;
   backendReady: boolean;
   setActiveTab: (tab: AppTab) => void;
   selectedEmployee: () => Employee | null;
@@ -171,6 +179,8 @@ type AppStore = {
   createDir: (path: string) => Promise<void>;
   renamePath: (from: string, to: string) => Promise<void>;
   deletePath: (path: string) => Promise<void>;
+  clearRecentFiles: () => Promise<void>;
+  removeRecentFile: (path: string) => Promise<void>;
   writeTerminal: (employeeId: string, sessionId: string, input: string) => Promise<void>;
   resizeTerminal: (employeeId: string, sessionId: string, cols: number, rows: number) => Promise<void>;
   appendTerminalData: (payload: TerminalDataPayload) => void;
@@ -182,6 +192,7 @@ type AppStore = {
   readFile: (path: string) => Promise<void>;
   updateOpenFileContents: (contents: string) => void;
   saveOpenFile: () => Promise<void>;
+  closeOpenFile: () => void;
   addLog: (log: AppLog) => void;
   persistUiState: () => Promise<void>;
 };
@@ -220,6 +231,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   fileEntries: [],
   currentDir: null,
   openFile: null,
+  editorError: null,
+  fileOperationError: null,
   backendReady: false,
 
   setActiveTab: (tab) => {
@@ -384,6 +397,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
     const trimmed = path.trim();
     if (!trimmed) {
       get().addLog(localLog("warn", "workspace path is required"));
+      return;
+    }
+    const openFile = get().openFile;
+    if (!confirmDiscardIfNeeded(openFile, get().settings, "switching workspace")) {
+      const message = openFile
+        ? `Workspace switch canceled; ${shortPath(openFile.path)} has unsaved changes.`
+        : "Workspace switch canceled.";
+      set({ workspaceError: message });
       return;
     }
     set({ workspaceLoading: true, workspaceError: null });
@@ -1009,39 +1030,112 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   createFile: async (path, contents = "") => {
+    set({ fileOperationError: null });
     try {
       const file = await invoke<FilePayload>("fs_create_file", { path, contents });
       await get().loadDir(parentDir(file.path));
     } catch (error) {
-      get().addLog(localLog("error", `create file failed: ${formatError(error)}`));
+      const message = formatError(error);
+      set({ fileOperationError: message });
+      get().addLog(localLog("error", `create file failed: ${message}`));
     }
   },
 
   createDir: async (path) => {
+    set({ fileOperationError: null });
     try {
       const entry = await invoke<FsEntry>("fs_create_dir", { path });
       await get().loadDir(parentDir(entry.path));
     } catch (error) {
-      get().addLog(localLog("error", `create directory failed: ${formatError(error)}`));
+      const message = formatError(error);
+      set({ fileOperationError: message });
+      get().addLog(localLog("error", `create directory failed: ${message}`));
     }
   },
 
   renamePath: async (from, to) => {
+    const openFile = get().openFile;
+    const affectsOpenFile = Boolean(openFile && pathIsSameOrChild(openFile.path, from));
+    if (
+      affectsOpenFile &&
+      openFile?.dirty &&
+      get().settings.requireConfirmationDiscard &&
+      !confirm(`Rename ${shortPath(openFile.path)} while it has unsaved changes?`)
+    ) {
+      set({ fileOperationError: `Rename canceled; ${shortPath(openFile.path)} has unsaved changes.` });
+      return;
+    }
+
+    set({ fileOperationError: null });
     try {
       const entry = await invoke<FsEntry>("fs_rename", { from, to });
       await get().loadDir(parentDir(entry.path));
+      const nextOpenPath = openFile ? movedPathAfterRename(openFile.path, from, entry.path) : null;
+      if (nextOpenPath) {
+        const metadata = await fetchFileMetadata(nextOpenPath).catch(() => null);
+        set((state) => ({
+          openFile:
+            state.openFile && state.openFile.path === openFile?.path
+              ? {
+                  ...state.openFile,
+                  path: nextOpenPath,
+                  metadata,
+                  openedModified: metadata?.modified ?? state.openFile.openedModified,
+                }
+              : state.openFile,
+          recentFiles: state.recentFiles.map((item) =>
+            movedPathAfterRename(item, from, entry.path) ?? item,
+          ),
+        }));
+        void get().persistUiState();
+      }
     } catch (error) {
-      get().addLog(localLog("error", `rename failed: ${formatError(error)}`));
+      const message = formatError(error);
+      set({ fileOperationError: message });
+      get().addLog(localLog("error", `rename failed: ${message}`));
     }
   },
 
   deletePath: async (path) => {
+    const openFile = get().openFile;
+    const affectsOpenFile = Boolean(openFile && pathIsSameOrChild(openFile.path, path));
+    if (get().settings.requireConfirmationDelete && !confirm(`Delete ${shortPath(path)}?`)) {
+      return;
+    }
+    if (
+      affectsOpenFile &&
+      !confirmDiscardIfNeeded(openFile, get().settings, "deleting it")
+    ) {
+      set({ fileOperationError: `Delete canceled; ${shortPath(path)} has unsaved changes.` });
+      return;
+    }
+
+    set({ fileOperationError: null });
     try {
       await invoke("fs_delete", { path });
       await get().loadDir(parentDir(path));
+      set((state) => ({
+        openFile: affectsOpenFile ? null : state.openFile,
+        recentFiles: state.recentFiles.filter((item) => !pathIsSameOrChild(item, path)),
+      }));
+      void get().persistUiState();
     } catch (error) {
-      get().addLog(localLog("error", `delete failed: ${formatError(error)}`));
+      const message = formatError(error);
+      set({ fileOperationError: message });
+      get().addLog(localLog("error", `delete failed: ${message}`));
     }
+  },
+
+  clearRecentFiles: async () => {
+    set({ recentFiles: [] });
+    await get().persistUiState();
+  },
+
+  removeRecentFile: async (path) => {
+    set((state) => ({
+      recentFiles: state.recentFiles.filter((item) => item !== path),
+    }));
+    await get().persistUiState();
   },
 
   writeTerminal: async (employeeId, sessionId, input) => {
@@ -1140,31 +1234,58 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       const targetPath = path ?? get().selectedEmployee()?.cwd ?? get().workspaceRoot;
       const fileEntries = await invoke<FsEntry[]>("fs_list_dir", { path: targetPath });
-      set({ fileEntries, currentDir: targetPath ?? null });
+      set({ fileEntries, currentDir: targetPath ?? null, fileOperationError: null });
     } catch (error) {
-      get().addLog(localLog("error", `list directory failed: ${formatError(error)}`));
+      const message = formatError(error);
+      set({ fileOperationError: message });
+      get().addLog(localLog("error", `list directory failed: ${message}`));
     }
   },
 
   readFile: async (path) => {
+    const openFile = get().openFile;
+    if (!confirmDiscardIfNeeded(openFile, get().settings, "opening another file")) {
+      if (openFile) {
+        set({ editorError: `Open canceled; ${shortPath(openFile.path)} has unsaved changes.` });
+      }
+      return;
+    }
+
+    set({ editorError: null });
     try {
       const file = await invoke<FilePayload>("fs_read_file", { path });
+      const metadata = await fetchFileMetadata(file.path);
       const recentFiles = [file.path, ...get().recentFiles.filter((item) => item !== file.path)].slice(
         0,
         12,
       );
-      set({ openFile: { path: file.path, contents: file.contents, dirty: false }, recentFiles });
+      set({ openFile: openFileFromPayload(file, metadata), recentFiles, editorError: null });
       void get().persistUiState();
     } catch (error) {
-      get().addLog(localLog("error", `read file failed: ${formatError(error)}`));
+      const message = formatError(error);
+      const nextState: Partial<AppStore> = { editorError: message };
+      if (isMissingPathError(message)) {
+        nextState.recentFiles = get().recentFiles.filter((item) => item !== path);
+      }
+      set(nextState);
+      if (nextState.recentFiles) {
+        void get().persistUiState();
+      }
+      get().addLog(localLog("error", `read file failed: ${message}`));
     }
   },
 
   updateOpenFileContents: (contents) => {
     set((state) => ({
       openFile: state.openFile
-        ? { ...state.openFile, contents, dirty: contents !== state.openFile.contents || state.openFile.dirty }
+        ? {
+            ...state.openFile,
+            contents,
+            dirty: contents !== state.openFile.savedContents,
+            saveError: null,
+          }
         : null,
+      editorError: null,
     }));
   },
 
@@ -1173,16 +1294,64 @@ export const useAppStore = create<AppStore>((set, get) => ({
     if (!openFile) {
       return;
     }
+    set((state) => ({
+      openFile: state.openFile
+        ? { ...state.openFile, saveError: null }
+        : state.openFile,
+      editorError: null,
+    }));
     try {
+      const diskMetadata = await fetchFileMetadata(openFile.path);
+      if (hasFileChangedOnDisk(openFile, diskMetadata)) {
+        const confirmed = confirm(
+          `${shortPath(openFile.path)} changed on disk since it was opened. Overwrite it?`,
+        );
+        if (!confirmed) {
+          const message = "Save canceled because the file changed on disk.";
+          setOpenFileSaveError(set, openFile.path, message);
+          return;
+        }
+      }
+
       await invoke("fs_write_file", {
         path: openFile.path,
         contents: openFile.contents,
       });
-      set({ openFile: { ...openFile, dirty: false } });
+      const metadata = await fetchFileMetadata(openFile.path);
+      const savedAt = Date.now();
+      set((state) => {
+        if (!state.openFile || state.openFile.path !== openFile.path) {
+          return {};
+        }
+        return {
+          openFile: {
+            ...state.openFile,
+            savedContents: openFile.contents,
+            dirty: state.openFile.contents !== openFile.contents,
+            lastSavedAt: savedAt,
+            saveError: null,
+            metadata,
+            openedModified: metadata.modified ?? null,
+          },
+        };
+      });
       get().addLog(localLog("info", `saved ${shortPath(openFile.path)}`));
     } catch (error) {
-      get().addLog(localLog("error", `save file failed: ${formatError(error)}`));
+      const message = formatError(error);
+      setOpenFileSaveError(set, openFile.path, message);
+      get().addLog(localLog("error", `save file failed: ${message}`));
     }
+  },
+
+  closeOpenFile: () => {
+    const openFile = get().openFile;
+    if (!confirmDiscardIfNeeded(openFile, get().settings, "closing it")) {
+      if (openFile) {
+        set({ editorError: `Close canceled; ${shortPath(openFile.path)} has unsaved changes.` });
+      }
+      return;
+    }
+    set({ openFile: null, editorError: null });
   },
 
   addLog: (log) =>
@@ -1235,6 +1404,82 @@ function parentDir(path: string): string | null {
   return trimmed.slice(0, index);
 }
 
+function openFileFromPayload(file: FilePayload, metadata: FileMetadata): OpenFile {
+  return {
+    path: file.path,
+    savedContents: file.contents,
+    contents: file.contents,
+    dirty: false,
+    lastSavedAt: null,
+    saveError: null,
+    metadata,
+    openedModified: metadata.modified ?? null,
+  };
+}
+
+async function fetchFileMetadata(path: string): Promise<FileMetadata> {
+  return invoke<FileMetadata>("fs_file_metadata", { path });
+}
+
+function hasFileChangedOnDisk(openFile: OpenFile, metadata: FileMetadata): boolean {
+  const openedModified = openFile.openedModified;
+  const diskModified = metadata.modified ?? null;
+  return openedModified !== null && diskModified !== null && openedModified !== diskModified;
+}
+
+function confirmDiscardIfNeeded(
+  openFile: OpenFile | null,
+  settings: AppSettings,
+  action: string,
+): boolean {
+  if (!openFile?.dirty || !settings.requireConfirmationDiscard) {
+    return true;
+  }
+  return confirm(`Discard unsaved changes in ${shortPath(openFile.path)} before ${action}?`);
+}
+
+function setOpenFileSaveError(
+  setState: (
+    partial:
+      | Partial<AppStore>
+      | ((state: AppStore) => Partial<AppStore>),
+  ) => void,
+  path: string,
+  message: string,
+): void {
+  setState((state) => ({
+    openFile:
+      state.openFile && state.openFile.path === path
+        ? { ...state.openFile, saveError: message }
+        : state.openFile,
+    editorError: message,
+  }));
+}
+
+function pathIsSameOrChild(path: string, parent: string): boolean {
+  const normalizedPath = normalizePathForCompare(path);
+  const normalizedParent = normalizePathForCompare(parent);
+  return normalizedPath === normalizedParent || normalizedPath.startsWith(`${normalizedParent}/`);
+}
+
+function movedPathAfterRename(path: string, from: string, to: string): string | null {
+  if (!pathIsSameOrChild(path, from)) {
+    return null;
+  }
+  const normalizedPath = normalizePathForCompare(path);
+  const normalizedFrom = normalizePathForCompare(from);
+  const normalizedTo = normalizePathForCompare(to);
+  return `${normalizedTo}${normalizedPath.slice(normalizedFrom.length)}`;
+}
+
+function normalizePathForCompare(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+function isMissingPathError(message: string): boolean {
+  return /no such file|not found|cannot find/i.test(message);
+}
+
 function reviewFileKey(employeeId: string, path: string): string {
   return `${employeeId}:${path}`;
 }
@@ -1278,6 +1523,8 @@ function resetWorkspaceFrontendState(
     fileEntries: [],
     currentDir: workspaceInfo.workspaceRoot,
     openFile: null,
+    editorError: null,
+    fileOperationError: null,
   });
 }
 

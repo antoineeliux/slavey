@@ -470,6 +470,13 @@ select:focus {
   white-space: nowrap;
 }
 
+.toolbar-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
 .command-button {
   min-height: 32px;
   padding: 0 11px;
@@ -524,6 +531,69 @@ select:focus {
   border-bottom: 1px solid #242832;
   color: #8e96a6;
   font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-files-panel {
+  display: grid;
+  gap: 6px;
+  padding: 6px;
+  border-bottom: 1px solid #242832;
+}
+
+.compact-panel-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #8e96a6;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.compact-panel-heading span,
+.recent-file-main {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.recent-file-list {
+  display: grid;
+  max-height: 110px;
+  overflow: auto;
+  gap: 4px;
+}
+
+.recent-file-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 24px;
+  gap: 4px;
+  align-items: center;
+  min-width: 0;
+}
+
+.recent-file-main {
+  min-height: 26px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #cfd5df;
+  cursor: pointer;
+  padding: 0 5px;
+  text-align: left;
+}
+
+.recent-file-main:hover {
+  background: #20252e;
+}
+
+.recent-file-main span {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -587,6 +657,18 @@ select:focus {
   font-size: 11px;
 }
 
+.file-row-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 24px 24px;
+  gap: 4px;
+  align-items: center;
+  min-width: 0;
+}
+
+.file-row-shell + .file-row-shell {
+  margin-top: 2px;
+}
+
 .file-row {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);
@@ -616,8 +698,44 @@ select:focus {
   white-space: nowrap;
 }
 
+.file-op-button {
+  opacity: 0.65;
+}
+
+.file-row-shell:hover .file-op-button {
+  opacity: 1;
+}
+
+.file-error {
+  margin: 0 6px 6px;
+}
+
 .code-surface {
   flex: 1;
+}
+
+.editor-meta {
+  display: flex;
+  min-height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  overflow: hidden;
+  border-bottom: 1px solid #242832;
+  background: #111318;
+  padding: 0 10px;
+  color: #8e96a6;
+  font-size: 11px;
+}
+
+.editor-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-warning {
+  margin: 8px 10px 0;
 }
 
 .codemirror-host {

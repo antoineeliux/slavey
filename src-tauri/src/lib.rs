@@ -207,6 +207,7 @@ pub fn run() {
             fs::fs_grep,
             fs::fs_glob,
             fs::fs_read_file,
+            fs::fs_file_metadata,
             fs::fs_write_file,
             fs::fs_create_file,
             fs::fs_create_dir,
