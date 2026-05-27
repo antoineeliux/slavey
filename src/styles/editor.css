@@ -1,0 +1,248 @@
+.editor-pane {
+  height: 100%;
+}
+
+.file-tree {
+  display: flex;
+  width: 268px;
+  min-width: 220px;
+  min-height: 0;
+  flex-direction: column;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--bg-panel-subtle);
+}
+
+.current-dir {
+  overflow: hidden;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-files-panel {
+  display: grid;
+  gap: 6px;
+  padding: 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.compact-panel-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.compact-panel-heading span,
+.recent-file-main {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.recent-file-list {
+  display: grid;
+  max-height: 110px;
+  overflow: auto;
+  gap: 4px;
+}
+
+.recent-file-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 24px;
+  gap: 4px;
+  align-items: center;
+  min-width: 0;
+}
+
+.recent-file-main {
+  min-height: 26px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0 5px;
+  text-align: left;
+}
+
+.recent-file-main:hover {
+  background: var(--bg-surface-hover);
+}
+
+.recent-file-main span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-list {
+  min-height: 0;
+  overflow: auto;
+  padding: 6px;
+}
+
+.file-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.search-panel {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) 42px;
+  gap: 6px;
+  padding: 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.search-results {
+  grid-column: 1 / -1;
+  display: grid;
+  max-height: 180px;
+  overflow: auto;
+  gap: 4px;
+}
+
+.search-result {
+  display: grid;
+  min-width: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 5px;
+  text-align: left;
+}
+
+.search-result:hover {
+  background: var(--bg-surface-hover);
+}
+
+.search-result span,
+.search-result code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-result code {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.file-row-shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 24px 24px;
+  gap: 4px;
+  align-items: center;
+  min-width: 0;
+}
+
+.file-row-shell + .file-row-shell {
+  margin-top: 2px;
+}
+
+.file-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 7px;
+  align-items: center;
+  width: 100%;
+  min-height: 30px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.file-row:hover {
+  background: var(--bg-surface-hover);
+}
+
+.file-row.dir {
+  color: var(--folder-text);
+}
+
+.file-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-op-button {
+  opacity: 0.65;
+}
+
+.file-row-shell:hover .file-op-button {
+  opacity: 1;
+}
+
+.file-error {
+  margin: 0 6px 6px;
+}
+
+.code-surface {
+  flex: 1;
+}
+
+.editor-meta {
+  display: flex;
+  min-height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-panel-subtle);
+  padding: 0 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.editor-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-warning {
+  margin: 8px 10px 0;
+}
+
+.codemirror-host {
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.codemirror-host.disabled {
+  opacity: 0.72;
+}
+
+.codemirror-host .cm-editor {
+  height: 100%;
+}
+
+.dirty-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--warning);
+}

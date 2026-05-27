@@ -1,2 +1,9 @@
-@import "./styles/panels.css";
+@import "./styles/base.css";
 @import "./styles/layout.css";
+@import "./styles/employees.css";
+@import "./styles/terminal.css";
+@import "./styles/editor.css";
+@import "./styles/settings.css";
+@import "./styles/panels.css";
+@import "./styles/actions.css";
+@import "./styles/review.css";

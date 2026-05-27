@@ -1,0 +1,122 @@
+.settings-pane {
+  overflow: auto;
+  background: var(--bg-panel-subtle);
+}
+
+.workspace-settings-panel {
+  display: grid;
+  min-width: 0;
+  gap: 0;
+}
+
+.settings-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.settings-content {
+  display: grid;
+  max-width: 980px;
+  gap: 14px;
+  padding: 14px;
+}
+
+.workspace-open-row {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) auto;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settings-grid,
+.settings-form {
+  display: grid;
+  min-width: 0;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  padding: 10px;
+}
+
+.settings-grid {
+  grid-template-columns: minmax(0, 140px) minmax(0, 1fr);
+  gap: 8px 12px;
+  font-size: 12px;
+}
+
+.settings-grid span,
+.settings-form label > span {
+  color: var(--text-subtle);
+}
+
+.settings-grid strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-section {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.recent-workspace-list {
+  display: grid;
+  gap: 6px;
+}
+
+.recent-workspace {
+  display: grid;
+  min-width: 0;
+  min-height: 32px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+  padding: 0 9px;
+  text-align: left;
+}
+
+.recent-workspace:hover {
+  border-color: transparent;
+  background: var(--bg-surface-hover);
+}
+
+.recent-workspace:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.recent-workspace span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-form {
+  gap: 10px;
+}
+
+.settings-form label {
+  display: grid;
+  grid-template-columns: minmax(0, 180px) minmax(0, 240px);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.settings-form .checkbox-row {
+  grid-template-columns: 18px minmax(0, 1fr);
+}
+
+.settings-form input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}

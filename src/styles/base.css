@@ -1,0 +1,201 @@
+:root {
+  color-scheme: dark;
+  --font-ui:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+
+  --color-app: #20282b;
+  --color-panel: #253034;
+  --color-panel-subtle: #222b2e;
+  --color-surface: #2a3438;
+  --color-surface-hover: #303b3f;
+  --color-surface-active: #354139;
+  --color-border: #3a4548;
+  --color-border-subtle: #30393d;
+  --color-border-strong: #465256;
+  --color-text: #d3c6aa;
+  --color-text-strong: #e4dcc6;
+  --color-text-secondary: #b8b09c;
+  --color-text-muted: #8f988e;
+  --color-text-subtle: #737d75;
+  --color-accent: #a7c080;
+  --color-accent-surface: #354139;
+  --color-warning: #c8a96a;
+  --color-warning-surface: #403b30;
+  --color-danger: #d98284;
+  --color-danger-surface: #443034;
+
+  --bg-app: var(--color-app);
+  --bg-canvas: var(--color-panel);
+  --bg-panel: var(--color-panel);
+  --bg-panel-subtle: var(--color-panel-subtle);
+  --bg-toolbar: var(--color-panel);
+  --bg-surface: var(--color-surface);
+  --bg-surface-hover: var(--color-surface-hover);
+  --bg-surface-selected: var(--color-surface-active);
+  --bg-control: transparent;
+  --bg-control-hover: var(--color-surface-hover);
+  --bg-input: var(--color-panel-subtle);
+  --border-subtle: var(--color-border-subtle);
+  --border-default: var(--color-border);
+  --border-strong: var(--color-border-strong);
+  --border-hover: var(--color-border-strong);
+  --text-primary: var(--color-text);
+  --text-strong: var(--color-text-strong);
+  --text-secondary: var(--color-text-secondary);
+  --text-muted: var(--color-text-muted);
+  --text-subtle: var(--color-text-subtle);
+  --accent: var(--color-accent);
+  --accent-surface: var(--color-accent-surface);
+  --success: var(--color-accent);
+  --success-surface: var(--color-accent-surface);
+  --warning: var(--color-warning);
+  --warning-surface: var(--color-warning-surface);
+  --danger: var(--color-danger);
+  --danger-surface: var(--color-danger-surface);
+  --danger-text: #e7a4a5;
+  --code-text: var(--text-secondary);
+  --folder-text: var(--text-secondary);
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-pill: 999px;
+  --control-height-sm: 24px;
+  --control-height-md: 32px;
+
+  font-family: var(--font-ui);
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  color: inherit;
+  outline: none;
+}
+
+button:focus,
+button:focus-visible {
+  outline: none;
+}
+h1,
+h2,
+p {
+  margin: 0;
+}
+input,
+select {
+  min-width: 0;
+  height: var(--control-height-md);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  outline: none;
+}
+
+input {
+  padding: 0 9px;
+}
+
+select {
+  padding: 0 7px;
+}
+
+input:focus,
+select:focus {
+  border-color: var(--accent);
+}
+
+.icon-button,
+.command-button,
+.tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--bg-control);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.icon-button {
+  width: var(--control-height-md);
+  height: var(--control-height-md);
+  padding: 0;
+}
+
+.icon-button.mini {
+  width: var(--control-height-sm);
+  height: var(--control-height-sm);
+  flex: 0 0 auto;
+}
+
+.icon-button:hover,
+.command-button:hover,
+.tab:hover {
+  border-color: transparent;
+  background: var(--bg-control-hover);
+}
+
+.icon-button:disabled,
+.command-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.icon-button.create {
+  color: var(--success);
+}
+.command-button {
+  min-height: var(--control-height-md);
+  padding: 0 11px;
+  font-size: 13px;
+}
+
+.command-button.primary {
+  border-color: transparent;
+  background: var(--success-surface);
+  color: var(--success);
+}
+
+.command-button.danger {
+  border-color: transparent;
+  background: var(--danger-surface);
+  color: var(--danger-text);
+}
+
+.command-button.compact {
+  min-height: 30px;
+  white-space: nowrap;
+}

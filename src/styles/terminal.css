@@ -1,0 +1,118 @@
+.terminal-host {
+  min-height: 0;
+  flex: 1;
+  padding: 8px;
+  background: var(--bg-app);
+}
+
+.terminal-host .xterm {
+  height: 100%;
+}
+
+.terminal-session-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(70px, 0.4fr) minmax(0, 1.5fr) auto auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 32px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-panel-subtle);
+  padding: 0 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.terminal-session-bar strong,
+.terminal-session-bar span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-session-bar strong {
+  color: var(--text-primary);
+}
+
+.terminal-session-panel {
+  display: grid;
+  max-height: 190px;
+  min-height: 0;
+  gap: 6px;
+  overflow: auto;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-panel-subtle);
+  padding: 8px;
+}
+
+.terminal-session-list {
+  display: grid;
+  gap: 6px;
+}
+
+.terminal-session-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 8px;
+  min-width: 0;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  padding: 8px;
+}
+
+.terminal-session-item.active,
+.session-item.active {
+  border-color: transparent;
+  background: var(--bg-surface-selected);
+}
+
+.terminal-session-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.terminal-session-title strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-session-title span {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.terminal-session-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 9px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.terminal-session-item code,
+.terminal-session-item p {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-session-item code {
+  color: var(--code-text);
+  font-family: var(--font-mono);
+}
+
+.session-actions {
+  display: flex;
+  gap: 5px;
+  justify-content: flex-end;
+}

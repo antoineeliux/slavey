@@ -1,0 +1,141 @@
+.approval-list {
+  display: grid;
+  gap: 8px;
+}
+
+.action-list {
+  display: grid;
+  gap: 8px;
+}
+
+.session-list {
+  display: grid;
+  gap: 8px;
+}
+.process-list {
+  display: grid;
+  gap: 8px;
+}
+
+.action-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.active-filter {
+  border-color: transparent;
+  background: var(--bg-surface-selected);
+}
+.approval-item {
+  display: grid;
+  gap: 7px;
+}
+
+.action-item {
+  display: grid;
+  gap: 7px;
+}
+
+.process-item {
+  display: grid;
+  gap: 7px;
+}
+.session-item {
+  display: grid;
+  gap: 7px;
+}
+
+.approval-item strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action-title {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.action-title strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.action-title span {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.approval-item p,
+.approval-item code,
+.action-item p,
+.action-item code,
+.handoff-commit span,
+.handoff-result span,
+.session-item p,
+.session-item code,
+.process-item code {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-item code,
+.action-item code,
+.handoff-commit code,
+.session-item code,
+.process-item code {
+  color: var(--code-text);
+  font-family: var(--font-mono);
+}
+
+.session-item p {
+  white-space: normal;
+}
+
+.session-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.action-item pre,
+.process-item pre,
+.review-block pre {
+  max-height: 160px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-input);
+  padding: 8px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.action-item pre.error-output {
+  border-color: var(--danger-surface);
+  color: var(--danger-text);
+}

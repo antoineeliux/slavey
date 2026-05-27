@@ -1,0 +1,271 @@
+.employee-dashboard {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.details-panel .employee-dashboard {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.create-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px 32px;
+  gap: 8px;
+  padding: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.employee-list {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  padding: 12px;
+}
+
+.details-panel .employee-list {
+  max-height: 360px;
+}
+
+.employee-card,
+.empty-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  gap: 10px;
+  width: 100%;
+  min-height: 126px;
+  padding: 10px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  text-align: left;
+}
+
+.employee-card {
+  cursor: pointer;
+  border-color: transparent;
+}
+
+.employee-card:hover {
+  border-color: transparent;
+  background: var(--bg-surface-hover);
+}
+
+.employee-card.selected {
+  border-color: transparent;
+  background: var(--bg-surface-selected);
+}
+
+.empty-card {
+  display: block;
+  min-height: 72px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.employee-visual {
+  position: relative;
+  display: grid;
+  align-content: start;
+  justify-items: center;
+  min-width: 0;
+  padding-top: 4px;
+}
+
+.employee-head {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+  transform-origin: center bottom;
+  animation: breath 2.6s ease-in-out infinite;
+}
+
+.employee-body {
+  width: 30px;
+  height: 22px;
+  margin-top: -2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px 8px 5px 5px;
+  background: var(--bg-surface);
+}
+
+.typing-dots {
+  display: flex;
+  gap: 3px;
+  margin-top: 8px;
+  opacity: 0;
+}
+
+.typing-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--warning);
+  animation: dot 0.8s infinite ease-in-out;
+}
+
+.typing-dots i:nth-child(2) {
+  animation-delay: 0.12s;
+}
+
+.typing-dots i:nth-child(3) {
+  animation-delay: 0.24s;
+}
+
+.employee-card.running .typing-dots,
+.employee-card.starting .typing-dots {
+  opacity: 1;
+}
+
+.employee-card.running .employee-head,
+.employee-card.starting .employee-head {
+  border-color: var(--warning);
+  color: var(--warning);
+  animation: type-bob 0.7s ease-in-out infinite;
+}
+
+.employee-card.waiting_approval,
+.employee-card.blocked,
+.employee-card.has-approval {
+  border-color: transparent;
+  background: var(--warning-surface);
+}
+
+.employee-card.done .employee-head {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.employee-card.failed .employee-head {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.employee-card.stopped .employee-head {
+  color: var(--text-muted);
+  animation: none;
+}
+
+.employee-card-body {
+  min-width: 0;
+}
+
+.employee-card-top,
+.employee-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.employee-card-top strong {
+  overflow: hidden;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.employee-card-top span,
+.employee-meta span {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.employee-meta {
+  margin-top: 6px;
+}
+
+.employee-activity-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 6px;
+}
+
+.employee-activity-line span {
+  overflow: hidden;
+  max-width: 100%;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.employee-card p,
+.employee-card code {
+  display: block;
+  overflow: hidden;
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.employee-card code {
+  color: var(--accent);
+  font-family: var(--font-mono);
+}
+
+.card-remove {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 5px;
+  color: var(--text-subtle);
+}
+
+.card-remove:hover {
+  background: var(--danger-surface);
+  color: var(--danger);
+}
+@keyframes breath {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-1px) scale(1.04);
+  }
+}
+
+@keyframes type-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}
+
+@keyframes dot {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}

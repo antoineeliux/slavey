@@ -1,0 +1,107 @@
+.handoff-commits,
+.handoff-blockers {
+  display: grid;
+  gap: 6px;
+}
+
+.commit-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  min-width: 0;
+}
+.handoff-commit {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  padding: 7px 8px;
+}
+
+.handoff-result {
+  display: grid;
+  gap: 4px;
+  border-color: var(--success);
+}
+
+.handoff-result.warning {
+  border-color: var(--warning);
+}
+.review-block {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.review-file-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+.review-file-list,
+.review-file-detail {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.review-file-group {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.review-file-group-title {
+  color: var(--text-subtle);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.review-file {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  padding: 7px 8px;
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.review-file.active,
+.review-file:hover {
+  border-color: transparent;
+  background: var(--bg-surface-hover);
+}
+
+.review-file.active {
+  background: var(--bg-surface-selected);
+}
+
+.review-file span {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-file strong {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.review-block strong {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}

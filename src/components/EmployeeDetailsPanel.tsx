@@ -1,9 +1,10 @@
 import { useEffect } from "react";
-import { GitBranch, History, Pencil, RefreshCw, ShieldQuestion, Square } from "lucide-react";
+import { Code2, GitBranch, History, Pencil, RefreshCw, ShieldQuestion, Square } from "lucide-react";
 
 import { useAppStore } from "../store/appStore";
 import type { TerminalSessionRecord } from "../types";
 import { ActionPanel, ApprovalPanel } from "./ActionApprovalPanel";
+import { EmployeeDashboard } from "./EmployeeDashboard";
 import {
   codexStatusLabel,
   formatLabel,
@@ -14,6 +15,7 @@ import { ProcessPanel } from "./ProcessPanel";
 import { ReviewPanel } from "./ReviewPanel";
 
 export function EmployeeDetailsPanel() {
+  const backendReady = useAppStore((state) => state.backendReady);
   const selectedEmployee = useAppStore((state) => state.selectedEmployee());
   const employeeActivities = useAppStore((state) => state.employeeActivities);
   const approvals = useAppStore((state) => state.approvals);
@@ -66,11 +68,27 @@ export function EmployeeDetailsPanel() {
     selectedEmployee?.worktreePath,
   ]);
 
+  const panelHeader = (
+    <div className="details-header">
+      <div className="brand-mark">
+        <Code2 size={18} />
+      </div>
+      <div>
+        <h1>Slavey</h1>
+        <p>{backendReady ? "workspace online" : "waiting for backend"}</p>
+      </div>
+    </div>
+  );
+
   if (!selectedEmployee) {
     return (
-      <div className="details-empty">
-        <h2>No employee</h2>
-        <p>Create or select an employee to attach tools.</p>
+      <div className="details-shell">
+        {panelHeader}
+        <EmployeeDashboard />
+        <div className="details-empty">
+          <h2>No employee selected</h2>
+          <p>Create or select an employee to attach tools.</p>
+        </div>
       </div>
     );
   }
@@ -106,243 +124,247 @@ export function EmployeeDetailsPanel() {
     : null;
 
   return (
-    <div className="details-stack">
-      <div>
-        <h2>{selectedEmployee.name}</h2>
-        <p>{selectedEmployee.role}</p>
-      </div>
-      <div className={`status-pill ${displayStatus}`}>{displayStatus.replace("_", " ")}</div>
-      <dl className="detail-list">
+    <div className="details-shell">
+      {panelHeader}
+      <EmployeeDashboard />
+      <div className="details-stack">
         <div>
-          <dt>Activity</dt>
-          <dd title={activity?.details ?? ""}>{activity?.label ?? "unknown"}</dd>
+          <h2>{selectedEmployee.name}</h2>
+          <p>{selectedEmployee.role}</p>
         </div>
-        <div>
-          <dt>Activity state</dt>
-          <dd>{activity?.status.replaceAll("_", " ") ?? "unknown"}</dd>
-        </div>
-        <div>
-          <dt>Review counts</dt>
-          <dd>
-            {activity
-              ? `${activity.reviewCounts.changedFiles} changed, ${activity.reviewCounts.stagedFiles} staged, ${activity.reviewCounts.untrackedFiles} untracked`
-              : "unknown"}
-          </dd>
-        </div>
-        <div>
-          <dt>Execution</dt>
-          <dd>{selectedEmployee.worktreePath ? "isolated worktree" : "root workspace"}</dd>
-        </div>
-        <div>
-          <dt>CWD</dt>
-          <dd title={selectedEmployee.cwd}>{selectedEmployee.cwd}</dd>
-        </div>
-        <div>
-          <dt>Worktree</dt>
-          <dd title={selectedEmployee.worktreePath ?? ""}>
-            {selectedEmployee.worktreePath ?? "No worktree created"}
-          </dd>
-        </div>
-        <div>
-          <dt>Branch</dt>
-          <dd>{selectedEmployee.branchName ?? "none"}</dd>
-        </div>
-        <div>
-          <dt>Worktree status</dt>
-          <dd>
-            {selectedEmployee.worktreePath
-              ? worktreeStatus?.dirty
-                ? "dirty"
-                : "clean"
-              : "none"}
-          </dd>
-        </div>
-        <div>
-          <dt>Session</dt>
-          <dd>{selectedEmployee.terminalSessionId ?? "none"}</dd>
-        </div>
-        <div>
-          <dt>Command</dt>
-          <dd>{selectedEmployee.currentCommand ?? "none"}</dd>
-        </div>
-        <div>
-          <dt>Codex CLI</dt>
-          <dd className="codex-status-line" title={codexCliStatus?.message ?? "Checking Codex CLI"}>
-            <span>{codexStatusLabel(codexCliStatus, codexCliStatusLoading)}</span>
-            <button
-              className="icon-button mini"
-              disabled={codexCliStatusLoading}
-              title="Recheck Codex CLI"
-              onClick={() => void loadCodexCliStatus()}
-            >
-              <RefreshCw size={13} />
-            </button>
-          </dd>
-        </div>
-        <div>
-          <dt>Updated</dt>
-          <dd>{new Date(selectedEmployee.updatedAt).toLocaleTimeString()}</dd>
-        </div>
-      </dl>
-      {rolePolicy ? (
-        <section className="policy-panel">
-          <div className="section-heading">
-            <ShieldQuestion size={15} />
-            Role policy
+        <div className={`status-pill ${displayStatus}`}>{displayStatus.replace("_", " ")}</div>
+        <dl className="detail-list">
+          <div>
+            <dt>Activity</dt>
+            <dd title={activity?.details ?? ""}>{activity?.label ?? "unknown"}</dd>
           </div>
-          <div className="policy-grid">
-            <span>Actions</span>
-            <strong>{rolePolicy.defaultActionKinds.map(formatLabel).join(", ")}</strong>
-            <span>Shell approval</span>
-            <strong>{rolePolicy.requiresApprovalForShell ? "required" : "optional"}</strong>
-            <span>File approval</span>
-            <strong>{rolePolicy.requiresApprovalForFileWrite ? "required" : "optional"}</strong>
-            <span>Review</span>
-            <strong>{rolePolicy.canReview ? "enabled" : "disabled"}</strong>
+          <div>
+            <dt>Activity state</dt>
+            <dd>{activity?.status.replaceAll("_", " ") ?? "unknown"}</dd>
           </div>
-        </section>
-      ) : null}
-      <div className="control-grid">
-        <button
-          className="command-button primary"
-          disabled={Boolean(selectedEmployee.terminalSessionId)}
-          title={activeSessionReason ?? "Start shell"}
-          onClick={() => void startTerminal(selectedEmployee.id)}
-        >
-          Start shell
-        </button>
-        <button
-          className="command-button primary"
-          disabled={Boolean(selectedEmployee.terminalSessionId) || codexCliStatus?.available !== true}
-          onClick={() => void startCodexTerminal(selectedEmployee.id)}
-          title={
-            activeSessionReason ??
-            (codexCliStatus?.available === false
-              ? codexCliStatus.message
-              : codexCliStatusLoading || !codexCliStatus
-                ? "Checking Codex CLI"
-                : "Start Codex")
-          }
-        >
-          Start Codex
-        </button>
-        <button
-          className="command-button"
-          disabled={!selectedEmployee.terminalSessionId}
-          onClick={() =>
-            selectedEmployee.terminalSessionId &&
-            void stopTerminalSession(selectedEmployee.id, selectedEmployee.terminalSessionId)
-          }
-        >
-          Stop
-        </button>
-        <button
-          className="command-button"
-          disabled={Boolean(worktreeDisabledReason)}
-          onClick={() => void createWorktree(selectedEmployee.id)}
-          title={worktreeDisabledReason ?? "Create isolated worktree"}
-        >
-          <GitBranch size={14} />
-          Worktree
-        </button>
-        <button
-          className="command-button"
-          disabled={!selectedEmployee.worktreePath || Boolean(worktreeStatus?.dirty)}
-          onClick={() => void removeWorktree(selectedEmployee.id)}
-          title={worktreeStatus?.dirty ? "Worktree has uncommitted changes" : "Remove clean worktree"}
-        >
-          Remove tree
-        </button>
-        <button
-          className="command-button danger"
-          disabled={Boolean(selectedEmployee.worktreePath)}
-          onClick={() => void removeEmployee(selectedEmployee.id)}
-          title={
-            selectedEmployee.worktreePath
-              ? "Remove or archive the worktree before deleting employee"
-              : "Remove employee"
-          }
-        >
-          Remove
-        </button>
-      </div>
-      {codexCliStatus?.available === false ? (
-        <div className="inline-warning">{codexCliStatus.message}</div>
-      ) : null}
-      {worktreeDisabledReason && !selectedEmployee.worktreePath ? (
-        <div className="inline-warning">{worktreeDisabledReason}</div>
-      ) : null}
-      {activity?.blockers.length ? (
-        <div className="handoff-blockers">
-          {activity.blockers.map((blocker) => (
-            <div className="inline-warning" key={blocker}>
-              {blocker}
+          <div>
+            <dt>Review counts</dt>
+            <dd>
+              {activity
+                ? `${activity.reviewCounts.changedFiles} changed, ${activity.reviewCounts.stagedFiles} staged, ${activity.reviewCounts.untrackedFiles} untracked`
+                : "unknown"}
+            </dd>
+          </div>
+          <div>
+            <dt>Execution</dt>
+            <dd>{selectedEmployee.worktreePath ? "isolated worktree" : "root workspace"}</dd>
+          </div>
+          <div>
+            <dt>CWD</dt>
+            <dd title={selectedEmployee.cwd}>{selectedEmployee.cwd}</dd>
+          </div>
+          <div>
+            <dt>Worktree</dt>
+            <dd title={selectedEmployee.worktreePath ?? ""}>
+              {selectedEmployee.worktreePath ?? "No worktree created"}
+            </dd>
+          </div>
+          <div>
+            <dt>Branch</dt>
+            <dd>{selectedEmployee.branchName ?? "none"}</dd>
+          </div>
+          <div>
+            <dt>Worktree status</dt>
+            <dd>
+              {selectedEmployee.worktreePath
+                ? worktreeStatus?.dirty
+                  ? "dirty"
+                  : "clean"
+                : "none"}
+            </dd>
+          </div>
+          <div>
+            <dt>Session</dt>
+            <dd>{selectedEmployee.terminalSessionId ?? "none"}</dd>
+          </div>
+          <div>
+            <dt>Command</dt>
+            <dd>{selectedEmployee.currentCommand ?? "none"}</dd>
+          </div>
+          <div>
+            <dt>Codex CLI</dt>
+            <dd className="codex-status-line" title={codexCliStatus?.message ?? "Checking Codex CLI"}>
+              <span>{codexStatusLabel(codexCliStatus, codexCliStatusLoading)}</span>
+              <button
+                className="icon-button mini"
+                disabled={codexCliStatusLoading}
+                title="Recheck Codex CLI"
+                onClick={() => void loadCodexCliStatus()}
+              >
+                <RefreshCw size={13} />
+              </button>
+            </dd>
+          </div>
+          <div>
+            <dt>Updated</dt>
+            <dd>{new Date(selectedEmployee.updatedAt).toLocaleTimeString()}</dd>
+          </div>
+        </dl>
+        {rolePolicy ? (
+          <section className="policy-panel">
+            <div className="section-heading">
+              <ShieldQuestion size={15} />
+              Role policy
             </div>
-          ))}
+            <div className="policy-grid">
+              <span>Actions</span>
+              <strong>{rolePolicy.defaultActionKinds.map(formatLabel).join(", ")}</strong>
+              <span>Shell approval</span>
+              <strong>{rolePolicy.requiresApprovalForShell ? "required" : "optional"}</strong>
+              <span>File approval</span>
+              <strong>{rolePolicy.requiresApprovalForFileWrite ? "required" : "optional"}</strong>
+              <span>Review</span>
+              <strong>{rolePolicy.canReview ? "enabled" : "disabled"}</strong>
+            </div>
+          </section>
+        ) : null}
+        <div className="control-grid">
+          <button
+            className="command-button primary"
+            disabled={Boolean(selectedEmployee.terminalSessionId)}
+            title={activeSessionReason ?? "Start shell"}
+            onClick={() => void startTerminal(selectedEmployee.id)}
+          >
+            Start shell
+          </button>
+          <button
+            className="command-button primary"
+            disabled={Boolean(selectedEmployee.terminalSessionId) || codexCliStatus?.available !== true}
+            onClick={() => void startCodexTerminal(selectedEmployee.id)}
+            title={
+              activeSessionReason ??
+              (codexCliStatus?.available === false
+                ? codexCliStatus.message
+                : codexCliStatusLoading || !codexCliStatus
+                  ? "Checking Codex CLI"
+                  : "Start Codex")
+            }
+          >
+            Start Codex
+          </button>
+          <button
+            className="command-button"
+            disabled={!selectedEmployee.terminalSessionId}
+            onClick={() =>
+              selectedEmployee.terminalSessionId &&
+              void stopTerminalSession(selectedEmployee.id, selectedEmployee.terminalSessionId)
+            }
+          >
+            Stop
+          </button>
+          <button
+            className="command-button"
+            disabled={Boolean(worktreeDisabledReason)}
+            onClick={() => void createWorktree(selectedEmployee.id)}
+            title={worktreeDisabledReason ?? "Create isolated worktree"}
+          >
+            <GitBranch size={14} />
+            Worktree
+          </button>
+          <button
+            className="command-button"
+            disabled={!selectedEmployee.worktreePath || Boolean(worktreeStatus?.dirty)}
+            onClick={() => void removeWorktree(selectedEmployee.id)}
+            title={worktreeStatus?.dirty ? "Worktree has uncommitted changes" : "Remove clean worktree"}
+          >
+            Remove tree
+          </button>
+          <button
+            className="command-button danger"
+            disabled={Boolean(selectedEmployee.worktreePath)}
+            onClick={() => void removeEmployee(selectedEmployee.id)}
+            title={
+              selectedEmployee.worktreePath
+                ? "Remove or archive the worktree before deleting employee"
+                : "Remove employee"
+            }
+          >
+            Remove
+          </button>
         </div>
-      ) : null}
-      {selectedEmployee.worktreePath && worktreeStatus?.dirty ? (
-        <div className="inline-warning">
-          Worktree has uncommitted changes; removal is disabled until review is clean.
-        </div>
-      ) : null}
-      <ApprovalPanel
-        employeeId={selectedEmployee.id}
-        approvals={employeeApprovals}
-        onCreate={() =>
-          void createApproval({
-            employeeId: selectedEmployee.id,
-            kind: "shell_command",
-            title: "Review shell command",
-            description: "Foundation approval request for a future gated shell command.",
-            command: "echo pending approval",
-            cwd: selectedEmployee.cwd,
-          })
-        }
-      />
-      <ActionPanel employeeId={selectedEmployee.id} cwd={selectedEmployee.cwd} actions={employeeActions} />
-      <TerminalSessionHistory
-        activeSessionId={selectedEmployee.terminalSessionId ?? null}
-        sessions={recentSessions}
-        onStop={(session) => void stopTerminalSession(session.employeeId, session.sessionId)}
-        onRename={(session) => {
-          const label = window.prompt("Session label", session.label);
-          if (label?.trim()) {
-            void renameTerminalSession(session.employeeId, session.sessionId, label);
-          }
-        }}
-      />
-      <ProcessPanel
-        processes={employeeProcesses}
-        onSpawn={() =>
-          void spawnProcess(
-            selectedEmployee.id,
-            "while true; do date; sleep 2; done",
-            selectedEmployee.cwd,
-            "Clock loop",
-          )
-        }
-      />
-      {selectedEmployee.worktreePath ? (
-        <ReviewPanel
+        {codexCliStatus?.available === false ? (
+          <div className="inline-warning">{codexCliStatus.message}</div>
+        ) : null}
+        {worktreeDisabledReason && !selectedEmployee.worktreePath ? (
+          <div className="inline-warning">{worktreeDisabledReason}</div>
+        ) : null}
+        {activity?.blockers.length ? (
+          <div className="handoff-blockers">
+            {activity.blockers.map((blocker) => (
+              <div className="inline-warning" key={blocker}>
+                {blocker}
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {selectedEmployee.worktreePath && worktreeStatus?.dirty ? (
+          <div className="inline-warning">
+            Worktree has uncommitted changes; removal is disabled until review is clean.
+          </div>
+        ) : null}
+        <ApprovalPanel
           employeeId={selectedEmployee.id}
-          review={worktreeReview}
-          changedFiles={worktreeChangedFiles[selectedEmployee.id] ?? []}
-          selectedFile={selectedReviewFiles[selectedEmployee.id] ?? null}
-          fileDiffs={worktreeFileDiffs}
-          commits={employeeCommits}
-          handoff={handoff}
-          handoffResult={handoffResult}
-          repoHealth={repoHealth}
-          onRefresh={() => {
-            void loadWorktreeStatus(selectedEmployee.id);
-            void loadWorktreeReview(selectedEmployee.id);
-            void loadWorktreeCommits(selectedEmployee.id);
-            void loadWorktreeHandoff(selectedEmployee.id);
-            void loadWorktreeChangedFiles(selectedEmployee.id);
+          approvals={employeeApprovals}
+          onCreate={() =>
+            void createApproval({
+              employeeId: selectedEmployee.id,
+              kind: "shell_command",
+              title: "Review shell command",
+              description: "Foundation approval request for a future gated shell command.",
+              command: "echo pending approval",
+              cwd: selectedEmployee.cwd,
+            })
+          }
+        />
+        <ActionPanel employeeId={selectedEmployee.id} cwd={selectedEmployee.cwd} actions={employeeActions} />
+        <TerminalSessionHistory
+          activeSessionId={selectedEmployee.terminalSessionId ?? null}
+          sessions={recentSessions}
+          onStop={(session) => void stopTerminalSession(session.employeeId, session.sessionId)}
+          onRename={(session) => {
+            const label = window.prompt("Session label", session.label);
+            if (label?.trim()) {
+              void renameTerminalSession(session.employeeId, session.sessionId, label);
+            }
           }}
         />
-      ) : null}
+        <ProcessPanel
+          processes={employeeProcesses}
+          onSpawn={() =>
+            void spawnProcess(
+              selectedEmployee.id,
+              "while true; do date; sleep 2; done",
+              selectedEmployee.cwd,
+              "Clock loop",
+            )
+          }
+        />
+        {selectedEmployee.worktreePath ? (
+          <ReviewPanel
+            employeeId={selectedEmployee.id}
+            review={worktreeReview}
+            changedFiles={worktreeChangedFiles[selectedEmployee.id] ?? []}
+            selectedFile={selectedReviewFiles[selectedEmployee.id] ?? null}
+            fileDiffs={worktreeFileDiffs}
+            commits={employeeCommits}
+            handoff={handoff}
+            handoffResult={handoffResult}
+            repoHealth={repoHealth}
+            onRefresh={() => {
+              void loadWorktreeStatus(selectedEmployee.id);
+              void loadWorktreeReview(selectedEmployee.id);
+              void loadWorktreeCommits(selectedEmployee.id);
+              void loadWorktreeHandoff(selectedEmployee.id);
+              void loadWorktreeChangedFiles(selectedEmployee.id);
+            }}
+          />
+        ) : null}
+      </div>
     </div>
   );
 }
