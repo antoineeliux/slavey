@@ -48,7 +48,7 @@ export function EmployeeDashboard() {
       </form>
 
       <div className="employee-list">
-        <EmployeeScene />
+        <EmployeeScene showFloor={false} />
       </div>
     </div>
   );

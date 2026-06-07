@@ -1,11 +1,25 @@
 .app-shell {
   display: grid;
-  grid-template-columns: minmax(560px, 1fr) 360px;
-  grid-template-rows: minmax(0, 1fr) 176px;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   width: 100%;
   height: 100vh;
   overflow: hidden;
   background: var(--bg-app);
+}
+
+.app-shell.has-event-log {
+  grid-template-rows: minmax(0, 1fr) 176px;
+}
+
+.app-shell.office-active {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.app-shell.office-active .workbench {
+  grid-column: 1;
+  grid-row: 1;
 }
 
 .workbench,
@@ -43,6 +57,7 @@
   gap: 8px;
   height: 48px;
   align-items: center;
+  overflow-x: auto;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--bg-toolbar);
@@ -67,13 +82,13 @@
 
 .workspace-status-strip {
   display: flex;
-  min-height: 34px;
+  min-height: 32px;
   flex: 0 0 auto;
   align-items: center;
   gap: 6px;
   overflow-x: auto;
   border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-panel-subtle);
+  background: var(--bg-toolbar);
   padding: 5px 10px;
 }
 
@@ -85,9 +100,9 @@
   align-items: center;
   gap: 5px;
   overflow: hidden;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-pill);
-  background: var(--bg-surface);
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
   color: var(--text-muted);
   font-size: 11px;
   font-weight: 700;
@@ -123,6 +138,7 @@
 .terminal-pane,
 .editor-pane,
 .settings-pane,
+.office-pane,
 .code-surface {
   display: flex;
   min-width: 0;
@@ -131,12 +147,14 @@
 
 .terminal-pane,
 .settings-pane,
+.office-pane,
 .code-surface {
   flex-direction: column;
 }
 
 .terminal-pane,
-.settings-pane {
+.settings-pane,
+.office-pane {
   height: 100%;
 }
 
@@ -271,13 +289,8 @@
 }
 
 @media (max-width: 1050px) {
-  .app-shell {
+  .app-shell.has-event-log {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) minmax(320px, 42vh) 210px;
-  }
-
-  .details-panel {
-    border-top: 1px solid var(--border-subtle);
-    border-left: 0;
+    grid-template-rows: minmax(0, 1fr) 210px;
   }
 }

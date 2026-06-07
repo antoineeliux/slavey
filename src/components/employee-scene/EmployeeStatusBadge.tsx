@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  Armchair,
   CheckCircle2,
   CircleDashed,
   Clock3,
@@ -26,9 +27,13 @@ export function EmployeeStatusBadge({ state, label }: { state: EmployeeVisualSta
 function iconFor(state: EmployeeVisualState) {
   switch (state) {
     case "shell_running":
+    case "codex_starting":
       return TerminalSquare;
     case "codex_running":
       return Play;
+    case "standby":
+      return Armchair;
+    case "codex_waiting_approval":
     case "waiting_approval":
       return Clock3;
     case "action_running":
@@ -38,6 +43,7 @@ function iconFor(state: EmployeeVisualState) {
     case "review_needed":
       return FileDiff;
     case "handoff_ready":
+    case "done_clean":
       return GitMerge;
     case "blocked":
       return AlertTriangle;

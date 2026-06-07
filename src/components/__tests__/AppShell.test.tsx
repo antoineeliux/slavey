@@ -13,12 +13,12 @@ vi.mock("../EditorPane", () => ({
   EditorPane: () => <div>Editor panel mock</div>,
 }));
 
-vi.mock("../WorkspaceSettingsPanel", () => ({
-  WorkspaceSettingsPanel: () => <div>Settings panel mock</div>,
+vi.mock("../OfficePane", () => ({
+  OfficePane: () => <div>Office panel mock</div>,
 }));
 
-vi.mock("../EmployeeDetailsPanel", () => ({
-  EmployeeDetailsPanel: () => <div>Employee details mock</div>,
+vi.mock("../WorkspaceSettingsPanel", () => ({
+  WorkspaceSettingsPanel: () => <div>Settings panel mock</div>,
 }));
 
 vi.mock("../EventLogPanel", () => ({
@@ -30,17 +30,54 @@ describe("AppShell", () => {
     resetAppStore();
   });
 
-  it("renders the core workspace tabs and shell regions", async () => {
+  it("renders the core workspace tabs and lands on office by default", async () => {
     useAppStore.setState({ backendReady: true });
     render(<AppShell />);
 
-    expect(screen.getByText("Backend ready")).toBeInTheDocument();
     expect(screen.getByRole("tablist", { name: "Workspace" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Office/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Terminal/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Editor/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Settings/i })).toBeInTheDocument();
+    expect(await screen.findByText("Office panel mock")).toBeInTheDocument();
+    expect(screen.queryByText("Backend ready")).not.toBeInTheDocument();
+    expect(screen.queryByText("Employee details mock")).not.toBeInTheDocument();
+    expect(screen.queryByText("Event log mock")).not.toBeInTheDocument();
+  });
+
+  it("renders non-office workspace regions on the terminal tab", async () => {
+    useAppStore.setState({ backendReady: true, activeTab: "terminal" });
+    render(<AppShell />);
+
     expect(await screen.findByText("Terminal panel mock")).toBeInTheDocument();
-    expect(screen.getByText("Employee details mock")).toBeInTheDocument();
+    expect(screen.queryByText("Employee details mock")).not.toBeInTheDocument();
+    expect(screen.queryByText("Backend ready")).not.toBeInTheDocument();
+    expect(screen.queryByText("Event log mock")).not.toBeInTheDocument();
+  });
+
+  it("keeps info-only logs out of the main workbench chrome", async () => {
+    useAppStore.setState({
+      activeTab: "terminal",
+      backendReady: true,
+      logs: [{ id: "log-1", level: "info", message: "Started", timestamp: 1 }],
+    });
+
+    render(<AppShell />);
+
+    expect(await screen.findByText("Terminal panel mock")).toBeInTheDocument();
+    expect(screen.queryByText("Event log mock")).not.toBeInTheDocument();
+  });
+
+  it("shows the event log for warnings and errors", async () => {
+    useAppStore.setState({
+      activeTab: "terminal",
+      backendReady: true,
+      logs: [{ id: "log-1", level: "warn", message: "Needs attention", timestamp: 1 }],
+    });
+
+    render(<AppShell />);
+
+    expect(await screen.findByText("Terminal panel mock")).toBeInTheDocument();
     expect(screen.getByText("Event log mock")).toBeInTheDocument();
   });
 
@@ -53,8 +90,9 @@ describe("AppShell", () => {
     expect(await screen.findByText("Editor panel mock")).toBeInTheDocument();
   });
 
-  it("surfaces active employee session and dirty editor state in the status strip", () => {
+  it("surfaces dirty editor state in the status strip", () => {
     useAppStore.setState({
+      activeTab: "terminal",
       backendReady: true,
       employees: [
         {
@@ -121,8 +159,8 @@ describe("AppShell", () => {
 
     render(<AppShell />);
 
-    expect(screen.getByText("Ada · running")).toBeInTheDocument();
-    expect(screen.getByText("Shell")).toBeInTheDocument();
     expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    expect(screen.queryByText("Ada · running")).not.toBeInTheDocument();
+    expect(screen.queryByText("Shell")).not.toBeInTheDocument();
   });
 });

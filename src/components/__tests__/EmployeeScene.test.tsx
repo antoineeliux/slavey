@@ -3,7 +3,12 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { useAppStore } from "../../store/appStore";
 import { resetAppStore } from "../../test/storeTestUtils";
-import type { Employee, EmployeeActivity, EmployeeActivityStatus } from "../../types";
+import type {
+  Employee,
+  EmployeeActivity,
+  EmployeeActivityStatus,
+  EmployeeAttentionReason,
+} from "../../types";
 import { presentEmployeeActivity } from "../employee-scene/activityPresentation";
 import { EmployeeScene } from "../EmployeeScene";
 
@@ -62,14 +67,119 @@ describe("EmployeeScene", () => {
   it("maps structured activity and fallback state to visual states", () => {
     const cases: Array<[string, ReturnType<typeof presentEmployeeActivity>["state"], Parameters<typeof presentation>[1]]> = [
       ["idle", "idle", { activityStatus: "idle" }],
+      ["standby", "standby", { employeeStatus: "standby", activityStatus: "standby" }],
       ["shell", "shell_running", { activityStatus: "shell_running", terminalProfile: "shell" }],
-      ["codex", "codex_running", { activityStatus: "codex_running", terminalProfile: "codex" }],
+      [
+        "shell-codex",
+        "codex_starting",
+        { activityStatus: "shell_running", terminalProfile: "shell", activeProfile: "codex" },
+      ],
+      ["codex-starting", "codex_starting", { activityStatus: "codex_starting", terminalProfile: "codex" }],
+      [
+        "codex",
+        "codex_running",
+        { activityStatus: "codex_running", terminalProfile: "codex", lastPromptSubmittedAt: 15_000 },
+      ],
+      [
+        "structured-action-running-with-codex-terminal",
+        "action_running",
+        {
+          activityStatus: "action_running",
+          behavior: "at_desk_terminal",
+          terminalState: "codex_running",
+        },
+      ],
+      [
+        "structured-process-running-with-codex-terminal",
+        "process_running",
+        {
+          activityStatus: "process_running",
+          behavior: "at_desk_terminal",
+          terminalState: "codex_running",
+        },
+      ],
+      [
+        "codex-waiting",
+        "codex_waiting_instruction",
+        { activityStatus: "codex_running", terminalProfile: "codex", lastPromptReadyAt: 20_000 },
+      ],
+      [
+        "backend-codex-waiting",
+        "codex_waiting_instruction",
+        { activityStatus: "codex_waiting_instruction", terminalProfile: "codex" },
+      ],
+      [
+        "backend-agent-waiting",
+        "codex_waiting_instruction",
+        { activityStatus: "codex_running", agentState: "waiting_prompt" },
+      ],
+      [
+        "backend-attention-approval",
+        "waiting_approval",
+        { activityStatus: "codex_running", terminalProfile: "codex", attentionReason: "needs_approval" },
+      ],
+      [
+        "structured-app-approval",
+        "waiting_approval",
+        {
+          activityStatus: "action_pending_approval",
+          behavior: "waiting_at_owner",
+          attentionReason: "needs_app_approval",
+        },
+      ],
+      [
+        "structured-terminal-approval",
+        "codex_waiting_approval",
+        {
+          activityStatus: "codex_waiting_approval",
+          behavior: "waiting_at_owner",
+          terminalState: "codex_waiting_approval",
+          attentionReason: "needs_terminal_approval",
+          actionRunning: true,
+        },
+      ],
+      [
+        "backend-agent-approval",
+        "codex_waiting_approval",
+        { activityStatus: "codex_running", agentState: "waiting_approval" },
+      ],
+      [
+        "backend-terminal-approval",
+        "codex_waiting_approval",
+        { activityStatus: "codex_waiting_approval", agentState: "waiting_approval" },
+      ],
+      [
+        "terminal-approval",
+        "codex_waiting_approval",
+        {
+          activityStatus: "codex_running",
+          terminalProfile: "codex",
+          lastPromptSubmittedAt: 15_000,
+          lastApprovalPromptAt: 20_000,
+        },
+      ],
+      [
+        "codex-prompt-submitted",
+        "codex_running",
+        {
+          activityStatus: "codex_running",
+          terminalProfile: "codex",
+          lastOutputAt: 1,
+          lastPromptSubmittedAt: 15_000,
+        },
+      ],
       ["approval", "waiting_approval", { approval: true }],
       ["action", "action_running", { actionRunning: true }],
       ["process", "process_running", { processRunning: true }],
       ["review", "review_needed", { activityStatus: "review_needed", changedFiles: 2 }],
       ["handoff", "handoff_ready", { handoffReady: true }],
+      ["done", "done_clean", { activityStatus: "done_clean", employeeStatus: "done" }],
       ["blocked", "blocked", { employeeStatus: "failed" }],
+      [
+        "stopped-stale-agent",
+        "stopped",
+        { activityStatus: "stopped", employeeStatus: "stopped", agentState: "failed" },
+      ],
       ["stopped", "stopped", { activityStatus: "stopped", employeeStatus: "stopped" }],
     ];
 
@@ -85,11 +195,28 @@ function presentation(
     employeeStatus?: Employee["status"];
     activityStatus?: EmployeeActivityStatus;
     terminalProfile?: "shell" | "codex";
+    activeProfile?: "shell" | "codex";
     approval?: boolean;
     actionRunning?: boolean;
     processRunning?: boolean;
     changedFiles?: number;
     handoffReady?: boolean;
+    lastOutputAt?: number;
+    lastPromptSubmittedAt?: number;
+    lastPromptReadyAt?: number;
+    lastApprovalPromptAt?: number;
+    behavior?: EmployeeActivity["behavior"];
+    terminalState?: EmployeeActivity["terminalState"];
+    attentionReason?: EmployeeAttentionReason;
+    agentKind?: "none" | "codex" | "claude";
+    agentState?:
+      | "not_active"
+      | "starting"
+      | "thinking"
+      | "waiting_prompt"
+      | "waiting_approval"
+      | "completed"
+      | "failed";
   },
 ) {
   const nextEmployee = employee({
@@ -101,12 +228,29 @@ function presentation(
     employee: nextEmployee,
     activity: options.activityStatus
       ? activity(nextEmployee.id, options.activityStatus, {
+          attention: options.attentionReason
+            ? {
+                required: true,
+                reason: options.attentionReason,
+                priority: "normal",
+              }
+            : undefined,
           reviewCounts: {
             changedFiles: options.changedFiles ?? 0,
             stagedFiles: 0,
             untrackedFiles: 0,
           },
           activeTerminalSessionId: options.terminalProfile ? `term-${suffix}` : null,
+          behavior: options.behavior,
+          terminalState: options.terminalState,
+          activityReason: options.terminalState ? options.terminalState : undefined,
+          agent: options.agentState
+            ? {
+                kind: options.agentKind ?? "codex",
+                state: options.agentState,
+                lastStateChangedAt: 1,
+              }
+            : undefined,
         })
       : null,
     terminalSessions: options.terminalProfile
@@ -115,9 +259,14 @@ function presentation(
             sessionId: `term-${suffix}`,
             employeeId: nextEmployee.id,
             profile: options.terminalProfile,
+            activeProfile: options.activeProfile,
             cwd: nextEmployee.cwd,
             status: "running",
             startedAt: 1,
+            lastOutputAt: options.lastOutputAt,
+            lastPromptSubmittedAt: options.lastPromptSubmittedAt,
+            lastPromptReadyAt: options.lastPromptReadyAt,
+            lastApprovalPromptAt: options.lastApprovalPromptAt,
             label: `${options.terminalProfile} session`,
           },
         ]
