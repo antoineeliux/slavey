@@ -260,21 +260,6 @@ function SettingsForm({
         Safety
       </div>
       <div className="settings-form">
-        <label>
-          <span>Default terminal</span>
-          <select
-            value={settings.defaultTerminalProfile}
-            onChange={(event) =>
-              void onChange({
-                defaultTerminalProfile:
-                  event.target.value as AppSettings["defaultTerminalProfile"],
-              })
-            }
-          >
-            <option value="shell">shell</option>
-            <option value="codex">codex</option>
-          </select>
-        </label>
         <label className="checkbox-row">
           <input
             type="checkbox"

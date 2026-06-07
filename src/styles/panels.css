@@ -59,14 +59,26 @@
 }
 
 .status-pill.running,
-.status-pill.starting {
+.status-pill.starting,
+.status-pill.shell_running,
+.status-pill.codex_starting,
+.status-pill.codex_running,
+.status-pill.action_running,
+.status-pill.process_running {
   border-color: var(--warning);
   color: var(--warning);
 }
 
-.status-pill.done {
+.status-pill.done,
+.status-pill.done_clean,
+.status-pill.handoff_ready {
   border-color: var(--success);
   color: var(--success);
+}
+
+.status-pill.standby {
+  border-color: #8ec5d8;
+  color: #8ec5d8;
 }
 
 .status-pill.failed,
@@ -75,7 +87,11 @@
   color: var(--danger);
 }
 
-.status-pill.waiting_approval {
+.status-pill.waiting_approval,
+.status-pill.action_pending_approval,
+.status-pill.codex_waiting_approval,
+.status-pill.codex_waiting_instruction,
+.status-pill.review_needed {
   border-color: var(--warning);
   color: var(--warning);
 }

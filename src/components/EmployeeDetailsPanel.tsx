@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { Code2, GitBranch, History, Pencil, RefreshCw, ShieldQuestion, Square } from "lucide-react";
 
 import { useAppStore } from "../store/appStore";
-import type { TerminalSessionRecord } from "../types";
+import type { Employee, EmployeeActivity, TerminalSessionRecord } from "../types";
 import { ActionPanel, ApprovalPanel } from "./ActionApprovalPanel";
 import { EmployeeDashboard } from "./EmployeeDashboard";
 import {
@@ -16,6 +16,7 @@ import { ReviewPanel } from "./ReviewPanel";
 
 export function EmployeeDetailsPanel() {
   const backendReady = useAppStore((state) => state.backendReady);
+  const activeTab = useAppStore((state) => state.activeTab);
   const selectedEmployee = useAppStore((state) => state.selectedEmployee());
   const employeeActivities = useAppStore((state) => state.employeeActivities);
   const approvals = useAppStore((state) => state.approvals);
@@ -44,7 +45,8 @@ export function EmployeeDetailsPanel() {
   const loadWorktreeChangedFiles = useAppStore((state) => state.loadWorktreeChangedFiles);
   const loadCodexCliStatus = useAppStore((state) => state.loadCodexCliStatus);
   const startTerminal = useAppStore((state) => state.startTerminal);
-  const startCodexTerminal = useAppStore((state) => state.startCodexTerminal);
+  const setEmployeeStandby = useAppStore((state) => state.setEmployeeStandby);
+  const resumeEmployeeFromStandby = useAppStore((state) => state.resumeEmployeeFromStandby);
   const stopTerminalSession = useAppStore((state) => state.stopTerminalSession);
   const renameTerminalSession = useAppStore((state) => state.renameTerminalSession);
   const removeEmployee = useAppStore((state) => state.removeEmployee);
@@ -79,12 +81,13 @@ export function EmployeeDetailsPanel() {
       </div>
     </div>
   );
+  const showDashboard = activeTab !== "office";
 
   if (!selectedEmployee) {
     return (
       <div className="details-shell">
         {panelHeader}
-        <EmployeeDashboard />
+        {showDashboard ? <EmployeeDashboard /> : null}
         <div className="details-empty">
           <h2>No employee selected</h2>
           <p>Create or select an employee to attach tools.</p>
@@ -97,8 +100,8 @@ export function EmployeeDetailsPanel() {
     (approval) => approval.employeeId === selectedEmployee.id,
   );
   const pendingApprovals = employeeApprovals.filter((approval) => approval.status === "pending");
-  const displayStatus =
-    pendingApprovals.length > 0 ? "waiting_approval" : selectedEmployee.status;
+  const activity = employeeActivities[selectedEmployee.id] ?? null;
+  const displayStatus = displayStatusFor(selectedEmployee, activity, pendingApprovals.length);
   const worktreeStatus = worktreeStatuses[selectedEmployee.id];
   const repoHealth = workspaceInfo?.repoHealth ?? null;
   const worktreeDisabledReason = worktreeCreateDisabledReason(
@@ -118,7 +121,6 @@ export function EmployeeDetailsPanel() {
     .sort((a, b) => b.startedAt - a.startedAt)
     .slice(0, 5);
   const rolePolicy = rolePolicies.find((policy) => policy.role === selectedEmployee.role);
-  const activity = employeeActivities[selectedEmployee.id] ?? null;
   const activeSessionReason = selectedEmployee.terminalSessionId
     ? "Employee already has an active terminal session"
     : null;
@@ -126,13 +128,13 @@ export function EmployeeDetailsPanel() {
   return (
     <div className="details-shell">
       {panelHeader}
-      <EmployeeDashboard />
+      {showDashboard ? <EmployeeDashboard /> : null}
       <div className="details-stack">
         <div>
           <h2>{selectedEmployee.name}</h2>
           <p>{selectedEmployee.role}</p>
         </div>
-        <div className={`status-pill ${displayStatus}`}>{displayStatus.replace("_", " ")}</div>
+        <div className={`status-pill ${displayStatus}`}>{formatLabel(displayStatus)}</div>
         <dl className="detail-list">
           <div>
             <dt>Activity</dt>
@@ -235,21 +237,6 @@ export function EmployeeDetailsPanel() {
             Start shell
           </button>
           <button
-            className="command-button primary"
-            disabled={Boolean(selectedEmployee.terminalSessionId) || codexCliStatus?.available !== true}
-            onClick={() => void startCodexTerminal(selectedEmployee.id)}
-            title={
-              activeSessionReason ??
-              (codexCliStatus?.available === false
-                ? codexCliStatus.message
-                : codexCliStatusLoading || !codexCliStatus
-                  ? "Checking Codex CLI"
-                  : "Start Codex")
-            }
-          >
-            Start Codex
-          </button>
-          <button
             className="command-button"
             disabled={!selectedEmployee.terminalSessionId}
             onClick={() =>
@@ -259,6 +246,21 @@ export function EmployeeDetailsPanel() {
           >
             Stop
           </button>
+          {selectedEmployee.status === "standby" ? (
+            <button
+              className="command-button"
+              onClick={() => void resumeEmployeeFromStandby(selectedEmployee.id)}
+            >
+              Resume
+            </button>
+          ) : (
+            <button
+              className="command-button"
+              onClick={() => void setEmployeeStandby(selectedEmployee.id)}
+            >
+              Standby
+            </button>
+          )}
           <button
             className="command-button"
             disabled={Boolean(worktreeDisabledReason)}
@@ -372,6 +374,44 @@ export function EmployeeDetailsPanel() {
       </div>
     </div>
   );
+}
+
+function displayStatusFor(
+  employee: Employee,
+  activity: EmployeeActivity | null,
+  pendingApprovals: number,
+): string {
+  if (employee.status === "standby" || activity?.lifecycle === "standby") {
+    return "standby";
+  }
+  if (employee.status === "stopped" || activity?.lifecycle === "stopped") {
+    return "stopped";
+  }
+  if (activity?.attention?.required) {
+    switch (activity.attention.reason) {
+      case "needs_terminal_approval":
+        return "codex_waiting_approval";
+      case "needs_app_approval":
+        return "waiting_approval";
+      case "needs_instruction":
+        return "codex_waiting_instruction";
+      case "ready_to_report":
+        return "done_clean";
+      case "review_needed":
+        return "review_needed";
+      case "handoff_ready":
+        return "handoff_ready";
+      case "blocked_needs_help":
+        return "blocked";
+      case "needs_approval":
+        return activity.terminalState === "codex_waiting_approval"
+          ? "codex_waiting_approval"
+          : "waiting_approval";
+      default:
+        break;
+    }
+  }
+  return activity?.status ?? (pendingApprovals > 0 ? "waiting_approval" : employee.status);
 }
 
 function TerminalSessionHistory({

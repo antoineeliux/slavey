@@ -22,10 +22,69 @@
   white-space: nowrap;
 }
 
-.recent-files-panel {
+.editor-context-panel {
   display: grid;
+  gap: 7px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+}
+
+.editor-employee-select {
+  display: grid;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.editor-employee-select span {
+  display: flex;
+  align-items: center;
   gap: 6px;
-  padding: 6px;
+}
+
+.editor-employee-select select {
+  min-width: 0;
+}
+
+.working-folder-block {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.working-folder-block span,
+.terminal-folder-prompt span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.working-folder-block strong {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-folder-prompt {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 52px;
+  align-items: center;
+  gap: 6px;
+}
+
+.terminal-folder-prompt span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-files-panel {
   border-bottom: 1px solid var(--border-subtle);
 }
 
@@ -41,6 +100,17 @@
   text-transform: uppercase;
 }
 
+summary.compact-panel-heading {
+  min-height: 30px;
+  cursor: pointer;
+  list-style: none;
+  padding: 6px;
+}
+
+summary.compact-panel-heading::-webkit-details-marker {
+  display: none;
+}
+
 .compact-panel-heading span,
 .recent-file-main {
   display: flex;
@@ -49,18 +119,28 @@
   gap: 6px;
 }
 
+.panel-count {
+  color: var(--text-subtle);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.summary-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+}
+
 .recent-file-list {
   display: grid;
   max-height: 110px;
   overflow: auto;
   gap: 4px;
+  padding: 0 6px 6px;
 }
 
 .recent-file-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 24px;
-  gap: 4px;
-  align-items: center;
   min-width: 0;
 }
 
@@ -85,6 +165,78 @@
   white-space: nowrap;
 }
 
+.changed-files-panel {
+  display: grid;
+  gap: 6px;
+  padding: 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.changed-file-list {
+  display: grid;
+  max-height: 210px;
+  overflow: auto;
+  gap: 6px;
+}
+
+.changed-file-group {
+  display: grid;
+  gap: 3px;
+}
+
+.changed-file-group-title,
+.shared-change-label {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.shared-change-label {
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  padding: 5px 6px;
+  background: var(--bg-surface);
+  text-transform: none;
+}
+
+.changed-file {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+  min-height: 28px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px 5px;
+  text-align: left;
+}
+
+.changed-file:hover,
+.changed-file.active {
+  background: var(--bg-surface-hover);
+}
+
+.changed-file span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.changed-file-status {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 .file-list {
   min-height: 0;
   overflow: auto;
@@ -96,27 +248,30 @@
 }
 
 .file-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  display: flex;
   gap: 6px;
+  justify-content: flex-end;
   padding: 6px;
   border-top: 1px solid var(--border-subtle);
 }
 
 .search-panel {
-  display: grid;
-  grid-template-columns: 72px minmax(0, 1fr) 42px;
-  gap: 6px;
-  padding: 6px;
   border-top: 1px solid var(--border-subtle);
 }
 
+.search-controls {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) 42px;
+  gap: 6px;
+  padding: 0 6px 6px;
+}
+
 .search-results {
-  grid-column: 1 / -1;
   display: grid;
   max-height: 180px;
   overflow: auto;
   gap: 4px;
+  padding: 0 6px 6px;
 }
 
 .search-result {
@@ -190,11 +345,14 @@
 }
 
 .file-op-button {
-  opacity: 0.65;
+  opacity: 0;
+  pointer-events: none;
 }
 
-.file-row-shell:hover .file-op-button {
+.file-row-shell:hover .file-op-button,
+.file-op-button:focus-visible {
   opacity: 1;
+  pointer-events: auto;
 }
 
 .file-error {
@@ -203,26 +361,6 @@
 
 .code-surface {
   flex: 1;
-}
-
-.editor-meta {
-  display: flex;
-  min-height: 30px;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 10px;
-  overflow: hidden;
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--bg-panel-subtle);
-  padding: 0 10px;
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.editor-meta span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .editor-warning {
@@ -237,6 +375,36 @@
   padding: 8px 10px;
   color: var(--text-muted);
   font-size: 12px;
+}
+
+.editor-diff-fallback {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-panel-subtle);
+}
+
+.editor-diff-fallback summary {
+  min-height: 30px;
+  cursor: pointer;
+  overflow: hidden;
+  padding: 8px 10px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-diff-fallback pre {
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  border-top: 1px solid var(--border-subtle);
+  padding: 8px 10px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
 }
 
 .editor-empty-state {
@@ -265,10 +433,43 @@
   height: 100%;
 }
 
+.codemirror-host .cm-diff-added {
+  background: color-mix(in srgb, var(--success) 16%, transparent);
+}
+
+.codemirror-host .cm-diff-deleted {
+  border-left: 2px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 13%, transparent);
+  color: var(--danger);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 1px 8px 1px 18px;
+  white-space: pre-wrap;
+}
+
 .dirty-dot {
   width: 7px;
   height: 7px;
   flex: 0 0 auto;
   border-radius: 50%;
   background: var(--warning);
+}
+
+@media (max-width: 720px) {
+  .editor-pane {
+    flex-direction: column;
+  }
+
+  .file-tree {
+    width: 100%;
+    min-width: 0;
+    max-height: 52%;
+    border-right: 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .code-surface {
+    min-height: 0;
+  }
 }
