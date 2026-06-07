@@ -6,7 +6,7 @@ Release-candidate MVP desktop app for managing local AI coding-agent employees. 
 
 - Open and switch local workspaces with visible repo health, Codex CLI availability, Git identity blockers, diagnostics, and recent workspaces.
 - Create, select, and remove employees, optionally backed by Git worktrees.
-- Start Shell or Codex terminal sessions per employee with structured session history and ownership checks.
+- Start shell sessions per employee with structured session history, ownership checks, and automatic Codex CLI detection when `codex` runs inside the shell.
 - Use the file tree, recent files, search, and editor with dirty-state and save-conflict messaging.
 - Review employee worktree changes grouped by conflicted, staged, unstaged, and untracked files.
 - Commit employee worktree changes and run explicit handoff preflight/apply/abort flows without push or PR automation.

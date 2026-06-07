@@ -9,16 +9,19 @@ export default defineConfig({
   },
   reporter: process.env.CI ? "github" : "list",
   use: {
-    baseURL: "http://127.0.0.1:1420",
+    baseURL: "http://127.0.0.1:1421",
+    locale: "en-US",
+    reducedMotion: "reduce",
+    timezoneId: "UTC",
     trace: "on-first-retry",
   },
   webServer: {
-    command: "npm run dev:web",
+    command: "npm exec vite -- --host 127.0.0.1 --port 1421",
     env: {
       VITE_SLAVEY_E2E: "true",
     },
-    url: "http://127.0.0.1:1420",
-    reuseExistingServer: !process.env.CI,
+    url: "http://127.0.0.1:1421",
+    reuseExistingServer: false,
     timeout: 120_000,
   },
   projects: [

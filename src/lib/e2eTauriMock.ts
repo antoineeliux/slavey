@@ -14,6 +14,7 @@ import type {
   FilePayload,
   FsEntry,
   FsSearchResult,
+  GitPathChanges,
   ManagedProcess,
   ProcessLogs,
   RolePolicy,
@@ -29,6 +30,7 @@ import type {
   CreateActionInput,
   CreateApprovalInput,
   CreateEmployeeInput,
+  SetEmployeeWorkingFolderInput,
 } from "./tauriCommands";
 
 type InvokeArgs = Record<string, unknown>;
@@ -121,6 +123,7 @@ const terminalSessions: TerminalSessionRecord[] = [
     employeeId: "emp-frontend",
     profile: "shell",
     cwd: frontendCwd,
+    currentCwd: `${frontendCwd}/src`,
     status: "running",
     startedAt: now - 1_200_000,
     label: "Mock shell",
@@ -132,6 +135,7 @@ const terminalSessions: TerminalSessionRecord[] = [
     employeeId: "emp-reviewer",
     profile: "codex",
     cwd: workspaceRoot,
+    currentCwd: workspaceRoot,
     status: "stopped",
     exitCode: 0,
     startedAt: now - 2_000_000,
@@ -278,7 +282,7 @@ const snapshot: AppStateSnapshot = {
   processes,
   processLogs: [],
   selectedEmployeeId: "emp-frontend",
-  activeTab: "terminal",
+  activeTab: "office",
   recentFiles: [`${workspaceRoot}/src/App.tsx`],
   recentWorkspaces: workspaceInfo.recentWorkspaces,
   settings,
@@ -445,6 +449,16 @@ const worktreeReview: WorktreeReview = {
   },
 };
 
+const gitPathChanges: GitPathChanges = {
+  root: frontendCwd,
+  repoRoot: frontendCwd,
+  isRepo: true,
+  clean: false,
+  status: worktreeReview.status,
+  changedFiles: worktreeReview.changedFiles,
+  files: worktreeReview.files,
+};
+
 const files: FsEntry[] = [
   {
     name: "src",
@@ -501,10 +515,15 @@ export async function invokeE2eTauriCommand<T>(
       );
     case "employee_create":
       return clone(createMockEmployee(payload<CreateEmployeeInput>(args)));
+    case "employee_set_working_folder":
+      return clone(withWorkingFolder(payload<SetEmployeeWorkingFolderInput>(args)));
     case "employee_remove":
       return undefined as T;
+    case "employee_set_standby":
+      return clone(withStatus(stringArg(args, "employeeId"), "standby"));
+    case "employee_resume_from_standby":
+      return clone(withStatus(stringArg(args, "employeeId"), "running"));
     case "employee_start_terminal":
-    case "employee_start_codex_terminal":
       return clone(withTerminal(stringArg(args, "employeeId")));
     case "employee_stop_terminal":
       return clone(withoutTerminal(stringArg(args, "employeeId")));
@@ -520,6 +539,16 @@ export async function invokeE2eTauriCommand<T>(
       return clone(stopSession(stringArg(args, "sessionId")));
     case "terminal_session_rename":
       return clone(renameSession(stringArg(args, "sessionId"), stringArg(args, "label")));
+    case "terminal_session_output":
+      return clone(terminalOutput(stringArg(args, "sessionId")));
+    case "terminal_image_upload":
+    case "terminal_image_upload_path":
+      return clone({
+        path: "/workspace/.slavey/terminal-images/mock-image.png",
+        fileName: "mock-image.png",
+        bytes: 128,
+        mimeType: "image/png",
+      });
     case "terminal_write":
     case "terminal_resize":
       return undefined as T;
@@ -559,6 +588,14 @@ export async function invokeE2eTauriCommand<T>(
       return clone(killProcess(stringArg(args, "processId")));
     case "process_logs":
       return clone(processLogs(stringArg(args, "processId")));
+    case "git_changes_for_path":
+      return clone({
+        ...gitPathChanges,
+        root: stringArg(args, "root"),
+        repoRoot: stringArg(args, "root"),
+      });
+    case "git_file_diff_for_path":
+      return clone(fileDiff(stringArg(args, "path")));
     case "git_worktree_create_for_employee":
       return clone(withWorktree(stringArg(args, "employeeId")));
     case "git_worktree_remove_for_employee":
@@ -649,6 +686,15 @@ function withoutTerminal(employeeId: string): Employee {
   return { ...employeeById(employeeId), terminalSessionId: null, status: "stopped" };
 }
 
+function withStatus(employeeId: string, status: Employee["status"]): Employee {
+  return { ...employeeById(employeeId), status };
+}
+
+function withWorkingFolder(input: SetEmployeeWorkingFolderInput | null): Employee {
+  const employee = employeeById(input?.employeeId ?? "");
+  return { ...employee, cwd: input?.path ?? employee.cwd };
+}
+
 function withWorktree(employeeId: string): Employee {
   const employee = employeeById(employeeId);
   return {
@@ -682,6 +728,25 @@ function stopSession(sessionId: string): TerminalSessionRecord {
 function renameSession(sessionId: string, label: string): TerminalSessionRecord {
   const session = terminalSessions.find((item) => item.sessionId === sessionId) ?? terminalSessions[0];
   return { ...session, label };
+}
+
+function terminalOutput(sessionId: string): string {
+  if (sessionId === "term-frontend") {
+    return [
+      "$ npm run test:web:run",
+      "",
+      "> slavey@0.1.0 test:web:run",
+      "> vitest run",
+      "",
+      "✓ src/components/__tests__/EmployeeScene.test.tsx",
+      "✓ src/components/__tests__/AppShell.test.tsx",
+      "",
+      "Test Files  7 passed (7)",
+      "Tests       24 passed (24)",
+      "",
+    ].join("\r\n");
+  }
+  return "";
 }
 
 function createMockEmployee(input: CreateEmployeeInput | null): Employee {
