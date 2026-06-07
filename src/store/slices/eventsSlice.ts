@@ -8,7 +8,7 @@ type EventsSlice = Pick<
 >;
 
 export const createEventsSlice: AppStoreSlice<EventsSlice> = (set, get) => ({
-  activeTab: "terminal",
+  activeTab: "office",
   logs: [],
 
   setActiveTab: (tab) => {

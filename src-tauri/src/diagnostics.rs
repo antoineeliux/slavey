@@ -551,7 +551,9 @@ mod tests {
             session_id: "term-1".to_string(),
             employee_id: "employee-1".to_string(),
             profile: TerminalLaunchProfile::Shell,
+            active_profile: Some(TerminalLaunchProfile::Shell),
             cwd: "/tmp".to_string(),
+            current_cwd: Some("/tmp".to_string()),
             status: TerminalSessionStatus::Running,
             exit_code: None,
             started_at: 1,
@@ -560,6 +562,10 @@ mod tests {
             stop_reason: None,
             label: "Shell".to_string(),
             last_output_at: None,
+            last_prompt_submitted_at: None,
+            last_prompt_ready_at: None,
+            last_approval_prompt_at: None,
+            last_output_tail: String::new(),
             message: None,
         }];
 

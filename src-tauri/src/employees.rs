@@ -21,8 +21,8 @@ use crate::{
     processes::ProcessManager,
     read_workspace_root,
     terminal::{
-        TerminalLaunchProfile, TerminalProfileSessionRequest, TerminalSessionStore,
-        DEFAULT_PTY_SIZE,
+        TerminalLaunchProfile, TerminalProfileSessionRequest, TerminalSessionStatus,
+        TerminalSessionStore, DEFAULT_PTY_SIZE,
     },
     AppState, WorkspaceRootHandle,
 };
@@ -33,6 +33,7 @@ pub enum EmployeeStatus {
     Idle,
     Starting,
     Running,
+    Standby,
     WaitingApproval,
     Blocked,
     Done,
@@ -82,6 +83,13 @@ pub struct EmployeeCreateRequest {
     pub name: String,
     pub role: EmployeeRole,
     pub cwd: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmployeeWorkingFolderRequest {
+    pub employee_id: String,
+    pub path: String,
 }
 
 #[derive(Clone, Default)]
@@ -216,6 +224,7 @@ pub fn employee_remove(
                 .terminal
                 .kill_session_for_employee(&removed.id, &session_id);
             if let Some(record) = state.terminal_sessions.stop(&session_id) {
+                state.agent_runtime.sync_from_terminal_session(&record);
                 emit_terminal_session_updated(&app, record);
             }
         }
@@ -240,12 +249,79 @@ pub fn employee_start_terminal(
 }
 
 #[tauri::command]
-pub fn employee_start_codex_terminal(
+pub fn employee_set_working_folder(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    payload: EmployeeWorkingFolderRequest,
+) -> Result<Employee, String> {
+    let employee = state
+        .employees
+        .get(&payload.employee_id)
+        .ok_or_else(|| "employee not found".to_string())?;
+    let workspace_root = state.workspace_root();
+    let cwd = resolve_employee_execution_dir(&workspace_root, &employee, Some(&payload.path))?;
+    let cwd_label = cwd.to_string_lossy().to_string();
+    let updated = state
+        .employees
+        .update(&payload.employee_id, |employee| {
+            employee.cwd = cwd_label.clone();
+        })
+        .ok_or_else(|| "employee not found".to_string())?;
+
+    emit_log(
+        &app,
+        LogLevel::Info,
+        format!("set {} working folder to {}", updated.name, updated.cwd),
+    );
+    emit_employee_updated(&app, updated.clone());
+    persist_or_log(&app, &state);
+    Ok(updated)
+}
+
+#[tauri::command]
+pub fn employee_set_standby(
     app: AppHandle,
     state: State<'_, AppState>,
     employee_id: String,
 ) -> Result<Employee, String> {
-    start_terminal_with_profile(app, state, employee_id, TerminalLaunchProfile::Codex)
+    let updated = state
+        .employees
+        .update(&employee_id, |employee| {
+            employee.status = EmployeeStatus::Standby;
+        })
+        .ok_or_else(|| "employee not found".to_string())?;
+
+    emit_log(
+        &app,
+        LogLevel::Info,
+        format!("put {} on standby", updated.name),
+    );
+    emit_employee_updated(&app, updated.clone());
+    persist_or_log(&app, &state);
+    Ok(updated)
+}
+
+#[tauri::command]
+pub fn employee_resume_from_standby(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    employee_id: String,
+) -> Result<Employee, String> {
+    let updated = state
+        .employees
+        .update(&employee_id, |employee| {
+            resume_employee_from_standby(employee, &state.terminal_sessions);
+        })
+        .ok_or_else(|| "employee not found".to_string())?;
+
+    emit_log(
+        &app,
+        LogLevel::Info,
+        format!("resumed {} from standby", updated.name),
+    );
+    emit_employee_updated(&app, updated.clone());
+    persist_or_log(&app, &state);
+    Ok(updated)
 }
 
 fn start_terminal_with_profile(
@@ -281,15 +357,44 @@ fn start_terminal_with_profile(
         profile,
         record_cwd,
     );
+    state
+        .agent_runtime
+        .sync_from_terminal_session(&session_record);
     let employees = state.employees.clone();
     let terminal_sessions = state.terminal_sessions.clone();
+    let agent_runtime = state.agent_runtime.clone();
+    let output_app = app.clone();
     let output_terminal_sessions = state.terminal_sessions.clone();
-    let on_output = Arc::new(move |session_id: &str| {
-        let _ = output_terminal_sessions.touch_output(session_id);
+    let on_output = Arc::new(move |session_id: &str, output: &str| {
+        if let Some(record) = output_terminal_sessions.record_output(session_id, output) {
+            agent_runtime.sync_from_terminal_session(&record);
+            emit_terminal_session_updated(&output_app, record);
+        }
+    });
+    let active_profile_app = app.clone();
+    let active_profile_terminal_sessions = state.terminal_sessions.clone();
+    let active_profile_agent_runtime = state.agent_runtime.clone();
+    let on_active_profile_changed = Arc::new(
+        move |session_id: &str, active_profile: TerminalLaunchProfile| {
+            if let Some(record) =
+                active_profile_terminal_sessions.set_active_profile(session_id, active_profile)
+            {
+                active_profile_agent_runtime.sync_from_terminal_session(&record);
+                emit_terminal_session_updated(&active_profile_app, record);
+            }
+        },
+    );
+    let cwd_app = app.clone();
+    let cwd_terminal_sessions = state.terminal_sessions.clone();
+    let on_cwd_changed = Arc::new(move |session_id: &str, cwd: &str| {
+        if let Some(record) = cwd_terminal_sessions.set_current_cwd(session_id, cwd) {
+            emit_terminal_session_updated(&cwd_app, record);
+        }
     });
     let exit_app = app.clone();
     let exit_employee_id = employee_id.clone();
     let exit_session_id = session_id.clone();
+    let exit_agent_runtime = state.agent_runtime.clone();
     let exit_persist_context = TerminalPersistContext {
         workspace_root: state.workspace_root_handle(),
         employees: state.employees.clone(),
@@ -310,6 +415,8 @@ fn start_terminal_with_profile(
             size: DEFAULT_PTY_SIZE,
             profile,
             on_output,
+            on_active_profile_changed,
+            on_cwd_changed,
             on_exit: move |exit_code| {
                 let exit_code_i32 = i32::try_from(exit_code).unwrap_or(i32::MAX);
                 let next_status = if exit_code == 0 {
@@ -331,6 +438,7 @@ fn start_terminal_with_profile(
                 }
 
                 if let Some(record) = terminal_sessions.finish(&exit_session_id, exit_code_i32) {
+                    exit_agent_runtime.sync_from_terminal_session(&record);
                     emit_terminal_session_updated(&exit_app, record);
                 }
 
@@ -351,6 +459,7 @@ fn start_terminal_with_profile(
             &session_id,
             format!("failed to start {} terminal", profile.current_command()),
         ) {
+            state.agent_runtime.sync_from_terminal_session(&record);
             emit_terminal_session_updated(&app, record);
         }
         let failed = state
@@ -419,6 +528,7 @@ pub fn employee_stop_terminal(
             );
         }
         if let Some(record) = state.terminal_sessions.stop(&session_id) {
+            state.agent_runtime.sync_from_terminal_session(&record);
             emit_terminal_session_updated(&app, record);
         }
     }
@@ -501,6 +611,23 @@ fn mark_terminal_running(
     employee.current_command = Some(profile.current_command().to_string());
 }
 
+fn resume_employee_from_standby(employee: &mut Employee, terminal_sessions: &TerminalSessionStore) {
+    if let Some(session_id) = employee.terminal_session_id.as_deref() {
+        if let Some(session) = terminal_sessions.get(session_id) {
+            if session.status == TerminalSessionStatus::Running {
+                let profile = session.active_profile.unwrap_or(session.profile);
+                employee.status = EmployeeStatus::Running;
+                employee.current_command = Some(profile.current_command().to_string());
+                return;
+            }
+        }
+    }
+
+    employee.status = EmployeeStatus::Idle;
+    employee.terminal_session_id = None;
+    employee.current_command = None;
+}
+
 pub fn resolve_employee_execution_dir(
     workspace_root: &Path,
     employee: &Employee,
@@ -525,6 +652,12 @@ pub fn resolve_employee_execution_dir(
             return Err(
                 "employee has an isolated worktree; cwd must be inside the worktree".to_string(),
             );
+        }
+
+        if let Ok(cwd) = resolve_existing_dir(workspace_root, &employee.cwd) {
+            if cwd.starts_with(&worktree) {
+                return Ok(cwd);
+            }
         }
 
         return Ok(worktree);
@@ -658,6 +791,28 @@ mod tests {
     }
 
     #[test]
+    fn resume_from_standby_restores_running_terminal_command() {
+        let mut employee = sample_employee(None);
+        employee.status = EmployeeStatus::Standby;
+        employee.terminal_session_id = Some("term-1".to_string());
+        employee.current_command = Some("shell".to_string());
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Shell,
+            "/tmp".to_string(),
+        );
+        store.set_active_profile("term-1", TerminalLaunchProfile::Codex);
+
+        resume_employee_from_standby(&mut employee, &store);
+
+        assert_eq!(employee.status, EmployeeStatus::Running);
+        assert_eq!(employee.terminal_session_id.as_deref(), Some("term-1"));
+        assert_eq!(employee.current_command.as_deref(), Some("codex"));
+    }
+
+    #[test]
     fn execution_dir_without_worktree_uses_employee_cwd() {
         let root = test_root("exec-cwd");
         let cwd = root.join("project");
@@ -691,6 +846,19 @@ mod tests {
         let resolved = resolve_employee_execution_dir(&root, &employee, None).unwrap();
 
         assert_eq!(resolved, worktree);
+    }
+
+    #[test]
+    fn execution_dir_with_worktree_uses_employee_cwd_inside_worktree() {
+        let root = test_root("exec-worktree-cwd");
+        let worktree = root.join(".slavey").join("worktrees").join("employee-1");
+        let nested = worktree.join("packages").join("app");
+        std_fs::create_dir_all(&nested).unwrap();
+        let employee = sample_employee_with_cwd(nested.clone(), Some(worktree));
+
+        let resolved = resolve_employee_execution_dir(&root, &employee, None).unwrap();
+
+        assert_eq!(resolved, nested);
     }
 
     #[test]

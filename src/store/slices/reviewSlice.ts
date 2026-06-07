@@ -13,6 +13,9 @@ type ReviewSlice = Pick<
   | "worktreeChangedFiles"
   | "worktreeFileDiffs"
   | "selectedReviewFiles"
+  | "gitPathChanges"
+  | "gitPathFileDiffs"
+  | "selectedGitChangedFiles"
   | "createWorktree"
   | "removeWorktree"
   | "loadWorktreeStatus"
@@ -30,6 +33,9 @@ type ReviewSlice = Pick<
   | "applyWorktreeHandoff"
   | "abortWorktreeHandoff"
   | "selectReviewFile"
+  | "loadGitChangesForPath"
+  | "loadGitFileDiffForPath"
+  | "selectGitChangedFile"
 >;
 
 export const createReviewSlice: AppStoreSlice<ReviewSlice> = (set, get) => ({
@@ -42,6 +48,9 @@ export const createReviewSlice: AppStoreSlice<ReviewSlice> = (set, get) => ({
   worktreeChangedFiles: {},
   worktreeFileDiffs: {},
   selectedReviewFiles: {},
+  gitPathChanges: {},
+  gitPathFileDiffs: {},
+  selectedGitChangedFiles: {},
 
   createWorktree: async (employeeId) => {
     try {
@@ -100,6 +109,52 @@ export const createReviewSlice: AppStoreSlice<ReviewSlice> = (set, get) => ({
       }));
     } catch (error) {
       get().addLog(localLog("warn", `worktree status failed: ${formatError(error)}`));
+    }
+  },
+
+  loadGitChangesForPath: async (path) => {
+    try {
+      const changes = await commands.gitChangesForPath(path);
+      const requestedKey = gitPathKey(path);
+      const key = gitPathKey(changes.root);
+      const selected = get().selectedGitChangedFiles[key];
+      const nextSelected =
+        selected && changes.changedFiles.includes(selected)
+          ? selected
+          : changes.changedFiles[0] ?? null;
+      set((state) => ({
+        gitPathChanges: {
+          ...state.gitPathChanges,
+          [requestedKey]: changes,
+          [key]: changes,
+        },
+        selectedGitChangedFiles: {
+          ...state.selectedGitChangedFiles,
+          [requestedKey]: nextSelected,
+          [key]: nextSelected,
+        },
+      }));
+      if (nextSelected) {
+        await get().loadGitFileDiffForPath(changes.root, nextSelected);
+      }
+    } catch (error) {
+      get().addLog(localLog("warn", `git changes failed: ${formatError(error)}`));
+    }
+  },
+
+  loadGitFileDiffForPath: async (root, path) => {
+    try {
+      const diff = await commands.gitFileDiffForPath(root, path);
+      const key = gitPathKey(root);
+      set((state) => ({
+        selectedGitChangedFiles: { ...state.selectedGitChangedFiles, [key]: path },
+        gitPathFileDiffs: {
+          ...state.gitPathFileDiffs,
+          [gitPathFileKey(root, path)]: diff,
+        },
+      }));
+    } catch (error) {
+      get().addLog(localLog("warn", `git file diff failed: ${formatError(error)}`));
     }
   },
 
@@ -318,7 +373,25 @@ export const createReviewSlice: AppStoreSlice<ReviewSlice> = (set, get) => ({
       void get().loadWorktreeFileDiff(employeeId, path);
     }
   },
+
+  selectGitChangedFile: (root, path) => {
+    const key = gitPathKey(root);
+    set((state) => ({
+      selectedGitChangedFiles: { ...state.selectedGitChangedFiles, [key]: path },
+    }));
+    if (path) {
+      void get().loadGitFileDiffForPath(root, path);
+    }
+  },
 });
+
+export function gitPathKey(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+export function gitPathFileKey(root: string, path: string): string {
+  return `${gitPathKey(root)}:${path}`;
+}
 
 export async function refreshWorktreeReviewForEmployee(
   get: AppStoreGet,

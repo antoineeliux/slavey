@@ -19,10 +19,13 @@ import type {
   FileMetadata,
   FsEntry,
   FsSearchResult,
+  GitPathChanges,
   ManagedProcess,
   ProcessLogs,
   RolePolicy,
   TerminalDataPayload,
+  TerminalImageUploadInput,
+  TerminalImageUploadPathInput,
   TerminalSessionRecord,
   WorktreeCommit,
   WorktreeHandoffApplyResult,
@@ -62,6 +65,9 @@ export type AppStore = {
   worktreeChangedFiles: Record<string, string[]>;
   worktreeFileDiffs: Record<string, string>;
   selectedReviewFiles: Record<string, string | null>;
+  gitPathChanges: Record<string, GitPathChanges>;
+  gitPathFileDiffs: Record<string, string>;
+  selectedGitChangedFiles: Record<string, string | null>;
   recentFiles: string[];
   activeTab: AppTab;
   fileEntries: FsEntry[];
@@ -82,14 +88,17 @@ export type AppStore = {
   updateSettings: (settings: AppSettingsUpdate) => Promise<void>;
   createEmployee: (input: CreateEmployeeInput) => Promise<void>;
   removeEmployee: (employeeId: string) => Promise<void>;
-  selectEmployee: (employeeId: string) => Promise<void>;
+  selectEmployee: (employeeId: string | null) => Promise<void>;
+  setEmployeeWorkingFolder: (employeeId: string, path: string) => Promise<void>;
   startTerminal: (employeeId: string) => Promise<void>;
-  startCodexTerminal: (employeeId: string) => Promise<void>;
+  setEmployeeStandby: (employeeId: string) => Promise<void>;
+  resumeEmployeeFromStandby: (employeeId: string) => Promise<void>;
   stopTerminal: (employeeId: string) => Promise<void>;
   stopTerminalSession: (employeeId: string, sessionId: string) => Promise<void>;
   renameTerminalSession: (employeeId: string, sessionId: string, label: string) => Promise<void>;
   loadCodexCliStatus: () => Promise<void>;
   loadTerminalSessions: (employeeId?: string | null) => Promise<void>;
+  loadTerminalBuffer: (employeeId: string, sessionId: string) => Promise<void>;
   createWorktree: (employeeId: string) => Promise<void>;
   removeWorktree: (employeeId: string) => Promise<void>;
   createApproval: (input: CreateApprovalInput) => Promise<void>;
@@ -116,6 +125,9 @@ export type AppStore = {
   applyWorktreeHandoff: (employeeId: string) => Promise<void>;
   abortWorktreeHandoff: (employeeId: string) => Promise<void>;
   selectReviewFile: (employeeId: string, path: string | null) => void;
+  loadGitChangesForPath: (path: string) => Promise<void>;
+  loadGitFileDiffForPath: (root: string, path: string) => Promise<void>;
+  selectGitChangedFile: (root: string, path: string | null) => void;
   spawnProcess: (employeeId: string | null, command: string, cwd: string, title?: string) => Promise<void>;
   killProcess: (processId: string) => Promise<void>;
   loadProcessLogs: (processId: string, offset?: number | null) => Promise<void>;
@@ -129,6 +141,16 @@ export type AppStore = {
   clearRecentFiles: () => Promise<void>;
   removeRecentFile: (path: string) => Promise<void>;
   writeTerminal: (employeeId: string, sessionId: string, input: string) => Promise<void>;
+  insertTerminalImage: (
+    employeeId: string,
+    sessionId: string,
+    image: TerminalImageUploadInput,
+  ) => Promise<boolean>;
+  insertTerminalImagePath: (
+    employeeId: string,
+    sessionId: string,
+    image: TerminalImageUploadPathInput,
+  ) => Promise<boolean>;
   resizeTerminal: (employeeId: string, sessionId: string, cols: number, rows: number) => Promise<void>;
   appendTerminalData: (payload: TerminalDataPayload) => void;
   upsertTerminalSession: (session: TerminalSessionRecord) => void;

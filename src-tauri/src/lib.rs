@@ -21,7 +21,7 @@ use parking_lot::RwLock;
 use persistence::{AppStateSnapshotInput, PersistenceManager};
 use processes::ProcessManager;
 use tauri::Manager;
-use terminal::{TerminalManager, TerminalSessionStore};
+use terminal::{AgentRuntimeStore, TerminalManager, TerminalSessionStore};
 
 pub type WorkspaceRootHandle = Arc<RwLock<PathBuf>>;
 
@@ -30,6 +30,7 @@ pub struct AppState {
     pub employees: EmployeeManager,
     pub terminal: TerminalManager,
     pub terminal_sessions: TerminalSessionStore,
+    pub agent_runtime: AgentRuntimeStore,
     pub persistence: PersistenceManager,
     pub approvals: ApprovalManager,
     pub actions: ActionManager,
@@ -106,6 +107,7 @@ pub fn run() {
             let actions = ActionManager::default();
             let processes = ProcessManager::default();
             let terminal_sessions = TerminalSessionStore::default();
+            let agent_runtime = AgentRuntimeStore::default();
             if let Some(persisted) = &persisted {
                 employees.replace_all(persistence::restore_employees(
                     &workspace_root,
@@ -114,6 +116,7 @@ pub fn run() {
                 terminal_sessions.replace_all(terminal::restore_terminal_session_records(
                     &persisted.terminal_sessions,
                 ));
+                agent_runtime.sync_all_from_terminal_sessions(&terminal_sessions.list(None));
                 let restored_actions = restore_actions(&persisted.actions);
                 let restored_approvals = restore_approvals(&persisted.approvals, &restored_actions);
                 approvals.replace_all(restored_approvals);
@@ -131,6 +134,7 @@ pub fn run() {
                 employees,
                 terminal: TerminalManager::default(),
                 terminal_sessions,
+                agent_runtime,
                 persistence,
                 approvals,
                 actions,
@@ -159,8 +163,10 @@ pub fn run() {
             employees::employee_list,
             employees::employee_role_policies,
             employees::employee_remove,
+            employees::employee_resume_from_standby,
+            employees::employee_set_standby,
+            employees::employee_set_working_folder,
             employees::employee_start_terminal,
-            employees::employee_start_codex_terminal,
             employees::employee_stop_terminal,
             approvals::approval_create,
             approvals::approval_list,
@@ -179,6 +185,8 @@ pub fn run() {
             processes::process_list,
             processes::process_logs,
             processes::process_kill,
+            git::git_changes_for_path,
+            git::git_file_diff_for_path,
             git::git_is_repo,
             git::git_worktree_create_for_employee,
             git::git_worktree_status_for_employee,
@@ -202,8 +210,11 @@ pub fn run() {
             terminal::terminal_resize,
             terminal::terminal_session_list,
             terminal::terminal_session_get,
+            terminal::terminal_session_output,
             terminal::terminal_session_stop,
             terminal::terminal_session_rename,
+            terminal::uploads::terminal_image_upload,
+            terminal::uploads::terminal_image_upload_path,
             terminal::codex_cli_status,
             workspace::workspace_info,
             workspace::workspace_set_root,

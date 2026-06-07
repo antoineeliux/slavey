@@ -3,7 +3,18 @@ use std::{collections::HashMap, sync::Arc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use super::{TerminalLaunchProfile, TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE, TERMINAL_LABEL_MAX_CHARS};
+use super::{
+    agent_runtime::{
+        codex_output_has_visible_text, codex_output_suggests_approval_choice,
+        codex_output_suggests_approval_prompt, codex_output_suggests_prompt_ready,
+        codex_session_is_active, codex_session_is_waiting_for_approval,
+        codex_session_is_waiting_for_instruction, codex_session_should_track_prompt,
+        terminal_input_submits_prompt,
+    },
+    TerminalLaunchProfile, TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE, TERMINAL_LABEL_MAX_CHARS,
+};
+
+const PROMPT_DETECTION_OUTPUT_TAIL_CHARS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -29,7 +40,11 @@ pub struct TerminalSessionRecord {
     pub session_id: String,
     pub employee_id: String,
     pub profile: TerminalLaunchProfile,
+    #[serde(default)]
+    pub active_profile: Option<TerminalLaunchProfile>,
     pub cwd: String,
+    #[serde(default)]
+    pub current_cwd: Option<String>,
     pub status: TerminalSessionStatus,
     pub exit_code: Option<i32>,
     pub started_at: u64,
@@ -42,6 +57,14 @@ pub struct TerminalSessionRecord {
     pub label: String,
     #[serde(default)]
     pub last_output_at: Option<u64>,
+    #[serde(default)]
+    pub last_prompt_submitted_at: Option<u64>,
+    #[serde(default)]
+    pub last_prompt_ready_at: Option<u64>,
+    #[serde(default)]
+    pub last_approval_prompt_at: Option<u64>,
+    #[serde(default, skip_serializing)]
+    pub last_output_tail: String,
     #[serde(default)]
     pub message: Option<String>,
 }
@@ -64,7 +87,9 @@ impl TerminalSessionStore {
             session_id,
             employee_id,
             profile,
-            cwd,
+            active_profile: Some(profile),
+            cwd: cwd.clone(),
+            current_cwd: Some(cwd),
             status: TerminalSessionStatus::Running,
             exit_code: None,
             started_at: now,
@@ -73,6 +98,10 @@ impl TerminalSessionStore {
             stop_reason: None,
             label: format!("{} session", profile.display_label()),
             last_output_at: None,
+            last_prompt_submitted_at: None,
+            last_prompt_ready_at: None,
+            last_approval_prompt_at: None,
+            last_output_tail: String::new(),
             message: None,
         };
         let mut records = self.records.lock();
@@ -181,6 +210,120 @@ impl TerminalSessionStore {
         Some(record.clone())
     }
 
+    pub fn set_current_cwd(
+        &self,
+        session_id: &str,
+        current_cwd: impl Into<String>,
+    ) -> Option<TerminalSessionRecord> {
+        let current_cwd = current_cwd.into();
+        let mut records = self.records.lock();
+        let record = records.get_mut(session_id)?;
+        if record.status != TerminalSessionStatus::Running
+            || record.current_cwd.as_deref() == Some(current_cwd.as_str())
+        {
+            return None;
+        }
+        record.current_cwd = Some(current_cwd);
+        Some(record.clone())
+    }
+
+    pub fn record_output(&self, session_id: &str, output: &str) -> Option<TerminalSessionRecord> {
+        let mut records = self.records.lock();
+        let record = records.get_mut(session_id)?;
+        let now = crate::events::now_ms();
+        let previous_active_profile = record.active_profile;
+        let previous_prompt_ready_at = record.last_prompt_ready_at;
+        let previous_prompt_submitted_at = record.last_prompt_submitted_at;
+        let previous_approval_prompt_at = record.last_approval_prompt_at;
+        let detection_output = output_for_prompt_detection(&record.last_output_tail, output);
+        let codex_approval_prompt = codex_output_suggests_approval_prompt(output)
+            || (codex_output_suggests_approval_choice(output)
+                && codex_output_suggests_approval_prompt(&detection_output));
+        let codex_prompt_ready = codex_output_suggests_prompt_ready(output);
+
+        if record.status == TerminalSessionStatus::Running
+            && codex_approval_prompt
+            && (codex_session_is_active(record) || record.profile == TerminalLaunchProfile::Shell)
+        {
+            record.active_profile = Some(TerminalLaunchProfile::Codex);
+            record.last_output_at = Some(now);
+            record.last_prompt_ready_at = None;
+            record.last_approval_prompt_at = Some(now);
+        } else if record.status == TerminalSessionStatus::Running
+            && codex_prompt_ready
+            && (codex_session_is_active(record) || record.profile == TerminalLaunchProfile::Shell)
+        {
+            record.active_profile = Some(TerminalLaunchProfile::Codex);
+            record.last_output_at = Some(now);
+            record.last_prompt_ready_at = Some(now);
+            record.last_approval_prompt_at = None;
+        } else if (codex_session_is_waiting_for_instruction(record)
+            || codex_session_is_waiting_for_approval(record))
+            && !codex_output_has_visible_text(output)
+        {
+            // Codex redraws the prompt with control-only terminal output. Keep the
+            // owner-turn state stable until real output or a submitted prompt arrives.
+        } else {
+            record.last_output_at = Some(now);
+            record.last_prompt_ready_at = None;
+            record.last_approval_prompt_at = None;
+        }
+        record.last_output_tail = terminal_output_tail(&detection_output);
+
+        let activity_relevant_change = previous_active_profile != record.active_profile
+            || previous_prompt_ready_at != record.last_prompt_ready_at
+            || previous_prompt_submitted_at != record.last_prompt_submitted_at
+            || previous_approval_prompt_at != record.last_approval_prompt_at;
+        activity_relevant_change.then(|| record.clone())
+    }
+
+    pub fn mark_prompt_submitted(
+        &self,
+        session_id: &str,
+        input: &str,
+    ) -> Option<TerminalSessionRecord> {
+        if !terminal_input_submits_prompt(input) {
+            return None;
+        }
+
+        let mut records = self.records.lock();
+        let record = records.get_mut(session_id)?;
+        if record.status != TerminalSessionStatus::Running
+            || !codex_session_should_track_prompt(record)
+        {
+            return None;
+        }
+
+        record.active_profile = Some(TerminalLaunchProfile::Codex);
+        record.last_prompt_submitted_at = Some(crate::events::now_ms());
+        record.last_prompt_ready_at = None;
+        record.last_approval_prompt_at = None;
+        record.last_output_tail.clear();
+        Some(record.clone())
+    }
+
+    pub fn set_active_profile(
+        &self,
+        session_id: &str,
+        active_profile: TerminalLaunchProfile,
+    ) -> Option<TerminalSessionRecord> {
+        let mut records = self.records.lock();
+        let record = records.get_mut(session_id)?;
+        if record.status != TerminalSessionStatus::Running
+            || record.active_profile == Some(active_profile)
+        {
+            return None;
+        }
+        record.active_profile = Some(active_profile);
+        if active_profile == TerminalLaunchProfile::Shell {
+            record.last_prompt_submitted_at = None;
+            record.last_prompt_ready_at = None;
+            record.last_approval_prompt_at = None;
+            record.last_output_tail.clear();
+        }
+        Some(record.clone())
+    }
+
     pub fn rename(&self, session_id: &str, label: &str) -> Result<TerminalSessionRecord, String> {
         let label = cleaned_session_label(label)?;
         let mut records = self.records.lock();
@@ -238,10 +381,38 @@ fn normalize_session_record(mut record: TerminalSessionRecord) -> TerminalSessio
     if record.label.trim().is_empty() {
         record.label = format!("{} session", record.profile.display_label());
     }
+    if record.active_profile.is_none() {
+        record.active_profile = Some(record.profile);
+    }
+    if record.active_profile == Some(TerminalLaunchProfile::Shell) {
+        record.last_prompt_submitted_at = None;
+        record.last_prompt_ready_at = None;
+        record.last_approval_prompt_at = None;
+        record.last_output_tail.clear();
+    }
+    if record.current_cwd.as_deref().is_none_or(str::is_empty) {
+        record.current_cwd = Some(record.cwd.clone());
+    }
     if record.stopped_at.is_none() {
         record.stopped_at = record.ended_at;
     }
     record
+}
+
+fn output_for_prompt_detection(previous_tail: &str, output: &str) -> String {
+    if previous_tail.is_empty() {
+        return terminal_output_tail(output);
+    }
+    terminal_output_tail(&format!("{previous_tail}{output}"))
+}
+
+fn terminal_output_tail(output: &str) -> String {
+    let tail = output
+        .chars()
+        .rev()
+        .take(PROMPT_DETECTION_OUTPUT_TAIL_CHARS)
+        .collect::<Vec<_>>();
+    tail.into_iter().rev().collect()
 }
 
 fn set_terminal_stopped(
@@ -402,6 +573,113 @@ mod tests {
     }
 
     #[test]
+    fn running_session_active_profile_can_switch_without_changing_launch_profile() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Shell,
+            "/tmp".to_string(),
+        );
+
+        let updated = store
+            .set_active_profile("term-1", TerminalLaunchProfile::Codex)
+            .unwrap();
+
+        assert_eq!(updated.profile, TerminalLaunchProfile::Shell);
+        assert_eq!(updated.active_profile, Some(TerminalLaunchProfile::Codex));
+    }
+
+    #[test]
+    fn codex_prompt_turn_state_tracks_ready_and_submitted_prompts() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Shell,
+            "/tmp".to_string(),
+        );
+
+        let ready = store.record_output("term-1", "\r\n› ").unwrap();
+
+        assert_eq!(ready.profile, TerminalLaunchProfile::Shell);
+        assert_eq!(ready.active_profile, Some(TerminalLaunchProfile::Codex));
+        assert!(ready.last_prompt_ready_at.is_some());
+
+        let submitted = store.mark_prompt_submitted("term-1", "\r").unwrap();
+
+        assert_eq!(submitted.active_profile, Some(TerminalLaunchProfile::Codex));
+        assert!(submitted.last_prompt_submitted_at.is_some());
+        assert_eq!(submitted.last_prompt_ready_at, None);
+    }
+
+    #[test]
+    fn codex_approval_prompt_tracks_separate_owner_approval_state() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+        store.mark_prompt_submitted("term-1", "\r").unwrap();
+
+        let approval = store
+            .record_output("term-1", "Allow command to run?\n› Yes / No")
+            .unwrap();
+
+        assert_eq!(approval.active_profile, Some(TerminalLaunchProfile::Codex));
+        assert!(approval.last_approval_prompt_at.is_some());
+        assert_eq!(approval.last_prompt_ready_at, None);
+    }
+
+    #[test]
+    fn codex_approval_prompt_detection_spans_output_chunks() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+        store.mark_prompt_submitted("term-1", "\r").unwrap();
+
+        assert!(store.record_output("term-1", "Allow ").is_none());
+        let approval = store
+            .record_output("term-1", "command to run?\n› Yes / No")
+            .unwrap();
+
+        assert_eq!(approval.active_profile, Some(TerminalLaunchProfile::Codex));
+        assert!(approval.last_approval_prompt_at.is_some());
+        assert_eq!(approval.last_prompt_ready_at, None);
+    }
+
+    #[test]
+    fn shell_profile_switch_clears_stale_codex_owner_prompt_state() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Shell,
+            "/tmp".to_string(),
+        );
+        store.record_output("term-1", "\r\n› ").unwrap();
+        store.mark_prompt_submitted("term-1", "\r").unwrap();
+        store
+            .record_output("term-1", "Allow command to run?\n› Yes / No")
+            .unwrap();
+
+        let shell = store
+            .set_active_profile("term-1", TerminalLaunchProfile::Shell)
+            .unwrap();
+
+        assert_eq!(shell.active_profile, Some(TerminalLaunchProfile::Shell));
+        assert_eq!(shell.last_prompt_submitted_at, None);
+        assert_eq!(shell.last_prompt_ready_at, None);
+        assert_eq!(shell.last_approval_prompt_at, None);
+    }
+
+    #[test]
     fn terminal_session_history_is_capped_per_employee() {
         let store = TerminalSessionStore::default();
         let records = (0..(TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE + 5))
@@ -421,7 +699,9 @@ mod tests {
             session_id: "term-1".to_string(),
             employee_id: "employee-1".to_string(),
             profile: TerminalLaunchProfile::Codex,
+            active_profile: None,
             cwd: "/tmp".to_string(),
+            current_cwd: None,
             status: TerminalSessionStatus::Running,
             exit_code: None,
             started_at: 1,
@@ -430,6 +710,10 @@ mod tests {
             stop_reason: None,
             label: String::new(),
             last_output_at: None,
+            last_prompt_submitted_at: None,
+            last_prompt_ready_at: None,
+            last_approval_prompt_at: None,
+            last_output_tail: String::new(),
             message: None,
         }]);
 
@@ -439,6 +723,10 @@ mod tests {
             Some(TerminalStopReason::AppRestarted)
         );
         assert_eq!(restored[0].label, "Codex session");
+        assert_eq!(
+            restored[0].active_profile,
+            Some(TerminalLaunchProfile::Codex)
+        );
         assert_eq!(
             restored[0].message.as_deref(),
             Some("app restarted before terminal session completed")
@@ -452,7 +740,9 @@ mod tests {
             session_id: format!("term-{started_at}"),
             employee_id: employee_id.to_string(),
             profile: TerminalLaunchProfile::Shell,
+            active_profile: Some(TerminalLaunchProfile::Shell),
             cwd: "/tmp".to_string(),
+            current_cwd: Some("/tmp".to_string()),
             status: TerminalSessionStatus::Stopped,
             exit_code: None,
             started_at,
@@ -461,6 +751,10 @@ mod tests {
             stop_reason: Some(TerminalStopReason::UserStopped),
             label: "Shell session".to_string(),
             last_output_at: None,
+            last_prompt_submitted_at: None,
+            last_prompt_ready_at: None,
+            last_approval_prompt_at: None,
+            last_output_tail: String::new(),
             message: None,
         }
     }

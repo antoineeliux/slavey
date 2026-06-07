@@ -41,10 +41,10 @@ export const createBootstrapSlice: AppStoreSlice<BootstrapSlice> = (_set, get) =
         snapshot.selectedEmployeeId &&
         snapshot.employees.some((employee) => employee.id === snapshot.selectedEmployeeId)
           ? snapshot.selectedEmployeeId
-          : snapshot.employees[0]?.id ?? null;
+          : null;
       const activeTab =
         get().activeTab === bootstrapStartActiveTab
-          ? snapshot.activeTab ?? "terminal"
+          ? "office"
           : get().activeTab;
       _set({
         employees: snapshot.employees,
@@ -70,6 +70,7 @@ export const createBootstrapSlice: AppStoreSlice<BootstrapSlice> = (_set, get) =
       const targetDir = selected?.cwd ?? workspaceRoot;
       if (targetDir) {
         await get().loadDir(targetDir);
+        await get().loadGitChangesForPath(targetDir);
       }
     } catch (error) {
       get().addLog(localLog("error", `backend unavailable: ${formatError(error)}`));

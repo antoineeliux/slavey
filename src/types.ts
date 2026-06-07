@@ -2,6 +2,7 @@ export type EmployeeStatus =
   | "idle"
   | "starting"
   | "running"
+  | "standby"
   | "waiting_approval"
   | "blocked"
   | "done"
@@ -49,7 +50,9 @@ export type TerminalSessionRecord = {
   sessionId: string;
   employeeId: string;
   profile: TerminalSessionProfile;
+  activeProfile?: TerminalSessionProfile | null;
   cwd: string;
+  currentCwd?: string | null;
   status: TerminalSessionStatus;
   exitCode?: number | null;
   startedAt: number;
@@ -58,7 +61,27 @@ export type TerminalSessionRecord = {
   stopReason?: TerminalStopReason | null;
   label: string;
   lastOutputAt?: number | null;
+  lastPromptSubmittedAt?: number | null;
+  lastPromptReadyAt?: number | null;
+  lastApprovalPromptAt?: number | null;
   message?: string | null;
+};
+
+export type TerminalImageUploadInput = {
+  fileName: string;
+  mimeType?: string | null;
+  dataBase64: string;
+};
+
+export type TerminalImageUploadPathInput = {
+  path: string;
+};
+
+export type TerminalImageUploadResult = {
+  path: string;
+  fileName: string;
+  bytes: number;
+  mimeType: string;
 };
 
 export type TerminalSessionUpdatedPayload = {
@@ -72,14 +95,101 @@ export type EmployeeUpdatedPayload = {
 export type EmployeeActivityStatus =
   | "idle"
   | "shell_running"
+  | "codex_starting"
   | "codex_running"
+  | "codex_waiting_instruction"
+  | "codex_waiting_approval"
+  | "standby"
   | "action_pending_approval"
   | "action_running"
   | "process_running"
   | "review_needed"
   | "handoff_ready"
+  | "done_clean"
   | "blocked"
   | "stopped";
+
+export type EmployeeLifecycleState = "active" | "standby" | "stopped" | "failed";
+
+export type EmployeeBehaviorState =
+  | "at_desk_idle"
+  | "at_desk_terminal"
+  | "at_desk_working"
+  | "coming_to_owner"
+  | "waiting_at_owner"
+  | "on_standby"
+  | "offline";
+
+export type EmployeeSessionKind = "none" | "shell" | "codex" | "claude";
+
+export type EmployeeRuntimeSessionState = "closed" | "starting" | "open" | "exited";
+
+export type EmployeeRuntimeSession = {
+  kind: EmployeeSessionKind;
+  state: EmployeeRuntimeSessionState;
+};
+
+export type AgentKind = "none" | "codex" | "claude";
+
+export type AgentRuntimeState =
+  | "not_active"
+  | "starting"
+  | "thinking"
+  | "waiting_prompt"
+  | "waiting_approval"
+  | "completed"
+  | "failed";
+
+export type AgentRuntimeSnapshot = {
+  kind: AgentKind;
+  state: AgentRuntimeState;
+  lastStateChangedAt?: number | null;
+};
+
+export type EmployeeWorkPhase =
+  | "idle"
+  | "shell_open"
+  | "agent_starting"
+  | "agent_working"
+  | "tool_running"
+  | "waiting_for_owner"
+  | "ready_to_report"
+  | "blocked";
+
+export type EmployeeTurnOwner = "none" | "owner" | "agent" | "tool";
+
+export type EmployeeAttentionReason =
+  | "needs_instruction"
+  | "needs_approval"
+  | "needs_app_approval"
+  | "needs_terminal_approval"
+  | "ready_to_report"
+  | "review_needed"
+  | "handoff_ready"
+  | "blocked_needs_help";
+
+export type EmployeeAttentionPriority = "none" | "normal" | "urgent";
+
+export type EmployeeWorkState = {
+  phase: EmployeeWorkPhase;
+  turnOwner: EmployeeTurnOwner;
+};
+
+export type EmployeeTerminalActivityState =
+  | "none"
+  | "shell_running"
+  | "codex_starting"
+  | "codex_running"
+  | "codex_waiting_instruction"
+  | "codex_waiting_approval"
+  | "completed"
+  | "failed";
+
+export type EmployeeAttention = {
+  required: boolean;
+  reason?: EmployeeAttentionReason | null;
+  priority: EmployeeAttentionPriority;
+};
 
 export type EmployeeReviewCounts = {
   changedFiles: number;
@@ -90,6 +200,14 @@ export type EmployeeReviewCounts = {
 export type EmployeeActivity = {
   employeeId: string;
   status: EmployeeActivityStatus;
+  lifecycle?: EmployeeLifecycleState;
+  behavior?: EmployeeBehaviorState;
+  session?: EmployeeRuntimeSession;
+  agent?: AgentRuntimeSnapshot;
+  work?: EmployeeWorkState;
+  attention?: EmployeeAttention;
+  terminalState?: EmployeeTerminalActivityState;
+  activityReason?: string | null;
   label: string;
   details?: string | null;
   lastActivityAt?: number | null;
@@ -160,7 +278,7 @@ export type FileMetadata = {
   insideWorkspace: boolean;
 };
 
-export type AppTab = "terminal" | "editor" | "settings";
+export type AppTab = "office" | "terminal" | "editor" | "settings";
 
 export type AppSettings = {
   defaultTerminalProfile: TerminalSessionProfile;
@@ -306,6 +424,16 @@ export type WorktreeStatus = {
   isRepo: boolean;
   dirty: boolean;
   changes: string[];
+};
+
+export type GitPathChanges = {
+  root: string;
+  repoRoot?: string | null;
+  isRepo: boolean;
+  clean: boolean;
+  status: string[];
+  changedFiles: string[];
+  files: WorktreeReviewFile[];
 };
 
 export type WorktreeReview = {

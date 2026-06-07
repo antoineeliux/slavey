@@ -1,4 +1,7 @@
-use std::{fs as std_fs, path::Path};
+use std::{
+    fs as std_fs,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -48,6 +51,18 @@ pub(crate) use self::{
 };
 
 const MAX_REVIEW_RECENT_COMMITS: usize = 5;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitPathChanges {
+    pub root: String,
+    pub repo_root: Option<String>,
+    pub is_repo: bool,
+    pub clean: bool,
+    pub status: Vec<String>,
+    pub changed_files: Vec<String>,
+    pub files: Vec<WorktreeReviewFile>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -129,6 +144,64 @@ pub fn git_is_repo(state: State<'_, AppState>, path: Option<String>) -> bool {
     };
 
     git_success(&root, &["rev-parse", "--show-toplevel"])
+}
+
+#[tauri::command]
+pub fn git_changes_for_path(
+    state: State<'_, AppState>,
+    root: String,
+) -> Result<GitPathChanges, String> {
+    let workspace_root = state.workspace_root();
+    let root = resolve_existing_dir(&workspace_root, &root)?;
+    let Some(repo_root) = repo_root_for_path(&workspace_root, &root)? else {
+        return Ok(GitPathChanges {
+            root: root.to_string_lossy().to_string(),
+            repo_root: None,
+            is_repo: false,
+            clean: true,
+            status: Vec::new(),
+            changed_files: Vec::new(),
+            files: Vec::new(),
+        });
+    };
+
+    let status = parse_status_lines(&run_git(&repo_root, &["status", "--porcelain"])?);
+    let changed_files = parse_changed_files(&status);
+    let files = review_files_from_status(&status);
+    Ok(GitPathChanges {
+        root: root.to_string_lossy().to_string(),
+        repo_root: Some(repo_root.to_string_lossy().to_string()),
+        is_repo: true,
+        clean: status.is_empty(),
+        status,
+        changed_files,
+        files,
+    })
+}
+
+#[tauri::command]
+pub fn git_file_diff_for_path(
+    state: State<'_, AppState>,
+    root: String,
+    path: String,
+) -> Result<String, String> {
+    let workspace_root = state.workspace_root();
+    let root = resolve_existing_dir(&workspace_root, &root)?;
+    let repo_root = repo_root_for_path(&workspace_root, &root)?
+        .ok_or_else(|| "folder is not inside a git repository".to_string())?;
+    let relative = resolve_safe_worktree_relative_path(&repo_root, &path)?;
+    let staged = file_diff_or_marker(&repo_root, &["diff", "--cached", "--", &relative]);
+    let unstaged = file_diff_or_marker(&repo_root, &["diff", "--", &relative]);
+    let status = parse_status_lines(&run_git(&repo_root, &["status", "--porcelain"])?);
+    match (staged.trim().is_empty(), unstaged.trim().is_empty()) {
+        (true, true) if is_untracked_file(&status, &relative) => {
+            untracked_file_preview(&repo_root, &relative)
+        }
+        (true, true) => Ok(String::new()),
+        (false, true) => Ok(format!("staged diff\n{staged}")),
+        (true, false) => Ok(format!("unstaged diff\n{unstaged}")),
+        (false, false) => Ok(format!("staged diff\n{staged}\nunstaged diff\n{unstaged}")),
+    }
 }
 
 #[tauri::command]
@@ -691,6 +764,16 @@ fn git_log(cwd: &Path, limit: usize) -> Result<Vec<WorktreeCommit>, String> {
         &["log", "-n", &limit, "--pretty=format:%H%x1f%h%x1f%ct%x1f%s"],
     )?;
     Ok(parse_commit_log(&output))
+}
+
+fn repo_root_for_path(workspace_root: &Path, path: &Path) -> Result<Option<PathBuf>, String> {
+    let Ok(output) = run_git(path, &["rev-parse", "--show-toplevel"]) else {
+        return Ok(None);
+    };
+    let Some(repo_root) = non_empty_trimmed(output) else {
+        return Ok(None);
+    };
+    resolve_existing_dir(workspace_root, &repo_root).map(Some)
 }
 
 fn git_commits_between(cwd: &Path, base: &str, head: &str) -> Result<Vec<WorktreeCommit>, String> {

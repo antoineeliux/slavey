@@ -17,6 +17,9 @@ type EmployeesSlice = Pick<
   | "createEmployee"
   | "removeEmployee"
   | "selectEmployee"
+  | "setEmployeeWorkingFolder"
+  | "setEmployeeStandby"
+  | "resumeEmployeeFromStandby"
   | "upsertEmployee"
 >;
 
@@ -75,9 +78,7 @@ export const createEmployeesSlice: AppStoreSlice<EmployeesSlice> = (set, get) =>
         const employees = state.employees.filter((employee) => employee.id !== employeeId);
         const { [employeeId]: _activity, ...employeeActivities } = state.employeeActivities;
         const selectedEmployeeId =
-          state.selectedEmployeeId === employeeId
-            ? employees[0]?.id ?? null
-            : state.selectedEmployeeId;
+          state.selectedEmployeeId === employeeId ? null : state.selectedEmployeeId;
         return { employees, employeeActivities, selectedEmployeeId };
       });
       await get().persistUiState();
@@ -90,11 +91,48 @@ export const createEmployeesSlice: AppStoreSlice<EmployeesSlice> = (set, get) =>
 
   selectEmployee: async (employeeId) => {
     set({ selectedEmployeeId: employeeId });
+    if (!employeeId) {
+      await get().loadDir(get().workspaceRoot);
+      await get().persistUiState();
+      return;
+    }
     const employee = get().employees.find((item) => item.id === employeeId);
     if (employee) {
       await get().loadDir(employee.cwd);
     }
     await get().persistUiState();
+  },
+
+  setEmployeeWorkingFolder: async (employeeId, path) => {
+    try {
+      const employee = await commands.employeeSetWorkingFolder({ employeeId, path });
+      get().upsertEmployee(employee);
+      await get().loadDir(employee.cwd);
+      await get().loadGitChangesForPath(employee.cwd);
+      await get().persistUiState();
+    } catch (error) {
+      get().addLog(localLog("error", `set working folder failed: ${formatError(error)}`));
+    }
+  },
+
+  setEmployeeStandby: async (employeeId) => {
+    try {
+      const employee = await commands.employeeSetStandby(employeeId);
+      get().upsertEmployee(employee);
+      void get().refreshEmployeeActivity(employee.id);
+    } catch (error) {
+      get().addLog(localLog("error", `standby failed: ${formatError(error)}`));
+    }
+  },
+
+  resumeEmployeeFromStandby: async (employeeId) => {
+    try {
+      const employee = await commands.employeeResumeFromStandby(employeeId);
+      get().upsertEmployee(employee);
+      void get().refreshEmployeeActivity(employee.id);
+    } catch (error) {
+      get().addLog(localLog("error", `resume failed: ${formatError(error)}`));
+    }
   },
 
   upsertEmployee: (employee) => {
@@ -106,7 +144,7 @@ export const createEmployeesSlice: AppStoreSlice<EmployeesSlice> = (set, get) =>
       employees.sort((a, b) => a.createdAt - b.createdAt);
       return {
         employees,
-        selectedEmployeeId: state.selectedEmployeeId ?? employee.id,
+        selectedEmployeeId: state.selectedEmployeeId,
       };
     });
   },

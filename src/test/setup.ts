@@ -70,7 +70,7 @@ const tauriMocks = vi.hoisted(() => {
     processes: [],
     processLogs: [],
     selectedEmployeeId: null,
-    activeTab: "terminal",
+    activeTab: "office",
     recentFiles: [],
     recentWorkspaces: ["/workspace"],
     settings,
@@ -124,6 +124,14 @@ const tauriMocks = vi.hoisted(() => {
         case "terminal_session_list":
         case "fs_list_dir":
           return [];
+        case "terminal_image_upload":
+        case "terminal_image_upload_path":
+          return {
+            path: "/workspace/.slavey/terminal-images/test-image.png",
+            fileName: "test-image.png",
+            bytes: 128,
+            mimeType: "image/png",
+          };
         case "codex_cli_status":
           return codexCliStatus;
         case "settings_update":

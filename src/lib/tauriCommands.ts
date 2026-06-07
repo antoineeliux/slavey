@@ -17,10 +17,14 @@ import type {
   FilePayload,
   FsEntry,
   FsSearchResult,
+  GitPathChanges,
   ManagedProcess,
   ProcessLogs,
   RolePolicy,
   TerminalSessionRecord,
+  TerminalImageUploadInput,
+  TerminalImageUploadPathInput,
+  TerminalImageUploadResult,
   WorktreeCommit,
   WorktreeHandoffApplyResult,
   WorktreeHandoffPreflight,
@@ -48,6 +52,11 @@ export type CreateEmployeeInput = {
   name: string;
   role: EmployeeRole;
   cwd?: string;
+};
+
+export type SetEmployeeWorkingFolderInput = {
+  employeeId: string;
+  path: string;
 };
 
 export type CreateApprovalInput = {
@@ -114,6 +123,12 @@ export function employeeCreate(payload: CreateEmployeeInput): Promise<Employee> 
   return invokeCommand("employee_create", { payload });
 }
 
+export function employeeSetWorkingFolder(
+  payload: SetEmployeeWorkingFolderInput,
+): Promise<Employee> {
+  return invokeCommand("employee_set_working_folder", { payload });
+}
+
 export function employeeRemove(employeeId: string): Promise<void> {
   return invokeCommand("employee_remove", { employeeId });
 }
@@ -126,8 +141,12 @@ export function employeeStartTerminal(employeeId: string): Promise<Employee> {
   return invokeCommand("employee_start_terminal", { employeeId });
 }
 
-export function employeeStartCodexTerminal(employeeId: string): Promise<Employee> {
-  return invokeCommand("employee_start_codex_terminal", { employeeId });
+export function employeeSetStandby(employeeId: string): Promise<Employee> {
+  return invokeCommand("employee_set_standby", { employeeId });
+}
+
+export function employeeResumeFromStandby(employeeId: string): Promise<Employee> {
+  return invokeCommand("employee_resume_from_standby", { employeeId });
 }
 
 export function employeeStopTerminal(employeeId: string): Promise<Employee> {
@@ -163,6 +182,13 @@ export function terminalSessionRename(
   return invokeCommand("terminal_session_rename", { employeeId, sessionId, label });
 }
 
+export function terminalSessionOutput(
+  employeeId: string,
+  sessionId: string,
+): Promise<string> {
+  return invokeCommand("terminal_session_output", { employeeId, sessionId });
+}
+
 export function terminalWrite(
   employeeId: string,
   sessionId: string,
@@ -178,6 +204,18 @@ export function terminalResize(
   rows: number,
 ): Promise<void> {
   return invokeCommand("terminal_resize", { employeeId, sessionId, cols, rows });
+}
+
+export function terminalImageUpload(
+  payload: TerminalImageUploadInput,
+): Promise<TerminalImageUploadResult> {
+  return invokeCommand("terminal_image_upload", { payload });
+}
+
+export function terminalImageUploadPath(
+  payload: TerminalImageUploadPathInput,
+): Promise<TerminalImageUploadResult> {
+  return invokeCommand("terminal_image_upload_path", { payload });
 }
 
 export function codexCliStatus(): Promise<CodexCliStatus> {
@@ -259,6 +297,14 @@ export function processLogs(processId: string, offset?: number | null): Promise<
 
 export function gitWorktreeCreateForEmployee(employeeId: string): Promise<Employee> {
   return invokeCommand("git_worktree_create_for_employee", { employeeId });
+}
+
+export function gitChangesForPath(root: string): Promise<GitPathChanges> {
+  return invokeCommand("git_changes_for_path", { root });
+}
+
+export function gitFileDiffForPath(root: string, path: string): Promise<string> {
+  return invokeCommand("git_file_diff_for_path", { root, path });
 }
 
 export function gitWorktreeRemoveForEmployee(employeeId: string): Promise<Employee> {

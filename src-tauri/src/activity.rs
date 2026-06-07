@@ -12,7 +12,10 @@ use crate::{
     employees::{Employee, EmployeeStatus},
     git::{current_branch, parse_status_lines, run_git},
     processes::{ManagedProcess, ManagedProcessStatus},
-    terminal::{TerminalLaunchProfile, TerminalSessionRecord, TerminalSessionStatus},
+    terminal::{
+        agent_kind_for_command, AgentKind, AgentRuntimeSnapshot, AgentRuntimeState,
+        AgentRuntimeStore, TerminalLaunchProfile, TerminalSessionRecord, TerminalSessionStatus,
+    },
     AppState,
 };
 
@@ -21,14 +24,134 @@ use crate::{
 pub enum EmployeeActivityStatus {
     Idle,
     ShellRunning,
+    CodexStarting,
     CodexRunning,
+    CodexWaitingInstruction,
+    CodexWaitingApproval,
+    Standby,
     ActionPendingApproval,
     ActionRunning,
     ProcessRunning,
     ReviewNeeded,
     HandoffReady,
+    DoneClean,
     Blocked,
     Stopped,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmployeeLifecycleState {
+    Active,
+    Standby,
+    Stopped,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmployeeBehaviorState {
+    AtDeskIdle,
+    AtDeskTerminal,
+    AtDeskWorking,
+    WaitingAtOwner,
+    OnStandby,
+    Offline,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmployeeSessionKind {
+    None,
+    Shell,
+    Codex,
+    Claude,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmployeeSessionState {
+    Closed,
+    Starting,
+    Open,
+    Exited,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EmployeeRuntimeSession {
+    pub kind: EmployeeSessionKind,
+    pub state: EmployeeSessionState,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmployeeWorkPhase {
+    Idle,
+    ShellOpen,
+    AgentStarting,
+    AgentWorking,
+    ToolRunning,
+    WaitingForOwner,
+    ReadyToReport,
+    Blocked,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmployeeTurnOwner {
+    None,
+    Owner,
+    Agent,
+    Tool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmployeeAttentionReason {
+    NeedsInstruction,
+    NeedsAppApproval,
+    NeedsTerminalApproval,
+    ReadyToReport,
+    ReviewNeeded,
+    HandoffReady,
+    BlockedNeedsHelp,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmployeeAttentionPriority {
+    None,
+    Normal,
+    Urgent,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EmployeeAttention {
+    pub required: bool,
+    pub reason: Option<EmployeeAttentionReason>,
+    pub priority: EmployeeAttentionPriority,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EmployeeWorkState {
+    pub phase: EmployeeWorkPhase,
+    pub turn_owner: EmployeeTurnOwner,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmployeeTerminalActivityState {
+    None,
+    ShellRunning,
+    CodexStarting,
+    CodexRunning,
+    CodexWaitingInstruction,
+    CodexWaitingApproval,
+    Completed,
+    Failed,
 }
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -44,6 +167,14 @@ pub struct EmployeeReviewCounts {
 pub struct EmployeeActivity {
     pub employee_id: String,
     pub status: EmployeeActivityStatus,
+    pub lifecycle: EmployeeLifecycleState,
+    pub behavior: EmployeeBehaviorState,
+    pub session: EmployeeRuntimeSession,
+    pub agent: AgentRuntimeSnapshot,
+    pub work: EmployeeWorkState,
+    pub attention: EmployeeAttention,
+    pub terminal_state: EmployeeTerminalActivityState,
+    pub activity_reason: String,
     pub label: String,
     pub details: Option<String>,
     pub last_activity_at: Option<u64>,
@@ -61,6 +192,20 @@ struct ActivityDerivationInput<'a> {
     actions: &'a [Action],
     approvals: &'a [ApprovalRequest],
     processes: &'a [ManagedProcess],
+    agent_runtime: &'a AgentRuntimeStore,
+}
+
+#[derive(Debug, Clone)]
+struct ActivityResolution {
+    status: EmployeeActivityStatus,
+    behavior: EmployeeBehaviorState,
+    work: EmployeeWorkState,
+    attention: EmployeeAttention,
+    terminal_state: EmployeeTerminalActivityState,
+    label: String,
+    details: Option<String>,
+    active_action_id: Option<String>,
+    activity_reason: String,
 }
 
 #[tauri::command]
@@ -95,6 +240,7 @@ pub(crate) fn employee_activity_list_impl(state: &AppState) -> Vec<EmployeeActiv
                 actions: &actions,
                 approvals: &approvals,
                 processes: &processes,
+                agent_runtime: &state.agent_runtime,
             })
         })
         .collect()
@@ -114,6 +260,7 @@ fn employee_activity_for_state(state: &AppState, employee_id: &str) -> Option<Em
         actions: &actions,
         approvals: &approvals,
         processes: &processes,
+        agent_runtime: &state.agent_runtime,
     }))
 }
 
@@ -141,7 +288,25 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
         .collect::<Vec<_>>();
 
     let active_terminal = active_terminal_session(employee, &employee_sessions);
-    let active_terminal_session_id = active_terminal.map(|session| session.session_id.clone());
+    let active_terminal_session_id = if employee.status == EmployeeStatus::Stopped {
+        None
+    } else {
+        active_terminal.map(|session| session.session_id.clone())
+    };
+    let historical_agent_session = if matches!(
+        employee.status,
+        EmployeeStatus::Blocked | EmployeeStatus::Done | EmployeeStatus::Failed
+    ) {
+        latest_agent_session(&employee_sessions)
+    } else {
+        None
+    };
+    let agent_session = if employee.status == EmployeeStatus::Stopped {
+        None
+    } else {
+        active_terminal.or(historical_agent_session)
+    };
+    let agent = runtime_agent_for_employee(employee, agent_session, input.agent_runtime);
     let active_action = employee_actions
         .iter()
         .copied()
@@ -168,88 +333,252 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
         &review_counts,
         &mut blockers,
     );
+    let terminal_resolution =
+        active_terminal.map(|session| activity_for_terminal_session(session, agent));
+    let terminal_owner_wait = terminal_resolution.as_ref().filter(|resolution| {
+        matches!(
+            resolution.terminal_state,
+            EmployeeTerminalActivityState::CodexWaitingApproval
+                | EmployeeTerminalActivityState::CodexWaitingInstruction
+        )
+    });
+    let underlying_action_id = active_action
+        .map(|action| action.id.clone())
+        .or_else(|| pending_action.map(|action| action.id.clone()))
+        .or_else(|| pending_approval.and_then(|approval| approval.action_id.clone()));
 
-    let (status, label, details, active_action_id) = if let Some(action) = active_action {
-        (
-            EmployeeActivityStatus::ActionRunning,
-            "Running action".to_string(),
-            Some(action.title.clone()),
-            Some(action.id.clone()),
-        )
-    } else if let Some(action) = pending_action {
-        (
-            EmployeeActivityStatus::ActionPendingApproval,
-            "Waiting for approval".to_string(),
-            Some(action.title.clone()),
-            Some(action.id.clone()),
-        )
-    } else if let Some(approval) = pending_approval {
-        (
-            EmployeeActivityStatus::ActionPendingApproval,
-            "Waiting for approval".to_string(),
-            Some(approval.title.clone()),
-            approval.action_id.clone(),
-        )
-    } else if !active_process_ids.is_empty() {
-        (
-            EmployeeActivityStatus::ProcessRunning,
-            "Running process".to_string(),
-            Some(format!("{} managed process(es)", active_process_ids.len())),
+    let resolution = if employee.status == EmployeeStatus::Standby {
+        activity_resolution(
+            EmployeeActivityStatus::Standby,
+            EmployeeBehaviorState::OnStandby,
+            EmployeeWorkPhase::Idle,
+            EmployeeTurnOwner::None,
             None,
+            EmployeeAttentionPriority::None,
+            EmployeeTerminalActivityState::None,
+            "On standby",
+            Some("Parked in the waiting room".to_string()),
+            None,
+            "employee_standby",
         )
-    } else if let Some(session) = active_terminal {
-        match session.profile {
-            TerminalLaunchProfile::Shell => (
-                EmployeeActivityStatus::ShellRunning,
-                "Shell running".to_string(),
-                Some(session.cwd.clone()),
-                None,
-            ),
-            TerminalLaunchProfile::Codex => (
-                EmployeeActivityStatus::CodexRunning,
-                "Codex running".to_string(),
-                Some(session.cwd.clone()),
-                None,
-            ),
-        }
+    } else if employee.status == EmployeeStatus::Stopped {
+        activity_resolution(
+            EmployeeActivityStatus::Stopped,
+            EmployeeBehaviorState::Offline,
+            EmployeeWorkPhase::Idle,
+            EmployeeTurnOwner::None,
+            None,
+            EmployeeAttentionPriority::None,
+            EmployeeTerminalActivityState::None,
+            "Stopped",
+            None,
+            None,
+            "employee_stopped",
+        )
+    } else if let Some(terminal_activity) = terminal_owner_wait {
+        let mut terminal_activity = terminal_activity.clone();
+        terminal_activity.active_action_id = underlying_action_id.clone();
+        terminal_activity.activity_reason = match terminal_activity.terminal_state {
+            EmployeeTerminalActivityState::CodexWaitingApproval
+                if underlying_action_id.is_some() || !active_process_ids.is_empty() =>
+            {
+                "terminal_waiting_approval_over_active_work".to_string()
+            }
+            EmployeeTerminalActivityState::CodexWaitingApproval => {
+                "terminal_waiting_approval".to_string()
+            }
+            EmployeeTerminalActivityState::CodexWaitingInstruction
+                if underlying_action_id.is_some() || !active_process_ids.is_empty() =>
+            {
+                "terminal_waiting_instruction_over_active_work".to_string()
+            }
+            EmployeeTerminalActivityState::CodexWaitingInstruction => {
+                "terminal_waiting_instruction".to_string()
+            }
+            _ => terminal_activity.activity_reason,
+        };
+        terminal_activity
     } else if matches!(
         employee.status,
         EmployeeStatus::Blocked | EmployeeStatus::Failed
-    ) {
-        (
+    ) || !blockers.is_empty()
+    {
+        activity_resolution(
             EmployeeActivityStatus::Blocked,
-            "Blocked".to_string(),
+            EmployeeBehaviorState::WaitingAtOwner,
+            EmployeeWorkPhase::Blocked,
+            EmployeeTurnOwner::Owner,
+            Some(EmployeeAttentionReason::BlockedNeedsHelp),
+            EmployeeAttentionPriority::Urgent,
+            terminal_resolution
+                .as_ref()
+                .map(|resolution| resolution.terminal_state)
+                .unwrap_or(EmployeeTerminalActivityState::None),
+            "Blocked",
             employee.current_command.clone(),
-            None,
+            underlying_action_id.clone(),
+            "employee_blocked",
         )
+    } else if let Some(action) = active_action {
+        activity_resolution(
+            EmployeeActivityStatus::ActionRunning,
+            EmployeeBehaviorState::AtDeskTerminal,
+            EmployeeWorkPhase::ToolRunning,
+            EmployeeTurnOwner::Tool,
+            None,
+            EmployeeAttentionPriority::None,
+            terminal_resolution
+                .as_ref()
+                .map(|resolution| resolution.terminal_state)
+                .unwrap_or(EmployeeTerminalActivityState::None),
+            "Running action",
+            Some(action.title.clone()),
+            Some(action.id.clone()),
+            "action_running",
+        )
+    } else if let Some(action) = pending_action {
+        activity_resolution(
+            EmployeeActivityStatus::ActionPendingApproval,
+            EmployeeBehaviorState::WaitingAtOwner,
+            EmployeeWorkPhase::WaitingForOwner,
+            EmployeeTurnOwner::Owner,
+            Some(EmployeeAttentionReason::NeedsAppApproval),
+            EmployeeAttentionPriority::Urgent,
+            terminal_resolution
+                .as_ref()
+                .map(|resolution| resolution.terminal_state)
+                .unwrap_or(EmployeeTerminalActivityState::None),
+            "Waiting for approval",
+            Some(action.title.clone()),
+            Some(action.id.clone()),
+            "app_action_pending_approval",
+        )
+    } else if let Some(approval) = pending_approval {
+        activity_resolution(
+            EmployeeActivityStatus::ActionPendingApproval,
+            EmployeeBehaviorState::WaitingAtOwner,
+            EmployeeWorkPhase::WaitingForOwner,
+            EmployeeTurnOwner::Owner,
+            Some(EmployeeAttentionReason::NeedsAppApproval),
+            EmployeeAttentionPriority::Urgent,
+            terminal_resolution
+                .as_ref()
+                .map(|resolution| resolution.terminal_state)
+                .unwrap_or(EmployeeTerminalActivityState::None),
+            "Waiting for approval",
+            Some(approval.title.clone()),
+            approval.action_id.clone(),
+            "app_approval_pending",
+        )
+    } else if !active_process_ids.is_empty() {
+        activity_resolution(
+            EmployeeActivityStatus::ProcessRunning,
+            EmployeeBehaviorState::AtDeskTerminal,
+            EmployeeWorkPhase::ToolRunning,
+            EmployeeTurnOwner::Tool,
+            None,
+            EmployeeAttentionPriority::None,
+            terminal_resolution
+                .as_ref()
+                .map(|resolution| resolution.terminal_state)
+                .unwrap_or(EmployeeTerminalActivityState::None),
+            "Running process",
+            Some(format!("{} managed process(es)", active_process_ids.len())),
+            None,
+            "managed_process_running",
+        )
+    } else if let Some(terminal_activity) = terminal_resolution.as_ref() {
+        terminal_activity.clone()
     } else if review_counts.changed_files > 0 {
-        (
+        activity_resolution(
             EmployeeActivityStatus::ReviewNeeded,
-            "Review needed".to_string(),
+            EmployeeBehaviorState::WaitingAtOwner,
+            EmployeeWorkPhase::ReadyToReport,
+            EmployeeTurnOwner::Owner,
+            Some(EmployeeAttentionReason::ReviewNeeded),
+            EmployeeAttentionPriority::Normal,
+            EmployeeTerminalActivityState::None,
+            "Review needed",
             Some(format!("{} changed file(s)", review_counts.changed_files)),
             None,
+            "review_changes_pending",
         )
     } else if handoff_ready {
-        (
+        activity_resolution(
             EmployeeActivityStatus::HandoffReady,
-            "Handoff ready".to_string(),
+            EmployeeBehaviorState::WaitingAtOwner,
+            EmployeeWorkPhase::ReadyToReport,
+            EmployeeTurnOwner::Owner,
+            Some(EmployeeAttentionReason::HandoffReady),
+            EmployeeAttentionPriority::Normal,
+            EmployeeTerminalActivityState::None,
+            "Handoff ready",
             Some("employee branch has commits ready to apply".to_string()),
             None,
+            "handoff_ready",
         )
-    } else if employee.status == EmployeeStatus::Stopped {
-        (
-            EmployeeActivityStatus::Stopped,
-            "Stopped".to_string(),
+    } else if employee.status == EmployeeStatus::Done {
+        activity_resolution(
+            EmployeeActivityStatus::DoneClean,
+            EmployeeBehaviorState::WaitingAtOwner,
+            EmployeeWorkPhase::ReadyToReport,
+            EmployeeTurnOwner::Owner,
+            Some(EmployeeAttentionReason::ReadyToReport),
+            EmployeeAttentionPriority::Normal,
+            terminal_resolution
+                .as_ref()
+                .map(|resolution| resolution.terminal_state)
+                .unwrap_or(EmployeeTerminalActivityState::Completed),
+            "Done",
+            Some("ready to report".to_string()),
             None,
-            None,
+            "done_clean",
         )
     } else {
-        (EmployeeActivityStatus::Idle, "Idle".to_string(), None, None)
+        activity_resolution(
+            EmployeeActivityStatus::Idle,
+            EmployeeBehaviorState::AtDeskIdle,
+            EmployeeWorkPhase::Idle,
+            EmployeeTurnOwner::None,
+            None,
+            EmployeeAttentionPriority::None,
+            EmployeeTerminalActivityState::None,
+            "Idle",
+            None,
+            None,
+            "idle",
+        )
     };
+    let lifecycle = lifecycle_for_employee(employee);
+    let session_active_terminal = if employee.status == EmployeeStatus::Stopped {
+        None
+    } else {
+        active_terminal
+    };
+    let session = runtime_session_for_employee(employee, session_active_terminal);
+    let ActivityResolution {
+        status,
+        behavior,
+        work,
+        attention,
+        terminal_state,
+        label,
+        details,
+        active_action_id,
+        activity_reason,
+    } = resolution;
 
     EmployeeActivity {
         employee_id: employee.id.clone(),
         status,
+        lifecycle,
+        behavior,
+        session,
+        agent,
+        work,
+        attention,
+        terminal_state,
+        activity_reason,
         label,
         details,
         last_activity_at: last_activity_at(
@@ -265,6 +594,256 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
         review_counts,
         blockers,
     }
+}
+
+fn lifecycle_for_employee(employee: &Employee) -> EmployeeLifecycleState {
+    match employee.status {
+        EmployeeStatus::Standby => EmployeeLifecycleState::Standby,
+        EmployeeStatus::Stopped => EmployeeLifecycleState::Stopped,
+        EmployeeStatus::Failed => EmployeeLifecycleState::Failed,
+        _ => EmployeeLifecycleState::Active,
+    }
+}
+
+fn runtime_session_for_employee(
+    employee: &Employee,
+    active_terminal: Option<&TerminalSessionRecord>,
+) -> EmployeeRuntimeSession {
+    if let Some(session) = active_terminal {
+        return EmployeeRuntimeSession {
+            kind: session_kind_for_profile(session.active_profile.unwrap_or(session.profile)),
+            state: EmployeeSessionState::Open,
+        };
+    }
+
+    if employee.status == EmployeeStatus::Starting {
+        return EmployeeRuntimeSession {
+            kind: session_kind_for_command(employee.current_command.as_deref()),
+            state: EmployeeSessionState::Starting,
+        };
+    }
+
+    if employee.terminal_session_id.is_some() {
+        return EmployeeRuntimeSession {
+            kind: session_kind_for_command(employee.current_command.as_deref()),
+            state: EmployeeSessionState::Exited,
+        };
+    }
+
+    EmployeeRuntimeSession {
+        kind: EmployeeSessionKind::None,
+        state: EmployeeSessionState::Closed,
+    }
+}
+
+fn latest_agent_session<'a>(
+    sessions: &[&'a TerminalSessionRecord],
+) -> Option<&'a TerminalSessionRecord> {
+    sessions
+        .iter()
+        .copied()
+        .filter(|session| {
+            session.profile == TerminalLaunchProfile::Codex
+                || session.active_profile == Some(TerminalLaunchProfile::Codex)
+        })
+        .max_by_key(|session| session.started_at)
+}
+
+fn runtime_agent_for_employee(
+    employee: &Employee,
+    session: Option<&TerminalSessionRecord>,
+    agent_runtime: &AgentRuntimeStore,
+) -> AgentRuntimeSnapshot {
+    if let Some(session) = session {
+        if let Some(runtime) = agent_runtime.snapshot(&session.session_id) {
+            return runtime;
+        }
+    }
+
+    let kind = agent_kind_for_command(employee.current_command.as_deref());
+    if kind != AgentKind::None && employee.status == EmployeeStatus::Starting {
+        return AgentRuntimeSnapshot::with_state(
+            kind,
+            AgentRuntimeState::Starting,
+            Some(employee.updated_at),
+        );
+    }
+
+    AgentRuntimeSnapshot::none()
+}
+
+fn activity_for_terminal_session(
+    session: &TerminalSessionRecord,
+    agent: AgentRuntimeSnapshot,
+) -> ActivityResolution {
+    match agent.state {
+        AgentRuntimeState::Starting => activity_resolution(
+            EmployeeActivityStatus::CodexStarting,
+            EmployeeBehaviorState::AtDeskTerminal,
+            EmployeeWorkPhase::AgentStarting,
+            EmployeeTurnOwner::None,
+            None,
+            EmployeeAttentionPriority::None,
+            EmployeeTerminalActivityState::CodexStarting,
+            "Codex starting",
+            Some(session.cwd.clone()),
+            None,
+            "terminal_agent_starting",
+        ),
+        AgentRuntimeState::WaitingPrompt => activity_resolution(
+            EmployeeActivityStatus::CodexWaitingInstruction,
+            EmployeeBehaviorState::WaitingAtOwner,
+            EmployeeWorkPhase::WaitingForOwner,
+            EmployeeTurnOwner::Owner,
+            Some(EmployeeAttentionReason::NeedsInstruction),
+            EmployeeAttentionPriority::Normal,
+            EmployeeTerminalActivityState::CodexWaitingInstruction,
+            "Awaiting prompt",
+            Some(session.cwd.clone()),
+            None,
+            "terminal_waiting_instruction",
+        ),
+        AgentRuntimeState::Failed => activity_resolution(
+            EmployeeActivityStatus::Blocked,
+            EmployeeBehaviorState::WaitingAtOwner,
+            EmployeeWorkPhase::Blocked,
+            EmployeeTurnOwner::Owner,
+            Some(EmployeeAttentionReason::BlockedNeedsHelp),
+            EmployeeAttentionPriority::Urgent,
+            EmployeeTerminalActivityState::Failed,
+            "Blocked",
+            Some(session.cwd.clone()),
+            None,
+            "terminal_agent_failed",
+        ),
+        AgentRuntimeState::WaitingApproval => activity_resolution(
+            EmployeeActivityStatus::CodexWaitingApproval,
+            EmployeeBehaviorState::WaitingAtOwner,
+            EmployeeWorkPhase::WaitingForOwner,
+            EmployeeTurnOwner::Owner,
+            Some(EmployeeAttentionReason::NeedsTerminalApproval),
+            EmployeeAttentionPriority::Urgent,
+            EmployeeTerminalActivityState::CodexWaitingApproval,
+            "Terminal approval required",
+            Some(session.cwd.clone()),
+            None,
+            "terminal_waiting_approval",
+        ),
+        AgentRuntimeState::Completed => activity_resolution(
+            EmployeeActivityStatus::DoneClean,
+            EmployeeBehaviorState::WaitingAtOwner,
+            EmployeeWorkPhase::ReadyToReport,
+            EmployeeTurnOwner::Owner,
+            Some(EmployeeAttentionReason::ReadyToReport),
+            EmployeeAttentionPriority::Normal,
+            EmployeeTerminalActivityState::Completed,
+            "Done",
+            Some(session.cwd.clone()),
+            None,
+            "terminal_agent_completed",
+        ),
+        _ if agent.kind == AgentKind::Codex => activity_resolution(
+            EmployeeActivityStatus::CodexRunning,
+            EmployeeBehaviorState::AtDeskWorking,
+            EmployeeWorkPhase::AgentWorking,
+            EmployeeTurnOwner::Agent,
+            None,
+            EmployeeAttentionPriority::None,
+            EmployeeTerminalActivityState::CodexRunning,
+            "Codex running",
+            Some(session.cwd.clone()),
+            None,
+            "terminal_agent_working",
+        ),
+        _ => match session.active_profile.unwrap_or(session.profile) {
+            TerminalLaunchProfile::Shell => activity_resolution(
+                EmployeeActivityStatus::ShellRunning,
+                EmployeeBehaviorState::AtDeskTerminal,
+                EmployeeWorkPhase::ShellOpen,
+                EmployeeTurnOwner::None,
+                None,
+                EmployeeAttentionPriority::None,
+                EmployeeTerminalActivityState::ShellRunning,
+                "Shell running",
+                Some(session.cwd.clone()),
+                None,
+                "terminal_shell_open",
+            ),
+            TerminalLaunchProfile::Codex => activity_resolution(
+                EmployeeActivityStatus::CodexRunning,
+                EmployeeBehaviorState::AtDeskWorking,
+                EmployeeWorkPhase::AgentWorking,
+                EmployeeTurnOwner::Agent,
+                None,
+                EmployeeAttentionPriority::None,
+                EmployeeTerminalActivityState::CodexRunning,
+                "Codex running",
+                Some(session.cwd.clone()),
+                None,
+                "terminal_agent_working",
+            ),
+        },
+    }
+}
+
+fn session_kind_for_profile(profile: TerminalLaunchProfile) -> EmployeeSessionKind {
+    match profile {
+        TerminalLaunchProfile::Shell => EmployeeSessionKind::Shell,
+        TerminalLaunchProfile::Codex => EmployeeSessionKind::Codex,
+    }
+}
+
+fn session_kind_for_command(command: Option<&str>) -> EmployeeSessionKind {
+    match command {
+        Some("codex") => EmployeeSessionKind::Codex,
+        Some("shell") => EmployeeSessionKind::Shell,
+        Some("claude") => EmployeeSessionKind::Claude,
+        _ => EmployeeSessionKind::None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn activity_resolution(
+    status: EmployeeActivityStatus,
+    behavior: EmployeeBehaviorState,
+    phase: EmployeeWorkPhase,
+    turn_owner: EmployeeTurnOwner,
+    reason: Option<EmployeeAttentionReason>,
+    priority: EmployeeAttentionPriority,
+    terminal_state: EmployeeTerminalActivityState,
+    label: &str,
+    details: Option<String>,
+    active_action_id: Option<String>,
+    activity_reason: &str,
+) -> ActivityResolution {
+    let (work, attention) = runtime(phase, turn_owner, reason, priority);
+    ActivityResolution {
+        status,
+        behavior,
+        work,
+        attention,
+        terminal_state,
+        label: label.to_string(),
+        details,
+        active_action_id,
+        activity_reason: activity_reason.to_string(),
+    }
+}
+
+fn runtime(
+    phase: EmployeeWorkPhase,
+    turn_owner: EmployeeTurnOwner,
+    reason: Option<EmployeeAttentionReason>,
+    priority: EmployeeAttentionPriority,
+) -> (EmployeeWorkState, EmployeeAttention) {
+    (
+        EmployeeWorkState { phase, turn_owner },
+        EmployeeAttention {
+            required: reason.is_some(),
+            reason,
+            priority,
+        },
+    )
 }
 
 fn active_terminal_session<'a>(
@@ -447,6 +1026,9 @@ fn last_activity_at(
             session.ended_at,
             session.stopped_at,
             session.last_output_at,
+            session.last_prompt_submitted_at,
+            session.last_prompt_ready_at,
+            session.last_approval_prompt_at,
         ]
         .into_iter()
         .flatten()
@@ -494,6 +1076,7 @@ mod tests {
             employees: EmployeeManager::default(),
             terminal: crate::terminal::TerminalManager::default(),
             terminal_sessions: TerminalSessionStore::default(),
+            agent_runtime: AgentRuntimeStore::default(),
             persistence: crate::persistence::PersistenceManager::new(
                 workspace_root.join("state.json"),
                 None,
@@ -516,6 +1099,11 @@ mod tests {
         employee_activity_for_state(state, employee_id).unwrap()
     }
 
+    fn sync_agent_runtime(state: &AppState, session_id: &str) {
+        let session = state.terminal_sessions.get(session_id).unwrap();
+        state.agent_runtime.sync_from_terminal_session(&session);
+    }
+
     #[test]
     fn idle_employee_activity_is_idle() {
         let root = test_root("idle");
@@ -525,6 +1113,14 @@ mod tests {
         let activity = activity(&state, &employee.id);
 
         assert_eq!(activity.status, EmployeeActivityStatus::Idle);
+        assert_eq!(activity.lifecycle, EmployeeLifecycleState::Active);
+        assert_eq!(activity.behavior, EmployeeBehaviorState::AtDeskIdle);
+        assert_eq!(activity.terminal_state, EmployeeTerminalActivityState::None);
+        assert_eq!(activity.work.phase, EmployeeWorkPhase::Idle);
+        assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::None);
+        assert!(!activity.attention.required);
+        assert_eq!(activity.agent.kind, AgentKind::None);
+        assert_eq!(activity.agent.state, AgentRuntimeState::NotActive);
         assert_eq!(activity.label, "Idle");
         assert_eq!(activity.active_terminal_session_id, None);
     }
@@ -549,6 +1145,16 @@ mod tests {
         let activity = activity(&state, &employee.id);
 
         assert_eq!(activity.status, EmployeeActivityStatus::ShellRunning);
+        assert_eq!(activity.behavior, EmployeeBehaviorState::AtDeskTerminal);
+        assert_eq!(
+            activity.terminal_state,
+            EmployeeTerminalActivityState::ShellRunning
+        );
+        assert_eq!(activity.session.kind, EmployeeSessionKind::Shell);
+        assert_eq!(activity.session.state, EmployeeSessionState::Open);
+        assert_eq!(activity.work.phase, EmployeeWorkPhase::ShellOpen);
+        assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::None);
+        assert!(!activity.attention.required);
         assert_eq!(
             activity.active_terminal_session_id.as_deref(),
             Some("session-1")
@@ -566,6 +1172,10 @@ mod tests {
             TerminalLaunchProfile::Codex,
             root.to_string_lossy().to_string(),
         );
+        state
+            .terminal_sessions
+            .mark_prompt_submitted(&session.session_id, "\r");
+        sync_agent_runtime(&state, &session.session_id);
         state.employees.update(&employee.id, |employee| {
             employee.status = EmployeeStatus::Running;
             employee.current_command = Some("codex".to_string());
@@ -575,6 +1185,165 @@ mod tests {
         let activity = activity(&state, &employee.id);
 
         assert_eq!(activity.status, EmployeeActivityStatus::CodexRunning);
+        assert_eq!(activity.behavior, EmployeeBehaviorState::AtDeskWorking);
+        assert_eq!(
+            activity.terminal_state,
+            EmployeeTerminalActivityState::CodexRunning
+        );
+        assert_eq!(activity.session.kind, EmployeeSessionKind::Codex);
+        assert_eq!(activity.agent.kind, AgentKind::Codex);
+        assert_eq!(activity.agent.state, AgentRuntimeState::Thinking);
+        assert_eq!(activity.work.phase, EmployeeWorkPhase::AgentWorking);
+        assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::Agent);
+        assert!(!activity.attention.required);
+    }
+
+    #[test]
+    fn codex_without_submitted_prompt_is_starting_not_working() {
+        let root = test_root("codex-starting");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+        );
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Running;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+        sync_agent_runtime(&state, &session.session_id);
+
+        let activity = activity(&state, &employee.id);
+
+        assert_eq!(activity.status, EmployeeActivityStatus::CodexStarting);
+        assert_eq!(activity.behavior, EmployeeBehaviorState::AtDeskTerminal);
+        assert_eq!(
+            activity.terminal_state,
+            EmployeeTerminalActivityState::CodexStarting
+        );
+        assert_eq!(activity.agent.kind, AgentKind::Codex);
+        assert_eq!(activity.agent.state, AgentRuntimeState::Starting);
+        assert_eq!(activity.work.phase, EmployeeWorkPhase::AgentStarting);
+        assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::None);
+        assert!(!activity.attention.required);
+    }
+
+    #[test]
+    fn codex_prompt_ready_activity_requires_owner_instruction() {
+        let root = test_root("codex-waiting");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+        );
+        state
+            .terminal_sessions
+            .record_output(&session.session_id, "\r\n› ");
+        sync_agent_runtime(&state, &session.session_id);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Running;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+
+        let activity = activity(&state, &employee.id);
+
+        assert_eq!(
+            activity.status,
+            EmployeeActivityStatus::CodexWaitingInstruction
+        );
+        assert_eq!(activity.behavior, EmployeeBehaviorState::WaitingAtOwner);
+        assert_eq!(
+            activity.terminal_state,
+            EmployeeTerminalActivityState::CodexWaitingInstruction
+        );
+        assert_eq!(activity.agent.kind, AgentKind::Codex);
+        assert_eq!(activity.agent.state, AgentRuntimeState::WaitingPrompt);
+        assert_eq!(activity.work.phase, EmployeeWorkPhase::WaitingForOwner);
+        assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::Owner);
+        assert_eq!(
+            activity.attention.reason,
+            Some(EmployeeAttentionReason::NeedsInstruction)
+        );
+    }
+
+    #[test]
+    fn codex_terminal_approval_prompt_requires_owner_approval() {
+        let root = test_root("codex-terminal-approval");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+        );
+        state
+            .terminal_sessions
+            .mark_prompt_submitted(&session.session_id, "\r");
+        state
+            .terminal_sessions
+            .record_output(&session.session_id, "Allow command to run?\n› Yes / No");
+        sync_agent_runtime(&state, &session.session_id);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Running;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+
+        let activity = activity(&state, &employee.id);
+
+        assert_eq!(
+            activity.status,
+            EmployeeActivityStatus::CodexWaitingApproval
+        );
+        assert_eq!(activity.behavior, EmployeeBehaviorState::WaitingAtOwner);
+        assert_eq!(
+            activity.terminal_state,
+            EmployeeTerminalActivityState::CodexWaitingApproval
+        );
+        assert_eq!(activity.agent.kind, AgentKind::Codex);
+        assert_eq!(activity.agent.state, AgentRuntimeState::WaitingApproval);
+        assert_eq!(activity.work.phase, EmployeeWorkPhase::WaitingForOwner);
+        assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::Owner);
+        assert_eq!(activity.active_action_id, None);
+        assert_eq!(
+            activity.attention.reason,
+            Some(EmployeeAttentionReason::NeedsTerminalApproval)
+        );
+    }
+
+    #[test]
+    fn standby_activity_parks_employee_even_with_running_terminal() {
+        let root = test_root("standby");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Shell,
+            root.to_string_lossy().to_string(),
+        );
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Standby;
+            employee.current_command = Some("shell".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+
+        let activity = activity(&state, &employee.id);
+
+        assert_eq!(activity.status, EmployeeActivityStatus::Standby);
+        assert_eq!(activity.behavior, EmployeeBehaviorState::OnStandby);
+        assert_eq!(
+            activity.active_terminal_session_id.as_deref(),
+            Some("session-1")
+        );
     }
 
     #[test]
@@ -598,14 +1367,87 @@ mod tests {
         let activity = activity(&state, &employee.id);
 
         assert_eq!(activity.status, EmployeeActivityStatus::Stopped);
+        assert_eq!(activity.behavior, EmployeeBehaviorState::Offline);
         assert_eq!(activity.active_terminal_session_id, None);
+        assert_eq!(activity.session.state, EmployeeSessionState::Exited);
+    }
+
+    #[test]
+    fn stopped_employee_ignores_stale_running_terminal_session() {
+        let root = test_root("stopped-stale-running-session");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+        );
+        state
+            .terminal_sessions
+            .record_output(&session.session_id, "Allow command to run?\n› Yes / No");
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Stopped;
+            employee.terminal_session_id = Some(session.session_id.clone());
+            employee.current_command = None;
+        });
+
+        let activity = activity(&state, &employee.id);
+
+        assert_eq!(activity.status, EmployeeActivityStatus::Stopped);
+        assert_eq!(activity.behavior, EmployeeBehaviorState::Offline);
+        assert_eq!(activity.active_terminal_session_id, None);
+        assert_eq!(activity.session.state, EmployeeSessionState::Exited);
+        assert_eq!(activity.agent.kind, AgentKind::None);
+        assert_eq!(activity.agent.state, AgentRuntimeState::NotActive);
+        assert!(!activity.attention.required);
+    }
+
+    #[test]
+    fn stopped_employee_ignores_historical_failed_agent_session() {
+        let root = test_root("stopped-failed-agent");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+        );
+        state.terminal_sessions.finish(&session.session_id, 1);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Stopped;
+            employee.terminal_session_id = Some(session.session_id.clone());
+            employee.current_command = None;
+        });
+
+        let activity = activity(&state, &employee.id);
+
+        assert_eq!(activity.status, EmployeeActivityStatus::Stopped);
+        assert_eq!(activity.agent.kind, AgentKind::None);
+        assert_eq!(activity.agent.state, AgentRuntimeState::NotActive);
     }
 
     #[test]
     fn pending_action_activity_reports_approval_wait() {
         let root = test_root("pending-action");
-        let state = test_state(root);
+        let state = test_state(root.clone());
         let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+        );
+        state
+            .terminal_sessions
+            .mark_prompt_submitted(&session.session_id, "\r");
+        sync_agent_runtime(&state, &session.session_id);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Running;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
         let action = sample_action(&employee.id, ActionStatus::PendingApproval);
         state.actions.replace_all(vec![action.clone()]);
 
@@ -615,9 +1457,236 @@ mod tests {
             activity.status,
             EmployeeActivityStatus::ActionPendingApproval
         );
+        assert_eq!(activity.work.phase, EmployeeWorkPhase::WaitingForOwner);
+        assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::Owner);
+        assert_eq!(
+            activity.attention.reason,
+            Some(EmployeeAttentionReason::NeedsAppApproval)
+        );
+        assert_eq!(activity.behavior, EmployeeBehaviorState::WaitingAtOwner);
+        assert_eq!(
+            activity.terminal_state,
+            EmployeeTerminalActivityState::CodexRunning
+        );
+        assert_eq!(activity.agent.kind, AgentKind::Codex);
+        assert_eq!(activity.agent.state, AgentRuntimeState::Thinking);
         assert_eq!(
             activity.active_action_id.as_deref(),
             Some(action.id.as_str())
+        );
+    }
+
+    #[test]
+    fn codex_terminal_approval_takes_precedence_over_pending_action_approval() {
+        let root = test_root("terminal-approval-precedence");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+        );
+        state
+            .terminal_sessions
+            .mark_prompt_submitted(&session.session_id, "\r");
+        state
+            .terminal_sessions
+            .record_output(&session.session_id, "Allow command to run?\n› Yes / No");
+        sync_agent_runtime(&state, &session.session_id);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Running;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+        let action = sample_action(&employee.id, ActionStatus::PendingApproval);
+        let action_id = action.id.clone();
+        let approval = ApprovalRequest {
+            id: "approval-1".to_string(),
+            employee_id: employee.id.clone(),
+            action_id: Some(action_id.clone()),
+            kind: ApprovalKind::ShellCommand,
+            title: "Approve command".to_string(),
+            description: "Approve command".to_string(),
+            command: Some("pwd".to_string()),
+            path: None,
+            cwd: None,
+            status: ApprovalStatus::Pending,
+            created_at: 2,
+            resolved_at: None,
+        };
+        state.actions.replace_all(vec![action]);
+        state.approvals.replace_all(vec![approval]);
+
+        let activity = activity(&state, &employee.id);
+
+        assert_eq!(
+            activity.status,
+            EmployeeActivityStatus::CodexWaitingApproval
+        );
+        assert_eq!(
+            activity.active_action_id.as_deref(),
+            Some(action_id.as_str())
+        );
+        assert_eq!(activity.behavior, EmployeeBehaviorState::WaitingAtOwner);
+        assert_eq!(
+            activity.terminal_state,
+            EmployeeTerminalActivityState::CodexWaitingApproval
+        );
+        assert_eq!(
+            activity.activity_reason,
+            "terminal_waiting_approval_over_active_work"
+        );
+        assert_eq!(activity.agent.kind, AgentKind::Codex);
+        assert_eq!(activity.agent.state, AgentRuntimeState::WaitingApproval);
+        assert_eq!(
+            activity.attention.reason,
+            Some(EmployeeAttentionReason::NeedsTerminalApproval)
+        );
+    }
+
+    #[test]
+    fn codex_terminal_approval_over_running_action_preserves_work_context() {
+        let root = test_root("terminal-approval-active-action");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+        );
+        state
+            .terminal_sessions
+            .mark_prompt_submitted(&session.session_id, "\r");
+        state
+            .terminal_sessions
+            .record_output(&session.session_id, "Allow command to run?\n› Yes / No");
+        sync_agent_runtime(&state, &session.session_id);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Running;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+        let action = sample_action(&employee.id, ActionStatus::Running);
+        let action_id = action.id.clone();
+        state.actions.replace_all(vec![action]);
+
+        let activity = activity(&state, &employee.id);
+
+        assert_eq!(
+            activity.status,
+            EmployeeActivityStatus::CodexWaitingApproval
+        );
+        assert_eq!(activity.behavior, EmployeeBehaviorState::WaitingAtOwner);
+        assert_eq!(activity.work.phase, EmployeeWorkPhase::WaitingForOwner);
+        assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::Owner);
+        assert_eq!(
+            activity.attention.reason,
+            Some(EmployeeAttentionReason::NeedsTerminalApproval)
+        );
+        assert_eq!(
+            activity.active_action_id.as_deref(),
+            Some(action_id.as_str())
+        );
+        assert_eq!(
+            activity.activity_reason,
+            "terminal_waiting_approval_over_active_work"
+        );
+    }
+
+    #[test]
+    fn codex_terminal_approval_takes_precedence_over_worktree_blocker() {
+        let root = test_root("terminal-approval-blocker");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+        );
+        state
+            .terminal_sessions
+            .mark_prompt_submitted(&session.session_id, "\r");
+        state
+            .terminal_sessions
+            .record_output(&session.session_id, "Allow command to run?\n› Yes / No");
+        sync_agent_runtime(&state, &session.session_id);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Running;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+            employee.worktree_path =
+                Some(root.join("missing-worktree").to_string_lossy().to_string());
+        });
+
+        let activity = activity(&state, &employee.id);
+
+        assert_eq!(
+            activity.status,
+            EmployeeActivityStatus::CodexWaitingApproval
+        );
+        assert_eq!(activity.behavior, EmployeeBehaviorState::WaitingAtOwner);
+        assert_eq!(
+            activity.attention.reason,
+            Some(EmployeeAttentionReason::NeedsTerminalApproval)
+        );
+        assert_eq!(
+            activity.terminal_state,
+            EmployeeTerminalActivityState::CodexWaitingApproval
+        );
+        assert!(!activity.blockers.is_empty());
+    }
+
+    #[test]
+    fn codex_instruction_wait_over_running_process_preserves_process_context() {
+        let root = test_root("terminal-instruction-active-process");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+        );
+        state
+            .terminal_sessions
+            .record_output(&session.session_id, "\r\n› ");
+        sync_agent_runtime(&state, &session.session_id);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Running;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+        let processes = vec![sample_process(&employee.id)];
+        let terminal_sessions = vec![state.terminal_sessions.get(&session.session_id).unwrap()];
+
+        let activity = derive_employee_activity(ActivityDerivationInput {
+            employee: &employee,
+            workspace_root: state.workspace_root(),
+            terminal_sessions: &terminal_sessions,
+            actions: &[],
+            approvals: &[],
+            processes: &processes,
+            agent_runtime: &state.agent_runtime,
+        });
+
+        assert_eq!(
+            activity.status,
+            EmployeeActivityStatus::CodexWaitingInstruction
+        );
+        assert_eq!(activity.behavior, EmployeeBehaviorState::WaitingAtOwner);
+        assert_eq!(activity.work.phase, EmployeeWorkPhase::WaitingForOwner);
+        assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::Owner);
+        assert_eq!(
+            activity.attention.reason,
+            Some(EmployeeAttentionReason::NeedsInstruction)
+        );
+        assert_eq!(activity.active_process_ids, vec!["process-1".to_string()]);
+        assert_eq!(
+            activity.activity_reason,
+            "terminal_waiting_instruction_over_active_work"
         );
     }
 
@@ -648,6 +1717,10 @@ mod tests {
             activity.status,
             EmployeeActivityStatus::ActionPendingApproval
         );
+        assert_eq!(
+            activity.attention.reason,
+            Some(EmployeeAttentionReason::NeedsAppApproval)
+        );
         assert_eq!(activity.active_action_id.as_deref(), Some("action-1"));
     }
 
@@ -665,9 +1738,12 @@ mod tests {
             actions: &[],
             approvals: &[],
             processes: &processes,
+            agent_runtime: &state.agent_runtime,
         });
 
         assert_eq!(activity.status, EmployeeActivityStatus::ProcessRunning);
+        assert_eq!(activity.work.phase, EmployeeWorkPhase::ToolRunning);
+        assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::Tool);
         assert_eq!(activity.active_process_ids, vec!["process-1".to_string()]);
     }
 
@@ -689,8 +1765,45 @@ mod tests {
         let activity = activity(&state, &employee.id);
 
         assert_eq!(activity.status, EmployeeActivityStatus::ReviewNeeded);
+        assert_eq!(activity.work.phase, EmployeeWorkPhase::ReadyToReport);
+        assert_eq!(
+            activity.attention.reason,
+            Some(EmployeeAttentionReason::ReviewNeeded)
+        );
         assert_eq!(activity.review_counts.changed_files, 1);
         assert_eq!(activity.review_counts.untracked_files, 1);
+    }
+
+    #[test]
+    fn done_clean_activity_requires_owner_report() {
+        let root = test_root("done-clean");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+        );
+        state.terminal_sessions.finish(&session.session_id, 0);
+        sync_agent_runtime(&state, &session.session_id);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Done;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+
+        let activity = activity(&state, &employee.id);
+
+        assert_eq!(activity.status, EmployeeActivityStatus::DoneClean);
+        assert_eq!(activity.agent.kind, AgentKind::Codex);
+        assert_eq!(activity.agent.state, AgentRuntimeState::Completed);
+        assert_eq!(activity.work.phase, EmployeeWorkPhase::ReadyToReport);
+        assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::Owner);
+        assert_eq!(
+            activity.attention.reason,
+            Some(EmployeeAttentionReason::ReadyToReport)
+        );
     }
 
     #[test]

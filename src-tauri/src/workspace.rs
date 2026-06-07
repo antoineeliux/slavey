@@ -245,6 +245,7 @@ fn reset_workspace_bound_state(state: &AppState) {
     state.employees.replace_all(Vec::new());
     state.terminal.clear_inactive_sessions();
     state.terminal_sessions.replace_all(Vec::new());
+    state.agent_runtime.clear_all();
     state.processes.clear();
     state.actions.replace_all(Vec::new());
     state.approvals.replace_all(Vec::new());
@@ -350,8 +351,8 @@ mod tests {
         persistence::{load_from_disk, AppStateSaveRequest, PersistenceManager},
         processes::{ManagedProcess, ManagedProcessStatus, ProcessManager},
         terminal::{
-            TerminalLaunchProfile, TerminalManager, TerminalSessionRecord, TerminalSessionStatus,
-            TerminalSessionStore,
+            AgentRuntimeStore, TerminalLaunchProfile, TerminalManager, TerminalSessionRecord,
+            TerminalSessionStatus, TerminalSessionStore,
         },
     };
 
@@ -376,6 +377,7 @@ mod tests {
             employees: EmployeeManager::default(),
             terminal: TerminalManager::default(),
             terminal_sessions: TerminalSessionStore::default(),
+            agent_runtime: AgentRuntimeStore::default(),
             persistence: PersistenceManager::new(persistence_path, None),
             approvals: ApprovalManager::default(),
             actions: ActionManager::default(),
@@ -429,7 +431,9 @@ mod tests {
             session_id: format!("session-{employee_id}"),
             employee_id: employee_id.to_string(),
             profile: TerminalLaunchProfile::Shell,
+            active_profile: Some(TerminalLaunchProfile::Shell),
             cwd: cwd.to_string_lossy().to_string(),
+            current_cwd: Some(cwd.to_string_lossy().to_string()),
             status: TerminalSessionStatus::Stopped,
             exit_code: None,
             started_at: 1,
@@ -438,6 +442,10 @@ mod tests {
             stop_reason: Some(crate::terminal::TerminalStopReason::UserStopped),
             label: "Shell session".to_string(),
             last_output_at: None,
+            last_prompt_submitted_at: None,
+            last_prompt_ready_at: None,
+            last_approval_prompt_at: None,
+            last_output_tail: String::new(),
             message: Some("stopped".to_string()),
         }
     }
