@@ -147,6 +147,14 @@ Input follows a separate path:
 
 The recent stale-redraw fix lives in this flow: if a final output chunk contains stale `Working ... esc to interrupt` text but the last meaningful line is the `›` prompt, prompt-ready wins over active work.
 
+## Fixture Corpus
+
+The PTY parser fixture corpus lives in `src-tauri/src/terminal/session_fixture_tests.rs`. It is compiled only for Rust tests through the `#[cfg(test)]` module registration in `src-tauri/src/terminal.rs`.
+
+The corpus replays sanitized in-code fixtures through `TerminalSessionStore` and `AgentRuntimeStore`. It covers shell-open state, direct Codex startup, prompt-ready output, owner composing, prompt submission, active working output, prompt echo plus working output, final answer prompt return, stale redraw prompt return, approval prompts, approval response submission, split approval prompts, split prompt-ready output, shell-launched Codex profile switching, shell reset, clean exit, and failed exit.
+
+To add a regression fixture, add a sanitized `Fixture` entry with ordered `Output`, `Input`, `ActiveProfile`, or `Finish` events. Avoid local usernames, machine paths, real private prompts, secrets, or raw logs. Assert the final launch profile, effective profile, turn state, prompt/approval timestamp presence, runtime state, source, and confidence so the fixture documents current behavior precisely.
+
 ## Codex App-Server Flow
 
 The structured Codex app-server path starts at `codex_task_submit`.
@@ -182,7 +190,7 @@ For app-server sessions, activity state is driven by structured `AgentRuntimeSto
 | App-server turn started | usually `prompt_submitted`; app-server notifications do not rewrite `turnState` | `thinking` | `codex_running` | `desk` / `working` | No |
 | App-server turn completed | usually unchanged from submit; structured snapshot carries the owner-wait state | `waiting_prompt` | `codex_waiting_instruction` | `owner_office` / `waiting_instruction` | `needs_instruction` |
 | Error/failure | `failed` | `failed` | `blocked` | `owner_office` / `blocked` | `blocked_needs_help` |
-| Terminal stopped/exited | `completed` for stopped or clean exit; `failed` for failed exit | `completed` or `failed` for Codex sessions | explicit stop becomes `stopped`; clean completion usually becomes `done_clean`; failure becomes `blocked` | `offline` / `idle`, `owner_office` / `handoff`, or `owner_office` / `blocked` | None, `ready_to_report`, or `blocked_needs_help` |
+| Terminal stopped/exited | explicit stop uses `completed`; process exit currently retains the prior `turnState` while status changes | `completed` or `failed` for Codex sessions | explicit stop becomes `stopped`; clean completion usually becomes `done_clean`; failure becomes `blocked` | `offline` / `idle`, `owner_office` / `handoff`, or `owner_office` / `blocked` | None, `ready_to_report`, or `blocked_needs_help` |
 | Review needed | no terminal signal required | usually `not_active` unless historical agent evidence exists | `review_needed` | `owner_office` / `review` | `review_needed` |
 | Handoff ready | no terminal signal required | usually `not_active` unless historical agent evidence exists | `handoff_ready` | `owner_office` / `handoff` | `handoff_ready` |
 | Done clean | no running terminal required | usually `completed` for a completed Codex session or `not_active` for non-terminal done state | `done_clean` | `owner_office` / `handoff` | `ready_to_report` |
@@ -213,9 +221,10 @@ The floor must not infer employee state directly from terminal text because term
 - The fixture corpus is not complete yet. Existing tests cover important prompt-ready, approval, active-work, owner-draft, app-server, and stale-redraw cases, but they are not a broad transcript replay suite.
 - Structured app-server evidence is preferred, but shell-launched Codex still relies on PTY fallback and wrapper markers.
 - App-server notifications update `AgentRuntimeStore` and activity directly, but most notifications do not rewrite `TerminalSessionRecord.turnState`. Activity can still be correct through the structured runtime snapshot, while terminal-session display may lag or show the submission state until another session update arrives.
+- PTY process exit currently updates `TerminalSessionRecord.status` and runtime snapshots, but `finish()` does not rewrite the prior `turnState`. Activity can still map Codex exits to completed or failed runtime, while terminal-session display may retain the pre-exit turn state.
 - CWD markers are currently shell-integration dependent. Unsupported shells or failed shell integration can leave `current_cwd` at the start directory even when terminal output and activity continue normally.
 
-No concrete production bug was confirmed during this audit. The items above are hardening risks to carry into later phases.
+The items above are hardening risks to carry into later phases. This document records current behavior and does not imply runtime changes.
 
 ## Next Hardening Phases
 
