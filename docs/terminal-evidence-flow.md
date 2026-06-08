@@ -128,14 +128,15 @@ Terminal owner-wait states, such as Codex waiting for instruction or terminal ap
 5. Visible output is appended to the in-memory bounded terminal output buffer and emitted as `terminal:data`.
 6. The output callback calls `TerminalSessionStore.record_output`.
 7. `record_output` builds a bounded detection string from `last_output_tail` plus the new output.
-8. `record_output` detects terminal approval prompts, active work, prompt-ready output, and prompt-at-end stale redraws.
-9. If output shows an approval prompt, the session becomes `waiting_approval`, `last_approval_prompt_at` is set, and prompt-ready state is cleared.
-10. If output shows active work and does not end at a prompt, the session becomes `agent_working`, prompt-ready and approval timestamps are cleared, and a missing submitted timestamp may be filled when work resumes from an owner-wait state.
-11. If output shows a Codex prompt ready, the session becomes `owner_prompt_ready`, `last_prompt_ready_at` is set, and approval state is cleared.
-12. If the session is already waiting for owner input or approval, echoed owner draft text and prompt redraws do not prove that the agent resumed work.
-13. Otherwise visible output updates `last_output_at`; active Codex sessions that emit visible text while already submitted or working remain `agent_working`.
-14. When relevant session fields change, `AgentRuntimeStore.sync_from_terminal_session` records a fallback runtime snapshot and the backend emits `terminal:session-updated`.
-15. `emit_terminal_session_updated` also emits `employee:activity-updated`.
+8. `record_output` collects PTY evidence for terminal approval prompts, active work, prompt-ready output, prompt-at-end stale redraws, owner-wait state, and visible text.
+9. A private backend resolver turns that immutable session state and output evidence into a `TerminalTurnTransition`. Applying the transition to the mutable session record is a separate step.
+10. If output shows an approval prompt, the session becomes `waiting_approval`, `last_approval_prompt_at` is set, and prompt-ready state is cleared.
+11. If output shows active work and does not end at a prompt, the session becomes `agent_working`, prompt-ready and approval timestamps are cleared, and a missing submitted timestamp may be filled when work resumes from an owner-wait state.
+12. If output shows a Codex prompt ready, the session becomes `owner_prompt_ready`, `last_prompt_ready_at` is set, and approval state is cleared.
+13. If the session is already waiting for owner input or approval, echoed owner draft text and prompt redraws do not prove that the agent resumed work.
+14. Otherwise visible output updates `last_output_at`; active Codex sessions that emit visible text while already submitted or working remain `agent_working`.
+15. When relevant session fields change, `AgentRuntimeStore.sync_from_terminal_session` records a fallback runtime snapshot and the backend emits `terminal:session-updated`.
+16. `emit_terminal_session_updated` also emits `employee:activity-updated`.
 
 Input follows a separate path:
 
@@ -147,11 +148,13 @@ Input follows a separate path:
 
 The recent stale-redraw fix lives in this flow: if a final output chunk contains stale `Working ... esc to interrupt` text but the last meaningful line is the `›` prompt, prompt-ready wins over active work.
 
+The resolver records internal, testable transition reasons such as `shell_output`, `codex_approval_prompt`, `codex_active_work`, `codex_prompt_ready`, `codex_prompt_ready_at_end_stale_work_redraw`, `owner_prompt_echo_ignored`, `owner_input_submitted`, `owner_composing`, `no_activity_relevant_change`, `active_profile_reset_to_shell`, `active_profile_changed_to_codex`, `session_finished_completed`, and `session_finished_failed`. These labels are not currently emitted as user-visible diagnostics.
+
 ## Fixture Corpus
 
 The PTY parser fixture corpus lives in `src-tauri/src/terminal/session_fixture_tests.rs`. It is compiled only for Rust tests through the `#[cfg(test)]` module registration in `src-tauri/src/terminal.rs`.
 
-The corpus replays sanitized in-code fixtures through `TerminalSessionStore` and `AgentRuntimeStore`. It covers shell-open state, direct Codex startup, prompt-ready output, owner composing, prompt submission, active working output, prompt echo plus working output, final answer prompt return, stale redraw prompt return, approval prompts, approval response submission, split approval prompts, split prompt-ready output, shell-launched Codex profile switching, shell reset, clean exit, and failed exit.
+The corpus replays sanitized in-code fixtures through `TerminalSessionStore` and `AgentRuntimeStore`. It covers shell-open state, direct Codex startup, prompt-ready output, owner composing, prompt submission, active working output, prompt echo plus working output, final answer prompt return, stale redraw prompt return, approval prompts, approval response submission, split approval prompts, split prompt-ready output, shell-launched Codex profile switching, shell reset, clean Codex exit to `completed`, and failed Codex exit to `failed`.
 
 To add a regression fixture, add a sanitized `Fixture` entry with ordered `Output`, `Input`, `ActiveProfile`, or `Finish` events. Avoid local usernames, machine paths, real private prompts, secrets, or raw logs. Assert the final launch profile, effective profile, turn state, prompt/approval timestamp presence, runtime state, source, and confidence so the fixture documents current behavior precisely.
 
@@ -190,7 +193,7 @@ For app-server sessions, activity state is driven by structured `AgentRuntimeSto
 | App-server turn started | usually `prompt_submitted`; app-server notifications do not rewrite `turnState` | `thinking` | `codex_running` | `desk` / `working` | No |
 | App-server turn completed | usually unchanged from submit; structured snapshot carries the owner-wait state | `waiting_prompt` | `codex_waiting_instruction` | `owner_office` / `waiting_instruction` | `needs_instruction` |
 | Error/failure | `failed` | `failed` | `blocked` | `owner_office` / `blocked` | `blocked_needs_help` |
-| Terminal stopped/exited | explicit stop uses `completed`; process exit currently retains the prior `turnState` while status changes | `completed` or `failed` for Codex sessions | explicit stop becomes `stopped`; clean completion usually becomes `done_clean`; failure becomes `blocked` | `offline` / `idle`, `owner_office` / `handoff`, or `owner_office` / `blocked` | None, `ready_to_report`, or `blocked_needs_help` |
+| Terminal stopped/exited | explicit stop and clean Codex process exit use `completed`; failed Codex process exit uses `failed` | `completed` or `failed` for Codex sessions | explicit stop becomes `stopped`; clean completion usually becomes `done_clean`; failure becomes `blocked` | `offline` / `idle`, `owner_office` / `handoff`, or `owner_office` / `blocked` | None, `ready_to_report`, or `blocked_needs_help` |
 | Review needed | no terminal signal required | usually `not_active` unless historical agent evidence exists | `review_needed` | `owner_office` / `review` | `review_needed` |
 | Handoff ready | no terminal signal required | usually `not_active` unless historical agent evidence exists | `handoff_ready` | `owner_office` / `handoff` | `handoff_ready` |
 | Done clean | no running terminal required | usually `completed` for a completed Codex session or `not_active` for non-terminal done state | `done_clean` | `owner_office` / `handoff` | `ready_to_report` |
@@ -221,7 +224,7 @@ The floor must not infer employee state directly from terminal text because term
 - The fixture corpus is not complete yet. Existing tests cover important prompt-ready, approval, active-work, owner-draft, app-server, and stale-redraw cases, but they are not a broad transcript replay suite.
 - Structured app-server evidence is preferred, but shell-launched Codex still relies on PTY fallback and wrapper markers.
 - App-server notifications update `AgentRuntimeStore` and activity directly, but most notifications do not rewrite `TerminalSessionRecord.turnState`. Activity can still be correct through the structured runtime snapshot, while terminal-session display may lag or show the submission state until another session update arrives.
-- PTY process exit currently updates `TerminalSessionRecord.status` and runtime snapshots, but `finish()` does not rewrite the prior `turnState`. Activity can still map Codex exits to completed or failed runtime, while terminal-session display may retain the pre-exit turn state.
+- Backend PTY transition reasons are currently internal and testable only. They are not exposed through diagnostics, so debugging production edge cases still requires looking at session state and logs rather than a transition trace.
 - CWD markers are currently shell-integration dependent. Unsupported shells or failed shell integration can leave `current_cwd` at the start directory even when terminal output and activity continue normally.
 
 The items above are hardening risks to carry into later phases. This document records current behavior and does not imply runtime changes.

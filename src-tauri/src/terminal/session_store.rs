@@ -101,6 +101,127 @@ pub struct TerminalSessionStore {
     records: Arc<Mutex<HashMap<String, TerminalSessionRecord>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalTurnTransitionKind {
+    NoChange,
+    Output,
+    Input,
+    ActiveProfile,
+    Finish,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalTurnTransitionReason {
+    ShellOutput,
+    CodexApprovalPrompt,
+    CodexActiveWork,
+    CodexPromptReady,
+    CodexPromptReadyAtEndStaleWorkRedraw,
+    OwnerPromptEchoIgnored,
+    OwnerInputSubmitted,
+    OwnerComposing,
+    NoActivityRelevantChange,
+    ActiveProfileResetToShell,
+    ActiveProfileChangedToCodex,
+    SessionFinishedCompleted,
+    SessionFinishedFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimestampTransition {
+    Unchanged,
+    SetNow,
+    Clear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalTurnTransition {
+    kind: TerminalTurnTransitionKind,
+    reason: TerminalTurnTransitionReason,
+    active_profile: Option<TerminalLaunchProfile>,
+    turn_state: Option<TerminalTurnState>,
+    last_output_at: bool,
+    prompt_submitted_at: TimestampTransition,
+    prompt_ready_at: TimestampTransition,
+    approval_prompt_at: TimestampTransition,
+    clear_output_tail: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalOutputEvidence {
+    codex_approval_prompt: bool,
+    owner_waiting: bool,
+    codex_prompt_ready: bool,
+    codex_prompt_ready_at_end: bool,
+    codex_active_work: bool,
+    stale_work_redraw_at_prompt: bool,
+    has_visible_text: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalFinishTransition {
+    status: TerminalSessionStatus,
+    turn_transition: TerminalTurnTransition,
+}
+
+impl TerminalTurnTransition {
+    fn new(
+        kind: TerminalTurnTransitionKind,
+        reason: TerminalTurnTransitionReason,
+    ) -> TerminalTurnTransition {
+        TerminalTurnTransition {
+            kind,
+            reason,
+            active_profile: None,
+            turn_state: None,
+            last_output_at: false,
+            prompt_submitted_at: TimestampTransition::Unchanged,
+            prompt_ready_at: TimestampTransition::Unchanged,
+            approval_prompt_at: TimestampTransition::Unchanged,
+            clear_output_tail: false,
+        }
+    }
+
+    fn no_change(reason: TerminalTurnTransitionReason) -> TerminalTurnTransition {
+        TerminalTurnTransition::new(TerminalTurnTransitionKind::NoChange, reason)
+    }
+
+    fn with_active_profile(mut self, active_profile: TerminalLaunchProfile) -> Self {
+        self.active_profile = Some(active_profile);
+        self
+    }
+
+    fn with_turn_state(mut self, turn_state: TerminalTurnState) -> Self {
+        self.turn_state = Some(turn_state);
+        self
+    }
+
+    fn with_last_output_at(mut self) -> Self {
+        self.last_output_at = true;
+        self
+    }
+
+    fn with_prompt_submitted_at(mut self, transition: TimestampTransition) -> Self {
+        self.prompt_submitted_at = transition;
+        self
+    }
+
+    fn with_prompt_ready_at(mut self, transition: TimestampTransition) -> Self {
+        self.prompt_ready_at = transition;
+        self
+    }
+
+    fn with_approval_prompt_at(mut self, transition: TimestampTransition) -> Self {
+        self.approval_prompt_at = transition;
+        self
+    }
+
+    fn with_clear_output_tail(mut self) -> Self {
+        self.clear_output_tail = true;
+        self
+    }
+}
+
 impl TerminalSessionStore {
     pub fn create(
         &self,
@@ -235,17 +356,15 @@ impl TerminalSessionStore {
         if record.status != TerminalSessionStatus::Running {
             return None;
         }
-        record.status = if exit_code == 0 {
-            TerminalSessionStatus::Exited
-        } else {
-            TerminalSessionStatus::Failed
-        };
+        let transition = resolve_finish_transition(record, exit_code);
+        record.status = transition.status;
         record.exit_code = Some(exit_code);
         let now = crate::events::now_ms();
         record.ended_at = Some(now);
         record.stopped_at = Some(now);
         record.stop_reason = Some(TerminalStopReason::Exited);
         record.message = None;
+        apply_terminal_turn_transition(record, transition.turn_transition, now);
         Some(record.clone())
     }
 
@@ -283,76 +402,9 @@ impl TerminalSessionStore {
         let previous_approval_prompt_at = record.last_approval_prompt_at;
         let previous_turn_state = record.turn_state;
         let detection_output = output_for_prompt_detection(&record.last_output_tail, output);
-        let codex_approval_prompt = codex_output_suggests_approval_prompt(output)
-            || (codex_output_suggests_approval_choice(output)
-                && codex_output_suggests_approval_prompt(&detection_output));
-        let owner_waiting = codex_session_is_waiting_for_instruction(record)
-            || codex_session_is_waiting_for_approval(record);
-        let codex_prompt_ready = codex_output_suggests_prompt_ready(output)
-            || (!owner_waiting && codex_output_suggests_prompt_ready(&detection_output));
-        let codex_prompt_ready_at_end = codex_output_ends_at_prompt(output)
-            || (!owner_waiting && codex_output_ends_at_prompt(&detection_output));
-        let codex_active_work = !codex_prompt_ready_at_end
-            && (codex_output_suggests_active_work(output)
-                || (!codex_prompt_ready
-                    && !codex_approval_prompt
-                    && codex_output_suggests_active_work(&detection_output)));
-
-        if record.status == TerminalSessionStatus::Running
-            && codex_approval_prompt
-            && (codex_session_is_active(record) || record.profile == TerminalLaunchProfile::Shell)
-        {
-            record.active_profile = Some(TerminalLaunchProfile::Codex);
-            record.last_output_at = Some(now);
-            record.last_prompt_ready_at = None;
-            record.last_approval_prompt_at = Some(now);
-            record.turn_state = TerminalTurnState::WaitingApproval;
-        } else if record.status == TerminalSessionStatus::Running
-            && codex_active_work
-            && (codex_session_is_active(record) || record.profile == TerminalLaunchProfile::Shell)
-        {
-            record.active_profile = Some(TerminalLaunchProfile::Codex);
-            record.last_output_at = Some(now);
-            if matches!(
-                record.turn_state,
-                TerminalTurnState::OwnerPromptReady
-                    | TerminalTurnState::OwnerComposing
-                    | TerminalTurnState::WaitingApproval
-            ) && record.last_prompt_submitted_at.is_none()
-            {
-                record.last_prompt_submitted_at = Some(now);
-            }
-            record.last_prompt_ready_at = None;
-            record.last_approval_prompt_at = None;
-            record.turn_state = TerminalTurnState::AgentWorking;
-        } else if record.status == TerminalSessionStatus::Running
-            && codex_prompt_ready
-            && (codex_session_is_active(record) || record.profile == TerminalLaunchProfile::Shell)
-        {
-            record.active_profile = Some(TerminalLaunchProfile::Codex);
-            record.last_output_at = Some(now);
-            record.last_prompt_ready_at = Some(now);
-            record.last_approval_prompt_at = None;
-            record.turn_state = TerminalTurnState::OwnerPromptReady;
-        } else if owner_waiting {
-            // Codex redraws the prompt and the PTY can echo draft input while it is
-            // still the owner's turn. Neither proves that the agent resumed work.
-        } else {
-            record.last_output_at = Some(now);
-            if codex_session_is_active(record)
-                && codex_output_has_visible_text(output)
-                && (matches!(
-                    record.turn_state,
-                    TerminalTurnState::PromptSubmitted | TerminalTurnState::AgentWorking
-                ) || codex_active_work)
-            {
-                record.turn_state = TerminalTurnState::AgentWorking;
-            } else if record.active_profile.unwrap_or(record.profile)
-                == TerminalLaunchProfile::Shell
-            {
-                record.turn_state = TerminalTurnState::Shell;
-            }
-        }
+        let evidence = terminal_output_evidence(record, output, &detection_output);
+        let transition = resolve_output_transition(record, &evidence);
+        apply_terminal_turn_transition(record, transition, now);
         record.last_output_tail = terminal_output_tail(&detection_output);
 
         let activity_relevant_change = previous_active_profile != record.active_profile
@@ -378,20 +430,9 @@ impl TerminalSessionStore {
         let previous_approval_prompt_at = record.last_approval_prompt_at;
         let previous_turn_state = record.turn_state;
 
-        if terminal_input_submits_prompt(input) {
-            record.active_profile = Some(TerminalLaunchProfile::Codex);
-            record.last_prompt_submitted_at = Some(crate::events::now_ms());
-            record.last_prompt_ready_at = None;
-            record.last_approval_prompt_at = None;
-            record.turn_state = TerminalTurnState::PromptSubmitted;
-            record.last_output_tail.clear();
-        } else if terminal_input_updates_owner_prompt(input)
-            && (codex_session_is_waiting_for_instruction(record)
-                || codex_session_is_waiting_for_approval(record))
-        {
-            record.active_profile = Some(TerminalLaunchProfile::Codex);
-            record.turn_state = TerminalTurnState::OwnerComposing;
-        }
+        let now = crate::events::now_ms();
+        let transition = resolve_input_transition(record, input);
+        apply_terminal_turn_transition(record, transition, now);
 
         let activity_relevant_change = previous_active_profile != record.active_profile
             || previous_prompt_ready_at != record.last_prompt_ready_at
@@ -413,16 +454,8 @@ impl TerminalSessionStore {
         {
             return None;
         }
-        record.active_profile = Some(active_profile);
-        if active_profile == TerminalLaunchProfile::Shell {
-            record.last_prompt_submitted_at = None;
-            record.last_prompt_ready_at = None;
-            record.last_approval_prompt_at = None;
-            record.last_output_tail.clear();
-            record.turn_state = TerminalTurnState::Shell;
-        } else if record.turn_state == TerminalTurnState::Shell {
-            record.turn_state = TerminalTurnState::CodexStarting;
-        }
+        let transition = resolve_active_profile_transition(record, active_profile);
+        apply_terminal_turn_transition(record, transition, crate::events::now_ms());
         Some(record.clone())
     }
 
@@ -455,6 +488,283 @@ impl TerminalSessionStore {
         );
         Some(record.clone())
     }
+}
+
+fn terminal_output_evidence(
+    record: &TerminalSessionRecord,
+    output: &str,
+    detection_output: &str,
+) -> TerminalOutputEvidence {
+    let codex_approval_prompt = codex_output_suggests_approval_prompt(output)
+        || (codex_output_suggests_approval_choice(output)
+            && codex_output_suggests_approval_prompt(detection_output));
+    let owner_waiting = codex_session_is_waiting_for_instruction(record)
+        || codex_session_is_waiting_for_approval(record);
+    let codex_prompt_ready = codex_output_suggests_prompt_ready(output)
+        || (!owner_waiting && codex_output_suggests_prompt_ready(detection_output));
+    let codex_prompt_ready_at_end = codex_output_ends_at_prompt(output)
+        || (!owner_waiting && codex_output_ends_at_prompt(detection_output));
+    let codex_active_work = !codex_prompt_ready_at_end
+        && (codex_output_suggests_active_work(output)
+            || (!codex_prompt_ready
+                && !codex_approval_prompt
+                && codex_output_suggests_active_work(detection_output)));
+
+    TerminalOutputEvidence {
+        codex_approval_prompt,
+        owner_waiting,
+        codex_prompt_ready,
+        codex_prompt_ready_at_end,
+        codex_active_work,
+        stale_work_redraw_at_prompt: codex_prompt_ready_at_end
+            && codex_output_suggests_active_work(output),
+        has_visible_text: codex_output_has_visible_text(output),
+    }
+}
+
+fn resolve_output_transition(
+    record: &TerminalSessionRecord,
+    evidence: &TerminalOutputEvidence,
+) -> TerminalTurnTransition {
+    if record.status == TerminalSessionStatus::Running
+        && evidence.codex_approval_prompt
+        && codex_output_should_track_codex(record)
+    {
+        return TerminalTurnTransition::new(
+            TerminalTurnTransitionKind::Output,
+            TerminalTurnTransitionReason::CodexApprovalPrompt,
+        )
+        .with_active_profile(TerminalLaunchProfile::Codex)
+        .with_last_output_at()
+        .with_prompt_ready_at(TimestampTransition::Clear)
+        .with_approval_prompt_at(TimestampTransition::SetNow)
+        .with_turn_state(TerminalTurnState::WaitingApproval);
+    }
+
+    if record.status == TerminalSessionStatus::Running
+        && evidence.codex_active_work
+        && codex_output_should_track_codex(record)
+    {
+        let mut transition = TerminalTurnTransition::new(
+            TerminalTurnTransitionKind::Output,
+            TerminalTurnTransitionReason::CodexActiveWork,
+        )
+        .with_active_profile(TerminalLaunchProfile::Codex)
+        .with_last_output_at()
+        .with_prompt_ready_at(TimestampTransition::Clear)
+        .with_approval_prompt_at(TimestampTransition::Clear)
+        .with_turn_state(TerminalTurnState::AgentWorking);
+
+        if matches!(
+            record.turn_state,
+            TerminalTurnState::OwnerPromptReady
+                | TerminalTurnState::OwnerComposing
+                | TerminalTurnState::WaitingApproval
+        ) && record.last_prompt_submitted_at.is_none()
+        {
+            transition = transition.with_prompt_submitted_at(TimestampTransition::SetNow);
+        }
+
+        return transition;
+    }
+
+    if record.status == TerminalSessionStatus::Running
+        && evidence.codex_prompt_ready
+        && codex_output_should_track_codex(record)
+    {
+        let reason = if evidence.stale_work_redraw_at_prompt {
+            TerminalTurnTransitionReason::CodexPromptReadyAtEndStaleWorkRedraw
+        } else {
+            TerminalTurnTransitionReason::CodexPromptReady
+        };
+
+        return TerminalTurnTransition::new(TerminalTurnTransitionKind::Output, reason)
+            .with_active_profile(TerminalLaunchProfile::Codex)
+            .with_last_output_at()
+            .with_prompt_ready_at(TimestampTransition::SetNow)
+            .with_approval_prompt_at(TimestampTransition::Clear)
+            .with_turn_state(TerminalTurnState::OwnerPromptReady);
+    }
+
+    if evidence.owner_waiting {
+        return TerminalTurnTransition::no_change(
+            TerminalTurnTransitionReason::OwnerPromptEchoIgnored,
+        );
+    }
+
+    let mut transition = TerminalTurnTransition::new(
+        TerminalTurnTransitionKind::Output,
+        TerminalTurnTransitionReason::NoActivityRelevantChange,
+    )
+    .with_last_output_at();
+
+    if codex_session_is_active(record)
+        && evidence.has_visible_text
+        && (matches!(
+            record.turn_state,
+            TerminalTurnState::PromptSubmitted | TerminalTurnState::AgentWorking
+        ) || evidence.codex_active_work)
+    {
+        transition.reason = TerminalTurnTransitionReason::CodexActiveWork;
+        transition.turn_state = Some(TerminalTurnState::AgentWorking);
+    } else if record.active_profile.unwrap_or(record.profile) == TerminalLaunchProfile::Shell {
+        transition.reason = TerminalTurnTransitionReason::ShellOutput;
+        transition.turn_state = Some(TerminalTurnState::Shell);
+    }
+
+    transition
+}
+
+fn resolve_input_transition(record: &TerminalSessionRecord, input: &str) -> TerminalTurnTransition {
+    if terminal_input_submits_prompt(input) {
+        return TerminalTurnTransition::new(
+            TerminalTurnTransitionKind::Input,
+            TerminalTurnTransitionReason::OwnerInputSubmitted,
+        )
+        .with_active_profile(TerminalLaunchProfile::Codex)
+        .with_prompt_submitted_at(TimestampTransition::SetNow)
+        .with_prompt_ready_at(TimestampTransition::Clear)
+        .with_approval_prompt_at(TimestampTransition::Clear)
+        .with_turn_state(TerminalTurnState::PromptSubmitted)
+        .with_clear_output_tail();
+    }
+
+    if terminal_input_updates_owner_prompt(input)
+        && (codex_session_is_waiting_for_instruction(record)
+            || codex_session_is_waiting_for_approval(record))
+    {
+        return TerminalTurnTransition::new(
+            TerminalTurnTransitionKind::Input,
+            TerminalTurnTransitionReason::OwnerComposing,
+        )
+        .with_active_profile(TerminalLaunchProfile::Codex)
+        .with_turn_state(TerminalTurnState::OwnerComposing);
+    }
+
+    TerminalTurnTransition::no_change(TerminalTurnTransitionReason::NoActivityRelevantChange)
+}
+
+fn resolve_active_profile_transition(
+    record: &TerminalSessionRecord,
+    active_profile: TerminalLaunchProfile,
+) -> TerminalTurnTransition {
+    if active_profile == TerminalLaunchProfile::Shell {
+        return TerminalTurnTransition::new(
+            TerminalTurnTransitionKind::ActiveProfile,
+            TerminalTurnTransitionReason::ActiveProfileResetToShell,
+        )
+        .with_active_profile(TerminalLaunchProfile::Shell)
+        .with_prompt_submitted_at(TimestampTransition::Clear)
+        .with_prompt_ready_at(TimestampTransition::Clear)
+        .with_approval_prompt_at(TimestampTransition::Clear)
+        .with_turn_state(TerminalTurnState::Shell)
+        .with_clear_output_tail();
+    }
+
+    let mut transition = TerminalTurnTransition::new(
+        TerminalTurnTransitionKind::ActiveProfile,
+        TerminalTurnTransitionReason::ActiveProfileChangedToCodex,
+    )
+    .with_active_profile(TerminalLaunchProfile::Codex);
+
+    if record.turn_state == TerminalTurnState::Shell {
+        transition = transition.with_turn_state(TerminalTurnState::CodexStarting);
+    }
+
+    transition
+}
+
+fn resolve_finish_transition(
+    record: &TerminalSessionRecord,
+    exit_code: i32,
+) -> TerminalFinishTransition {
+    let status = if exit_code == 0 {
+        TerminalSessionStatus::Exited
+    } else {
+        TerminalSessionStatus::Failed
+    };
+    let reason = if exit_code == 0 {
+        TerminalTurnTransitionReason::SessionFinishedCompleted
+    } else {
+        TerminalTurnTransitionReason::SessionFinishedFailed
+    };
+    let mut turn_transition =
+        TerminalTurnTransition::new(TerminalTurnTransitionKind::Finish, reason);
+
+    if codex_session_should_track_prompt(record) {
+        turn_transition = turn_transition.with_turn_state(match status {
+            TerminalSessionStatus::Exited | TerminalSessionStatus::Stopped => {
+                TerminalTurnState::Completed
+            }
+            TerminalSessionStatus::Failed => TerminalTurnState::Failed,
+            TerminalSessionStatus::Running => record.turn_state,
+        });
+    }
+
+    TerminalFinishTransition {
+        status,
+        turn_transition,
+    }
+}
+
+fn apply_terminal_turn_transition(
+    record: &mut TerminalSessionRecord,
+    transition: TerminalTurnTransition,
+    now: u64,
+) {
+    let _reason = transition.reason;
+
+    match transition.kind {
+        TerminalTurnTransitionKind::NoChange => return,
+        TerminalTurnTransitionKind::Output
+        | TerminalTurnTransitionKind::Input
+        | TerminalTurnTransitionKind::ActiveProfile
+        | TerminalTurnTransitionKind::Finish => {}
+    }
+
+    if let Some(active_profile) = transition.active_profile {
+        record.active_profile = Some(active_profile);
+    }
+    if transition.last_output_at {
+        record.last_output_at = Some(now);
+    }
+    apply_timestamp_transition(
+        &mut record.last_prompt_submitted_at,
+        transition.prompt_submitted_at,
+        now,
+    );
+    apply_timestamp_transition(
+        &mut record.last_prompt_ready_at,
+        transition.prompt_ready_at,
+        now,
+    );
+    apply_timestamp_transition(
+        &mut record.last_approval_prompt_at,
+        transition.approval_prompt_at,
+        now,
+    );
+    if let Some(turn_state) = transition.turn_state {
+        record.turn_state = turn_state;
+    }
+    if transition.clear_output_tail {
+        record.last_output_tail.clear();
+    }
+}
+
+fn apply_timestamp_transition(
+    timestamp: &mut Option<u64>,
+    transition: TimestampTransition,
+    now: u64,
+) {
+    match transition {
+        TimestampTransition::Unchanged => {}
+        TimestampTransition::SetNow => *timestamp = Some(now),
+        TimestampTransition::Clear => *timestamp = None,
+    }
+}
+
+fn codex_output_should_track_codex(record: &TerminalSessionRecord) -> bool {
+    codex_session_is_active(record) || record.profile == TerminalLaunchProfile::Shell
 }
 
 pub fn restore_terminal_session_records(
@@ -622,9 +932,12 @@ mod tests {
 
     use super::super::{TerminalLaunchProfile, TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE};
     use super::{
-        codex_session_is_waiting_for_instruction, restore_terminal_session_records,
+        codex_session_is_waiting_for_instruction, output_for_prompt_detection,
+        resolve_active_profile_transition, resolve_finish_transition, resolve_input_transition,
+        resolve_output_transition, restore_terminal_session_records, terminal_output_evidence,
         TerminalSessionRecord, TerminalSessionRuntime, TerminalSessionStatus, TerminalSessionStore,
-        TerminalStopReason, TerminalTurnState,
+        TerminalStopReason, TerminalTurnState, TerminalTurnTransitionKind,
+        TerminalTurnTransitionReason,
     };
 
     #[test]
@@ -646,6 +959,31 @@ mod tests {
         assert_eq!(finished.stop_reason, Some(TerminalStopReason::Exited));
         assert!(finished.ended_at.is_some());
         assert!(finished.stopped_at.is_some());
+    }
+
+    #[test]
+    fn terminal_session_finish_updates_codex_turn_state() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+        store.create(
+            "term-2".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+
+        let completed = store.finish("term-1", 0).unwrap();
+        let failed = store.finish("term-2", 1).unwrap();
+
+        assert_eq!(completed.status, TerminalSessionStatus::Exited);
+        assert_eq!(completed.turn_state, TerminalTurnState::Completed);
+        assert_eq!(failed.status, TerminalSessionStatus::Failed);
+        assert_eq!(failed.turn_state, TerminalTurnState::Failed);
     }
 
     #[test]
@@ -961,6 +1299,139 @@ mod tests {
     }
 
     #[test]
+    fn terminal_turn_resolver_labels_stale_work_redraw_prompt_return() {
+        let record = running_session_record(
+            TerminalLaunchProfile::Shell,
+            TerminalLaunchProfile::Codex,
+            TerminalTurnState::AgentWorking,
+        );
+        let output = "\x1b[2K\r• Working (2s • esc to interrupt)\r\nDone.\r\n› ";
+        let detection_output = output_for_prompt_detection(&record.last_output_tail, output);
+        let evidence = terminal_output_evidence(&record, output, &detection_output);
+
+        let transition = resolve_output_transition(&record, &evidence);
+
+        assert_eq!(transition.kind, TerminalTurnTransitionKind::Output);
+        assert_eq!(
+            transition.reason,
+            TerminalTurnTransitionReason::CodexPromptReadyAtEndStaleWorkRedraw
+        );
+        assert_eq!(
+            transition.turn_state,
+            Some(TerminalTurnState::OwnerPromptReady)
+        );
+    }
+
+    #[test]
+    fn terminal_turn_resolver_labels_owner_prompt_echo_ignored() {
+        let record = running_session_record(
+            TerminalLaunchProfile::Codex,
+            TerminalLaunchProfile::Codex,
+            TerminalTurnState::OwnerComposing,
+        );
+        let output = "Improve documentation";
+        let detection_output = output_for_prompt_detection(&record.last_output_tail, output);
+        let evidence = terminal_output_evidence(&record, output, &detection_output);
+
+        let transition = resolve_output_transition(&record, &evidence);
+
+        assert_eq!(transition.kind, TerminalTurnTransitionKind::NoChange);
+        assert_eq!(
+            transition.reason,
+            TerminalTurnTransitionReason::OwnerPromptEchoIgnored
+        );
+    }
+
+    #[test]
+    fn terminal_turn_resolver_labels_owner_input_transitions() {
+        let record = running_session_record(
+            TerminalLaunchProfile::Codex,
+            TerminalLaunchProfile::Codex,
+            TerminalTurnState::OwnerPromptReady,
+        );
+
+        let composing = resolve_input_transition(&record, "draft");
+        let submitted = resolve_input_transition(&record, "draft\r");
+
+        assert_eq!(composing.kind, TerminalTurnTransitionKind::Input);
+        assert_eq!(
+            composing.reason,
+            TerminalTurnTransitionReason::OwnerComposing
+        );
+        assert_eq!(
+            composing.turn_state,
+            Some(TerminalTurnState::OwnerComposing)
+        );
+        assert_eq!(submitted.kind, TerminalTurnTransitionKind::Input);
+        assert_eq!(
+            submitted.reason,
+            TerminalTurnTransitionReason::OwnerInputSubmitted
+        );
+        assert_eq!(
+            submitted.turn_state,
+            Some(TerminalTurnState::PromptSubmitted)
+        );
+    }
+
+    #[test]
+    fn terminal_turn_resolver_labels_profile_and_finish_transitions() {
+        let shell_reset_record = running_session_record(
+            TerminalLaunchProfile::Shell,
+            TerminalLaunchProfile::Codex,
+            TerminalTurnState::WaitingApproval,
+        );
+        let codex_start_record = running_session_record(
+            TerminalLaunchProfile::Shell,
+            TerminalLaunchProfile::Shell,
+            TerminalTurnState::Shell,
+        );
+        let finish_record = running_session_record(
+            TerminalLaunchProfile::Codex,
+            TerminalLaunchProfile::Codex,
+            TerminalTurnState::CodexStarting,
+        );
+
+        let shell_reset =
+            resolve_active_profile_transition(&shell_reset_record, TerminalLaunchProfile::Shell);
+        let codex_started =
+            resolve_active_profile_transition(&codex_start_record, TerminalLaunchProfile::Codex);
+        let completed = resolve_finish_transition(&finish_record, 0);
+        let failed = resolve_finish_transition(&finish_record, 1);
+
+        assert_eq!(
+            shell_reset.reason,
+            TerminalTurnTransitionReason::ActiveProfileResetToShell
+        );
+        assert_eq!(shell_reset.turn_state, Some(TerminalTurnState::Shell));
+        assert_eq!(
+            codex_started.reason,
+            TerminalTurnTransitionReason::ActiveProfileChangedToCodex
+        );
+        assert_eq!(
+            codex_started.turn_state,
+            Some(TerminalTurnState::CodexStarting)
+        );
+        assert_eq!(completed.status, TerminalSessionStatus::Exited);
+        assert_eq!(
+            completed.turn_transition.reason,
+            TerminalTurnTransitionReason::SessionFinishedCompleted
+        );
+        assert_eq!(
+            completed.turn_transition.turn_state,
+            Some(TerminalTurnState::Completed)
+        );
+        assert_eq!(failed.status, TerminalSessionStatus::Failed);
+        assert_eq!(
+            failed.turn_transition.reason,
+            TerminalTurnTransitionReason::SessionFinishedFailed
+        );
+        assert_eq!(
+            failed.turn_transition.turn_state,
+            Some(TerminalTurnState::Failed)
+        );
+    }
+
+    #[test]
     fn terminal_session_history_is_capped_per_employee() {
         let store = TerminalSessionStore::default();
         let records = (0..(TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE + 5))
@@ -1039,6 +1510,36 @@ mod tests {
             last_prompt_ready_at: None,
             last_approval_prompt_at: None,
             turn_state: TerminalTurnState::Completed,
+            last_output_tail: String::new(),
+            message: None,
+        }
+    }
+
+    fn running_session_record(
+        profile: TerminalLaunchProfile,
+        active_profile: TerminalLaunchProfile,
+        turn_state: TerminalTurnState,
+    ) -> TerminalSessionRecord {
+        TerminalSessionRecord {
+            session_id: "term-1".to_string(),
+            employee_id: "employee-1".to_string(),
+            profile,
+            runtime: TerminalSessionRuntime::Pty,
+            active_profile: Some(active_profile),
+            cwd: "/tmp".to_string(),
+            current_cwd: Some("/tmp".to_string()),
+            status: TerminalSessionStatus::Running,
+            exit_code: None,
+            started_at: 1,
+            ended_at: None,
+            stopped_at: None,
+            stop_reason: None,
+            label: format!("{} session", profile.display_label()),
+            last_output_at: None,
+            last_prompt_submitted_at: None,
+            last_prompt_ready_at: None,
+            last_approval_prompt_at: None,
+            turn_state,
             last_output_tail: String::new(),
             message: None,
         }

@@ -341,12 +341,12 @@ fn fixtures() -> Vec<Fixture> {
             expected: expected_shell(TerminalSessionStatus::Running, TerminalTurnState::Shell),
         },
         Fixture {
-            name: "exited Codex session maps to completed runtime with unchanged turn state",
+            name: "exited Codex session maps to completed turn state and runtime",
             launch_profile: TerminalLaunchProfile::Codex,
             events: vec![FixtureEvent::Finish(0)],
             expected: expected_codex(
                 TerminalSessionStatus::Exited,
-                TerminalTurnState::CodexStarting,
+                TerminalTurnState::Completed,
                 false,
                 false,
                 false,
@@ -354,12 +354,12 @@ fn fixtures() -> Vec<Fixture> {
             ),
         },
         Fixture {
-            name: "failed Codex session maps to failed runtime with unchanged turn state",
+            name: "failed Codex session maps to failed turn state and runtime",
             launch_profile: TerminalLaunchProfile::Codex,
             events: vec![FixtureEvent::Finish(1)],
             expected: expected_codex(
                 TerminalSessionStatus::Failed,
-                TerminalTurnState::CodexStarting,
+                TerminalTurnState::Failed,
                 false,
                 false,
                 false,
