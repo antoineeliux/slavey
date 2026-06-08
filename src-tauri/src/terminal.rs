@@ -26,8 +26,8 @@ use crate::{
 
 const TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE: usize = 50;
 const TERMINAL_LABEL_MAX_CHARS: usize = 80;
-const TERMINAL_OUTPUT_BUFFER_MAX_BYTES: usize = 250_000;
-const TERMINAL_OUTPUT_TRUNCATION_MARKER: &str = "\n[... earlier output truncated ...]\n";
+pub(crate) const TERMINAL_OUTPUT_BUFFER_MAX_BYTES: usize = 250_000;
+pub(crate) const TERMINAL_OUTPUT_TRUNCATION_MARKER: &str = "\n[... earlier output truncated ...]\n";
 const CODEX_SHELL_START_MARKER: &str = "\x1b]777;slavey-codex=start\x07";
 const CODEX_SHELL_END_MARKER: &str = "\x1b]777;slavey-codex=end\x07";
 const SHELL_CWD_MARKER_PREFIX: &str = "\x1b]777;slavey-cwd=";
@@ -39,12 +39,13 @@ mod session_store;
 pub mod uploads;
 
 pub(crate) use self::agent_runtime::{
-    agent_kind_for_command, AgentKind, AgentRuntimeSnapshot, AgentRuntimeState, AgentRuntimeStore,
+    agent_kind_for_command, AgentKind, AgentRuntimeConfidence, AgentRuntimeSnapshot,
+    AgentRuntimeSource, AgentRuntimeState, AgentRuntimeStore,
 };
 pub use self::codex_status::codex_cli_status_impl;
 pub(crate) use self::session_store::{
-    restore_terminal_session_records, TerminalSessionRecord, TerminalSessionStatus,
-    TerminalSessionStore, TerminalStopReason,
+    restore_terminal_session_records, TerminalSessionRecord, TerminalSessionRuntime,
+    TerminalSessionStatus, TerminalSessionStore, TerminalStopReason, TerminalTurnState,
 };
 
 pub const DEFAULT_PTY_SIZE: PtySize = PtySize {
@@ -793,6 +794,9 @@ pub fn terminal_session_output(
     if existing.status != TerminalSessionStatus::Running {
         return Ok(String::new());
     }
+    if existing.runtime == TerminalSessionRuntime::CodexAppServer {
+        return Ok(state.codex_app_server.output_for_session(&session_id));
+    }
     state
         .terminal
         .output_for_session(&employee_id, &session_id)
@@ -821,19 +825,23 @@ pub fn terminal_session_stop(
     ensure_session_owner(&existing.employee_id, &employee_id).map_err(|error| error.to_string())?;
 
     if existing.status == TerminalSessionStatus::Running {
-        if let Err(error) = state
-            .terminal
-            .kill_session_for_employee(&employee_id, &session_id)
-        {
-            let message = error.to_string();
-            if message.contains("does not belong") {
-                return Err(message);
+        if existing.runtime == TerminalSessionRuntime::CodexAppServer {
+            state.codex_app_server.stop_session(&session_id);
+        } else {
+            if let Err(error) = state
+                .terminal
+                .kill_session_for_employee(&employee_id, &session_id)
+            {
+                let message = error.to_string();
+                if message.contains("does not belong") {
+                    return Err(message);
+                }
+                emit_log(
+                    &app,
+                    LogLevel::Warn,
+                    format!("failed to kill terminal session {session_id}: {message}"),
+                );
             }
-            emit_log(
-                &app,
-                LogLevel::Warn,
-                format!("failed to kill terminal session {session_id}: {message}"),
-            );
         }
     }
 
@@ -904,16 +912,22 @@ pub fn terminal_write(
     input: String,
 ) -> Result<(), String> {
     state
+        .terminal_sessions
+        .get(&session_id)
+        .ok_or_else(|| format!("terminal session {session_id} not found"))
+        .and_then(|session| {
+            if session.runtime == TerminalSessionRuntime::CodexAppServer {
+                Err("use codex_task_submit for Codex app-server sessions".to_string())
+            } else {
+                Ok(())
+            }
+        })?;
+    state
         .terminal
         .write_to_session(&employee_id, &session_id, &input)
         .map_err(|error| error.to_string())?;
-    if let Some(record) = state
-        .terminal_sessions
-        .mark_prompt_submitted(&session_id, &input)
-    {
-        state
-            .agent_runtime
-            .record_prompt_submitted_from_session(&record);
+    if let Some(record) = state.terminal_sessions.record_input(&session_id, &input) {
+        state.agent_runtime.sync_from_terminal_session(&record);
         emit_terminal_session_updated(&app, record);
     }
     Ok(())
@@ -927,6 +941,17 @@ pub fn terminal_resize(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    state
+        .terminal_sessions
+        .get(&session_id)
+        .ok_or_else(|| format!("terminal session {session_id} not found"))
+        .and_then(|session| {
+            if session.runtime == TerminalSessionRuntime::CodexAppServer {
+                Err("Codex app-server sessions do not support PTY resize".to_string())
+            } else {
+                Ok(())
+            }
+        })?;
     state
         .terminal
         .resize_session(&employee_id, &session_id, cols, rows)

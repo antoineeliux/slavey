@@ -1,6 +1,8 @@
 mod actions;
 mod activity;
+mod activity_contract;
 mod approvals;
+mod codex_app_server;
 mod diagnostics;
 mod employees;
 mod events;
@@ -15,6 +17,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use actions::{restore_actions, ActionManager};
 use approvals::{restore_approvals, ApprovalManager};
+use codex_app_server::CodexAppServerManager;
 use employees::EmployeeManager;
 use events::{emit_log, LogLevel};
 use parking_lot::RwLock;
@@ -29,6 +32,7 @@ pub struct AppState {
     workspace_root: WorkspaceRootHandle,
     pub employees: EmployeeManager,
     pub terminal: TerminalManager,
+    pub codex_app_server: CodexAppServerManager,
     pub terminal_sessions: TerminalSessionStore,
     pub agent_runtime: AgentRuntimeStore,
     pub persistence: PersistenceManager,
@@ -107,6 +111,7 @@ pub fn run() {
             let actions = ActionManager::default();
             let processes = ProcessManager::default();
             let terminal_sessions = TerminalSessionStore::default();
+            let codex_app_server = CodexAppServerManager::default();
             let agent_runtime = AgentRuntimeStore::default();
             if let Some(persisted) = &persisted {
                 employees.replace_all(persistence::restore_employees(
@@ -133,6 +138,7 @@ pub fn run() {
                 workspace_root: Arc::new(RwLock::new(workspace_root)),
                 employees,
                 terminal: TerminalManager::default(),
+                codex_app_server,
                 terminal_sessions,
                 agent_runtime,
                 persistence,
@@ -168,6 +174,7 @@ pub fn run() {
             employees::employee_set_working_folder,
             employees::employee_start_terminal,
             employees::employee_stop_terminal,
+            codex_app_server::codex_task_submit,
             approvals::approval_create,
             approvals::approval_list,
             approvals::approval_get,
@@ -216,6 +223,7 @@ pub fn run() {
             terminal::uploads::terminal_image_upload,
             terminal::uploads::terminal_image_upload_path,
             terminal::codex_cli_status,
+            codex_app_server::codex_app_server_status,
             workspace::workspace_info,
             workspace::workspace_set_root,
             workspace::workspace_recent_list,

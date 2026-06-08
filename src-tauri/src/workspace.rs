@@ -376,6 +376,7 @@ mod tests {
             workspace_root: Arc::new(RwLock::new(workspace_root)),
             employees: EmployeeManager::default(),
             terminal: TerminalManager::default(),
+            codex_app_server: crate::codex_app_server::CodexAppServerManager::default(),
             terminal_sessions: TerminalSessionStore::default(),
             agent_runtime: AgentRuntimeStore::default(),
             persistence: PersistenceManager::new(persistence_path, None),
@@ -431,6 +432,7 @@ mod tests {
             session_id: format!("session-{employee_id}"),
             employee_id: employee_id.to_string(),
             profile: TerminalLaunchProfile::Shell,
+            runtime: crate::terminal::TerminalSessionRuntime::Pty,
             active_profile: Some(TerminalLaunchProfile::Shell),
             cwd: cwd.to_string_lossy().to_string(),
             current_cwd: Some(cwd.to_string_lossy().to_string()),
@@ -445,6 +447,7 @@ mod tests {
             last_prompt_submitted_at: None,
             last_prompt_ready_at: None,
             last_approval_prompt_at: None,
+            turn_state: crate::terminal::TerminalTurnState::Completed,
             last_output_tail: String::new(),
             message: Some("stopped".to_string()),
         }

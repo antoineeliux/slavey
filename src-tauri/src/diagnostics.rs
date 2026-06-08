@@ -5,13 +5,20 @@ use tauri::State;
 
 use crate::{
     actions::{Action, ActionFailureReason, ActionKind, ActionSource, ActionStatus},
+    activity::{
+        employee_activity_list_impl, EmployeeActivity, EmployeeActivityStatus, EmployeeAttention,
+        EmployeeBehaviorState, EmployeeLifecycleState, EmployeeReviewCounts,
+        EmployeeRuntimeSession, EmployeeTerminalActivityState, EmployeeWorkState,
+    },
+    activity_contract::EmployeeActivityContract,
     approvals::{ApprovalKind, ApprovalRequest, ApprovalStatus},
     events::now_ms,
     persistence::AppSettings,
     processes::{ManagedProcess, ManagedProcessStatus},
     terminal::{
-        codex_cli_status_impl, CodexCliStatus, TerminalLaunchProfile, TerminalSessionRecord,
-        TerminalSessionStatus, TerminalStopReason,
+        codex_cli_status_impl, AgentRuntimeSnapshot, CodexCliStatus, TerminalLaunchProfile,
+        TerminalSessionRecord, TerminalSessionRuntime, TerminalSessionStatus, TerminalStopReason,
+        TerminalTurnState,
     },
     workspace::{repo_health_for_workspace, RepoHealth},
     AppState,
@@ -62,6 +69,7 @@ pub struct DiagnosticsExportBundle {
     pub summary: DiagnosticsSummary,
     pub settings: AppSettings,
     pub workspace: DiagnosticsWorkspaceInfo,
+    pub employee_activities: Vec<DiagnosticsEmployeeActivityMetadata>,
     pub actions: Vec<DiagnosticsActionMetadata>,
     pub approvals: Vec<DiagnosticsApprovalMetadata>,
     pub terminal_sessions: Vec<DiagnosticsTerminalSessionMetadata>,
@@ -129,11 +137,36 @@ pub struct DiagnosticsApprovalMetadata {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DiagnosticsEmployeeActivityMetadata {
+    pub employee_id: String,
+    pub status: EmployeeActivityStatus,
+    pub lifecycle: EmployeeLifecycleState,
+    pub behavior: EmployeeBehaviorState,
+    pub terminal_state: EmployeeTerminalActivityState,
+    pub activity_reason: String,
+    pub session: EmployeeRuntimeSession,
+    pub agent: AgentRuntimeSnapshot,
+    pub work: EmployeeWorkState,
+    pub attention: EmployeeAttention,
+    pub contract: EmployeeActivityContract,
+    pub active_terminal_session_id: Option<String>,
+    pub active_action_id: Option<String>,
+    pub active_process_ids: Vec<String>,
+    pub review_counts: EmployeeReviewCounts,
+    pub blockers: Vec<String>,
+    pub last_activity_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DiagnosticsTerminalSessionMetadata {
     pub session_id: String,
     pub employee_id: String,
     pub profile: TerminalLaunchProfile,
+    pub runtime: TerminalSessionRuntime,
+    pub active_profile: Option<TerminalLaunchProfile>,
     pub cwd: String,
+    pub current_cwd: Option<String>,
     pub status: TerminalSessionStatus,
     pub exit_code: Option<i32>,
     pub started_at: u64,
@@ -142,6 +175,10 @@ pub struct DiagnosticsTerminalSessionMetadata {
     pub stop_reason: Option<TerminalStopReason>,
     pub label: String,
     pub last_output_at: Option<u64>,
+    pub last_prompt_submitted_at: Option<u64>,
+    pub last_prompt_ready_at: Option<u64>,
+    pub last_approval_prompt_at: Option<u64>,
+    pub turn_state: TerminalTurnState,
     pub message: Option<String>,
 }
 
@@ -213,6 +250,10 @@ fn diagnostics_summary_impl(state: &AppState) -> DiagnosticsSummary {
 fn diagnostics_export_bundle_impl(state: &AppState) -> DiagnosticsExportBundle {
     let workspace_root = state.workspace_root();
     let repo_health = repo_health_for_workspace(&workspace_root, codex_cli_status_impl());
+    let employee_activities = recent_items(employee_activity_list_impl(state), MAX_EXPORT_ITEMS)
+        .into_iter()
+        .map(sanitize_employee_activity_metadata)
+        .collect();
     let actions = recent_items(state.actions.list(None), MAX_EXPORT_ITEMS)
         .into_iter()
         .map(sanitize_action_metadata)
@@ -235,6 +276,7 @@ fn diagnostics_export_bundle_impl(state: &AppState) -> DiagnosticsExportBundle {
         summary: diagnostics_summary_impl(state),
         settings: state.persistence.settings(),
         workspace: diagnostics_workspace_info(&workspace_root, repo_health, state),
+        employee_activities,
         actions,
         approvals,
         terminal_sessions,
@@ -439,6 +481,30 @@ fn sanitize_approval_metadata(approval: ApprovalRequest) -> DiagnosticsApprovalM
     }
 }
 
+fn sanitize_employee_activity_metadata(
+    activity: EmployeeActivity,
+) -> DiagnosticsEmployeeActivityMetadata {
+    DiagnosticsEmployeeActivityMetadata {
+        employee_id: activity.employee_id,
+        status: activity.status,
+        lifecycle: activity.lifecycle,
+        behavior: activity.behavior,
+        terminal_state: activity.terminal_state,
+        activity_reason: redact_diagnostic_string(&activity.activity_reason),
+        session: activity.session,
+        agent: activity.agent,
+        work: activity.work,
+        attention: activity.attention,
+        contract: activity.contract,
+        active_terminal_session_id: activity.active_terminal_session_id,
+        active_action_id: activity.active_action_id,
+        active_process_ids: activity.active_process_ids,
+        review_counts: activity.review_counts,
+        blockers: sanitize_strings(activity.blockers),
+        last_activity_at: activity.last_activity_at,
+    }
+}
+
 fn sanitize_terminal_session_metadata(
     session: TerminalSessionRecord,
 ) -> DiagnosticsTerminalSessionMetadata {
@@ -446,7 +512,10 @@ fn sanitize_terminal_session_metadata(
         session_id: session.session_id,
         employee_id: session.employee_id,
         profile: session.profile,
+        runtime: session.runtime,
+        active_profile: session.active_profile,
         cwd: redact_path_string(&session.cwd),
+        current_cwd: session.current_cwd.as_deref().map(redact_path_string),
         status: session.status,
         exit_code: session.exit_code,
         started_at: session.started_at,
@@ -455,6 +524,10 @@ fn sanitize_terminal_session_metadata(
         stop_reason: session.stop_reason,
         label: redact_diagnostic_string(&session.label),
         last_output_at: session.last_output_at,
+        last_prompt_submitted_at: session.last_prompt_submitted_at,
+        last_prompt_ready_at: session.last_prompt_ready_at,
+        last_approval_prompt_at: session.last_approval_prompt_at,
+        turn_state: session.turn_state,
         message: session.message.as_deref().map(redact_diagnostic_string),
     }
 }
@@ -528,8 +601,22 @@ fn process_status_key(status: ManagedProcessStatus) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs as std_fs, path::PathBuf, sync::Arc};
+
+    use parking_lot::RwLock;
+
     use super::*;
-    use crate::{approvals::ApprovalRequest, processes::ManagedProcess};
+    use crate::{
+        activity::EmployeeActivityStatus,
+        activity_contract::{
+            EmployeeActivityContractRenderPlacement, EmployeeActivityContractSourceConfidence,
+            EmployeeActivityContractSourceRuntime,
+        },
+        approvals::{ApprovalManager, ApprovalRequest},
+        employees::{EmployeeManager, EmployeeRole, EmployeeStatus},
+        processes::{ManagedProcess, ProcessManager},
+        terminal::{AgentRuntimeSource, AgentRuntimeState, TerminalManager, TerminalSessionStore},
+    };
 
     #[test]
     fn diagnostics_count_aggregation_groups_statuses() {
@@ -551,6 +638,7 @@ mod tests {
             session_id: "term-1".to_string(),
             employee_id: "employee-1".to_string(),
             profile: TerminalLaunchProfile::Shell,
+            runtime: crate::terminal::TerminalSessionRuntime::Pty,
             active_profile: Some(TerminalLaunchProfile::Shell),
             cwd: "/tmp".to_string(),
             current_cwd: Some("/tmp".to_string()),
@@ -565,6 +653,7 @@ mod tests {
             last_prompt_submitted_at: None,
             last_prompt_ready_at: None,
             last_approval_prompt_at: None,
+            turn_state: crate::terminal::TerminalTurnState::Shell,
             last_output_tail: String::new(),
             message: None,
         }];
@@ -601,6 +690,141 @@ mod tests {
         assert!(!json.contains("SECRET=top"));
         assert!(!json.contains("contents"));
         assert!(!json.contains("\"command\""));
+    }
+
+    #[test]
+    fn export_bundle_includes_employee_activity_contract_trace() {
+        let root = test_root("activity-contract-trace");
+        let state = test_state(root.clone());
+        let employee = state.employees.create(
+            "Ada".to_string(),
+            EmployeeRole::General,
+            state.workspace_root(),
+        );
+        let session = state.terminal_sessions.create_with_runtime(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+            TerminalSessionRuntime::CodexAppServer,
+        );
+        let prompt_record = state
+            .terminal_sessions
+            .record_input(&session.session_id, "\r")
+            .unwrap();
+        state
+            .agent_runtime
+            .sync_from_terminal_session(&prompt_record);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Running;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+
+        let bundle = diagnostics_export_bundle_impl(&state);
+
+        let activity = bundle
+            .employee_activities
+            .iter()
+            .find(|activity| activity.employee_id == employee.id)
+            .expect("employee activity diagnostics should include employee");
+        assert_eq!(activity.status, EmployeeActivityStatus::CodexRunning);
+        assert_eq!(activity.activity_reason, "terminal_agent_working");
+        assert_eq!(activity.agent.state, AgentRuntimeState::Thinking);
+        assert_eq!(activity.agent.source, AgentRuntimeSource::CodexAppServer);
+        assert_eq!(
+            activity.contract.source.runtime,
+            EmployeeActivityContractSourceRuntime::CodexAppServer
+        );
+        assert_eq!(
+            activity.contract.source.confidence,
+            EmployeeActivityContractSourceConfidence::Structured
+        );
+        assert_eq!(
+            activity.contract.render.placement,
+            EmployeeActivityContractRenderPlacement::Desk
+        );
+        assert_eq!(
+            activity.active_terminal_session_id.as_deref(),
+            Some("session-1")
+        );
+    }
+
+    #[test]
+    fn terminal_diagnostics_include_runtime_turn_evidence_and_redact_strings() {
+        let cwd = "/Users/alice/project/token=abc123";
+        let current_cwd = "/Users/alice/project/secret=top";
+        let metadata = sanitize_terminal_session_metadata(TerminalSessionRecord {
+            session_id: "term-1".to_string(),
+            employee_id: "employee-1".to_string(),
+            profile: TerminalLaunchProfile::Codex,
+            runtime: TerminalSessionRuntime::CodexAppServer,
+            active_profile: Some(TerminalLaunchProfile::Codex),
+            cwd: cwd.to_string(),
+            current_cwd: Some(current_cwd.to_string()),
+            status: TerminalSessionStatus::Running,
+            exit_code: None,
+            started_at: 1,
+            ended_at: None,
+            stopped_at: None,
+            stop_reason: None,
+            label: "Codex token=abc123".to_string(),
+            last_output_at: Some(2),
+            last_prompt_submitted_at: Some(3),
+            last_prompt_ready_at: Some(4),
+            last_approval_prompt_at: Some(5),
+            turn_state: TerminalTurnState::WaitingApproval,
+            last_output_tail: "raw terminal output TOKEN=abc123".to_string(),
+            message: Some("password: hunter2".to_string()),
+        });
+
+        assert_eq!(metadata.runtime, TerminalSessionRuntime::CodexAppServer);
+        assert_eq!(metadata.active_profile, Some(TerminalLaunchProfile::Codex));
+        assert_eq!(metadata.cwd, redact_path_string(cwd));
+        assert_eq!(
+            metadata.current_cwd.as_deref(),
+            Some(redact_path_string(current_cwd).as_str())
+        );
+        assert_eq!(metadata.last_prompt_submitted_at, Some(3));
+        assert_eq!(metadata.last_prompt_ready_at, Some(4));
+        assert_eq!(metadata.last_approval_prompt_at, Some(5));
+        assert_eq!(metadata.turn_state, TerminalTurnState::WaitingApproval);
+
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert!(json.contains("codex_app_server"));
+        assert!(json.contains("waiting_approval"));
+        assert!(!json.contains("raw terminal output"));
+        assert!(!json.contains("lastOutputTail"));
+        assert!(!json.contains("abc123"));
+        assert!(!json.contains("hunter2"));
+        assert!(!json.contains("SECRET=top"));
+    }
+
+    fn test_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "slavey-diagnostics-{name}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std_fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    fn test_state(workspace_root: PathBuf) -> AppState {
+        AppState {
+            workspace_root: Arc::new(RwLock::new(workspace_root.clone())),
+            employees: EmployeeManager::default(),
+            terminal: TerminalManager::default(),
+            codex_app_server: crate::codex_app_server::CodexAppServerManager::default(),
+            terminal_sessions: TerminalSessionStore::default(),
+            agent_runtime: crate::terminal::AgentRuntimeStore::default(),
+            persistence: crate::persistence::PersistenceManager::new(
+                workspace_root.join("state.json"),
+                None,
+            ),
+            approvals: ApprovalManager::default(),
+            actions: crate::actions::ActionManager::default(),
+            processes: ProcessManager::default(),
+        }
     }
 
     fn sample_action(status: ActionStatus) -> Action {

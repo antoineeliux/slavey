@@ -21,8 +21,8 @@ use crate::{
     processes::ProcessManager,
     read_workspace_root,
     terminal::{
-        TerminalLaunchProfile, TerminalProfileSessionRequest, TerminalSessionStatus,
-        TerminalSessionStore, DEFAULT_PTY_SIZE,
+        TerminalLaunchProfile, TerminalProfileSessionRequest, TerminalSessionRuntime,
+        TerminalSessionStatus, TerminalSessionStore, DEFAULT_PTY_SIZE,
     },
     AppState, WorkspaceRootHandle,
 };
@@ -220,9 +220,7 @@ pub fn employee_remove(
 
     if let Some(removed) = state.employees.remove(&employee_id) {
         if let Some(session_id) = removed.terminal_session_id {
-            let _ = state
-                .terminal
-                .kill_session_for_employee(&removed.id, &session_id);
+            stop_employee_session_runtime(&state, &removed.id, &session_id, &app);
             if let Some(record) = state.terminal_sessions.stop(&session_id) {
                 state.agent_runtime.sync_from_terminal_session(&record);
                 emit_terminal_session_updated(&app, record);
@@ -517,16 +515,7 @@ pub fn employee_stop_terminal(
         .ok_or_else(|| "employee not found".to_string())?;
 
     if let Some(session_id) = employee.terminal_session_id.clone() {
-        if let Err(error) = state
-            .terminal
-            .kill_session_for_employee(&employee_id, &session_id)
-        {
-            emit_log(
-                &app,
-                LogLevel::Warn,
-                format!("failed to kill terminal session {session_id}: {error}"),
-            );
-        }
+        stop_employee_session_runtime(&state, &employee_id, &session_id, &app);
         if let Some(record) = state.terminal_sessions.stop(&session_id) {
             state.agent_runtime.sync_from_terminal_session(&record);
             emit_terminal_session_updated(&app, record);
@@ -550,6 +539,33 @@ pub fn employee_stop_terminal(
     emit_employee_updated(&app, updated.clone());
     persist_or_log(&app, &state);
     Ok(updated)
+}
+
+fn stop_employee_session_runtime(
+    state: &State<'_, AppState>,
+    employee_id: &str,
+    session_id: &str,
+    app: &AppHandle,
+) {
+    let runtime = state
+        .terminal_sessions
+        .get(session_id)
+        .map(|session| session.runtime)
+        .unwrap_or(TerminalSessionRuntime::Pty);
+    if runtime == TerminalSessionRuntime::CodexAppServer {
+        state.codex_app_server.stop_session(session_id);
+        return;
+    }
+    if let Err(error) = state
+        .terminal
+        .kill_session_for_employee(employee_id, session_id)
+    {
+        emit_log(
+            app,
+            LogLevel::Warn,
+            format!("failed to kill terminal session {session_id}: {error}"),
+        );
+    }
 }
 
 fn persist_or_log(app: &AppHandle, state: &State<'_, AppState>) {

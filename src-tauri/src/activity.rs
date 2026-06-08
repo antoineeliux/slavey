@@ -8,13 +8,17 @@ use tauri::State;
 
 use crate::{
     actions::{Action, ActionStatus},
+    activity_contract::{
+        resolve_employee_activity_contract, EmployeeActivityContract, EmployeeActivityContractInput,
+    },
     approvals::{ApprovalRequest, ApprovalStatus},
     employees::{Employee, EmployeeStatus},
     git::{current_branch, parse_status_lines, run_git},
     processes::{ManagedProcess, ManagedProcessStatus},
     terminal::{
         agent_kind_for_command, AgentKind, AgentRuntimeSnapshot, AgentRuntimeState,
-        AgentRuntimeStore, TerminalLaunchProfile, TerminalSessionRecord, TerminalSessionStatus,
+        AgentRuntimeStore, TerminalLaunchProfile, TerminalSessionRecord, TerminalSessionRuntime,
+        TerminalSessionStatus,
     },
     AppState,
 };
@@ -173,6 +177,7 @@ pub struct EmployeeActivity {
     pub agent: AgentRuntimeSnapshot,
     pub work: EmployeeWorkState,
     pub attention: EmployeeAttention,
+    pub contract: EmployeeActivityContract,
     pub terminal_state: EmployeeTerminalActivityState,
     pub activity_reason: String,
     pub label: String,
@@ -193,6 +198,29 @@ struct ActivityDerivationInput<'a> {
     approvals: &'a [ApprovalRequest],
     processes: &'a [ManagedProcess],
     agent_runtime: &'a AgentRuntimeStore,
+}
+
+#[derive(Debug)]
+struct EmployeeActivityEvidence<'a> {
+    employee_actions: Vec<&'a Action>,
+    employee_approvals: Vec<&'a ApprovalRequest>,
+    employee_processes: Vec<&'a ManagedProcess>,
+    employee_sessions: Vec<&'a TerminalSessionRecord>,
+    active_terminal: Option<&'a TerminalSessionRecord>,
+    active_terminal_session_id: Option<String>,
+    agent: AgentRuntimeSnapshot,
+    active_action: Option<&'a Action>,
+    pending_action: Option<&'a Action>,
+    pending_approval: Option<&'a ApprovalRequest>,
+    active_process_ids: Vec<String>,
+    review_counts: EmployeeReviewCounts,
+    blockers: Vec<String>,
+    handoff_ready: bool,
+    terminal_resolution: Option<ActivityResolution>,
+    underlying_action_id: Option<String>,
+    lifecycle: EmployeeLifecycleState,
+    session: EmployeeRuntimeSession,
+    active_terminal_runtime: Option<TerminalSessionRuntime>,
 }
 
 #[derive(Debug, Clone)]
@@ -287,6 +315,85 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
         .filter(|session| session.employee_id == employee.id)
         .collect::<Vec<_>>();
 
+    let evidence = collect_employee_activity_evidence(
+        &input,
+        employee_actions,
+        employee_approvals,
+        employee_processes,
+        employee_sessions,
+    );
+    let resolution = resolve_activity_from_evidence(employee, &evidence);
+    let contract = resolve_employee_activity_contract(EmployeeActivityContractInput {
+        lifecycle: evidence.lifecycle,
+        session: evidence.session,
+        agent: evidence.agent,
+        active_terminal_runtime: evidence.active_terminal_runtime,
+        employee_done: employee.status == EmployeeStatus::Done,
+        employee_blocked: employee.status == EmployeeStatus::Blocked,
+        has_blockers: !evidence.blockers.is_empty(),
+        has_active_action: evidence.active_action.is_some(),
+        has_pending_action: evidence.pending_action.is_some(),
+        has_pending_approval: evidence.pending_approval.is_some(),
+        has_active_process: !evidence.active_process_ids.is_empty(),
+        has_review_changes: evidence.review_counts.changed_files > 0,
+        handoff_ready: evidence.handoff_ready,
+    });
+    let ActivityResolution {
+        status,
+        behavior,
+        work,
+        attention,
+        terminal_state,
+        label,
+        details,
+        active_action_id,
+        activity_reason,
+    } = resolution;
+    let active_terminal_session_id = if employee.status == EmployeeStatus::Stopped {
+        evidence.active_terminal_session_id.clone()
+    } else {
+        evidence
+            .active_terminal
+            .map(|session| session.session_id.clone())
+    };
+
+    EmployeeActivity {
+        employee_id: employee.id.clone(),
+        status,
+        lifecycle: evidence.lifecycle,
+        behavior,
+        session: evidence.session,
+        agent: evidence.agent,
+        work,
+        attention,
+        contract,
+        terminal_state,
+        activity_reason,
+        label,
+        details,
+        last_activity_at: last_activity_at(
+            employee,
+            &evidence.employee_sessions,
+            &evidence.employee_actions,
+            &evidence.employee_approvals,
+            &evidence.employee_processes,
+        ),
+        active_terminal_session_id,
+        active_action_id,
+        active_process_ids: evidence.active_process_ids,
+        review_counts: evidence.review_counts,
+        blockers: evidence.blockers,
+    }
+}
+
+fn collect_employee_activity_evidence<'a>(
+    input: &ActivityDerivationInput<'a>,
+    employee_actions: Vec<&'a Action>,
+    employee_approvals: Vec<&'a ApprovalRequest>,
+    employee_processes: Vec<&'a ManagedProcess>,
+    employee_sessions: Vec<&'a TerminalSessionRecord>,
+) -> EmployeeActivityEvidence<'a> {
+    let employee = input.employee;
     let active_terminal = active_terminal_session(employee, &employee_sessions);
     let active_terminal_session_id = if employee.status == EmployeeStatus::Stopped {
         None
@@ -335,19 +442,55 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
     );
     let terminal_resolution =
         active_terminal.map(|session| activity_for_terminal_session(session, agent));
-    let terminal_owner_wait = terminal_resolution.as_ref().filter(|resolution| {
+    let underlying_action_id = active_action
+        .map(|action| action.id.clone())
+        .or_else(|| pending_action.map(|action| action.id.clone()))
+        .or_else(|| pending_approval.and_then(|approval| approval.action_id.clone()));
+    let lifecycle = lifecycle_for_employee(employee);
+    let session_active_terminal = if employee.status == EmployeeStatus::Stopped {
+        None
+    } else {
+        active_terminal
+    };
+    let session = runtime_session_for_employee(employee, session_active_terminal);
+    let active_terminal_runtime = session_active_terminal.map(|session| session.runtime);
+
+    EmployeeActivityEvidence {
+        employee_actions,
+        employee_approvals,
+        employee_processes,
+        employee_sessions,
+        active_terminal,
+        active_terminal_session_id,
+        agent,
+        active_action,
+        pending_action,
+        pending_approval,
+        active_process_ids,
+        review_counts,
+        blockers,
+        handoff_ready,
+        terminal_resolution,
+        underlying_action_id,
+        lifecycle,
+        session,
+        active_terminal_runtime,
+    }
+}
+
+fn resolve_activity_from_evidence(
+    employee: &Employee,
+    evidence: &EmployeeActivityEvidence<'_>,
+) -> ActivityResolution {
+    let terminal_owner_wait = evidence.terminal_resolution.as_ref().filter(|resolution| {
         matches!(
             resolution.terminal_state,
             EmployeeTerminalActivityState::CodexWaitingApproval
                 | EmployeeTerminalActivityState::CodexWaitingInstruction
         )
     });
-    let underlying_action_id = active_action
-        .map(|action| action.id.clone())
-        .or_else(|| pending_action.map(|action| action.id.clone()))
-        .or_else(|| pending_approval.and_then(|approval| approval.action_id.clone()));
 
-    let resolution = if employee.status == EmployeeStatus::Standby {
+    if employee.status == EmployeeStatus::Standby {
         activity_resolution(
             EmployeeActivityStatus::Standby,
             EmployeeBehaviorState::OnStandby,
@@ -377,10 +520,11 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
         )
     } else if let Some(terminal_activity) = terminal_owner_wait {
         let mut terminal_activity = terminal_activity.clone();
-        terminal_activity.active_action_id = underlying_action_id.clone();
+        terminal_activity.active_action_id = evidence.underlying_action_id.clone();
         terminal_activity.activity_reason = match terminal_activity.terminal_state {
             EmployeeTerminalActivityState::CodexWaitingApproval
-                if underlying_action_id.is_some() || !active_process_ids.is_empty() =>
+                if evidence.underlying_action_id.is_some()
+                    || !evidence.active_process_ids.is_empty() =>
             {
                 "terminal_waiting_approval_over_active_work".to_string()
             }
@@ -388,7 +532,8 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
                 "terminal_waiting_approval".to_string()
             }
             EmployeeTerminalActivityState::CodexWaitingInstruction
-                if underlying_action_id.is_some() || !active_process_ids.is_empty() =>
+                if evidence.underlying_action_id.is_some()
+                    || !evidence.active_process_ids.is_empty() =>
             {
                 "terminal_waiting_instruction_over_active_work".to_string()
             }
@@ -401,7 +546,7 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
     } else if matches!(
         employee.status,
         EmployeeStatus::Blocked | EmployeeStatus::Failed
-    ) || !blockers.is_empty()
+    ) || !evidence.blockers.is_empty()
     {
         activity_resolution(
             EmployeeActivityStatus::Blocked,
@@ -410,16 +555,17 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
             EmployeeTurnOwner::Owner,
             Some(EmployeeAttentionReason::BlockedNeedsHelp),
             EmployeeAttentionPriority::Urgent,
-            terminal_resolution
+            evidence
+                .terminal_resolution
                 .as_ref()
                 .map(|resolution| resolution.terminal_state)
                 .unwrap_or(EmployeeTerminalActivityState::None),
             "Blocked",
             employee.current_command.clone(),
-            underlying_action_id.clone(),
+            evidence.underlying_action_id.clone(),
             "employee_blocked",
         )
-    } else if let Some(action) = active_action {
+    } else if let Some(action) = evidence.active_action {
         activity_resolution(
             EmployeeActivityStatus::ActionRunning,
             EmployeeBehaviorState::AtDeskTerminal,
@@ -427,7 +573,8 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
             EmployeeTurnOwner::Tool,
             None,
             EmployeeAttentionPriority::None,
-            terminal_resolution
+            evidence
+                .terminal_resolution
                 .as_ref()
                 .map(|resolution| resolution.terminal_state)
                 .unwrap_or(EmployeeTerminalActivityState::None),
@@ -436,7 +583,7 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
             Some(action.id.clone()),
             "action_running",
         )
-    } else if let Some(action) = pending_action {
+    } else if let Some(action) = evidence.pending_action {
         activity_resolution(
             EmployeeActivityStatus::ActionPendingApproval,
             EmployeeBehaviorState::WaitingAtOwner,
@@ -444,7 +591,8 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
             EmployeeTurnOwner::Owner,
             Some(EmployeeAttentionReason::NeedsAppApproval),
             EmployeeAttentionPriority::Urgent,
-            terminal_resolution
+            evidence
+                .terminal_resolution
                 .as_ref()
                 .map(|resolution| resolution.terminal_state)
                 .unwrap_or(EmployeeTerminalActivityState::None),
@@ -453,7 +601,7 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
             Some(action.id.clone()),
             "app_action_pending_approval",
         )
-    } else if let Some(approval) = pending_approval {
+    } else if let Some(approval) = evidence.pending_approval {
         activity_resolution(
             EmployeeActivityStatus::ActionPendingApproval,
             EmployeeBehaviorState::WaitingAtOwner,
@@ -461,7 +609,8 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
             EmployeeTurnOwner::Owner,
             Some(EmployeeAttentionReason::NeedsAppApproval),
             EmployeeAttentionPriority::Urgent,
-            terminal_resolution
+            evidence
+                .terminal_resolution
                 .as_ref()
                 .map(|resolution| resolution.terminal_state)
                 .unwrap_or(EmployeeTerminalActivityState::None),
@@ -470,7 +619,7 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
             approval.action_id.clone(),
             "app_approval_pending",
         )
-    } else if !active_process_ids.is_empty() {
+    } else if !evidence.active_process_ids.is_empty() {
         activity_resolution(
             EmployeeActivityStatus::ProcessRunning,
             EmployeeBehaviorState::AtDeskTerminal,
@@ -478,18 +627,22 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
             EmployeeTurnOwner::Tool,
             None,
             EmployeeAttentionPriority::None,
-            terminal_resolution
+            evidence
+                .terminal_resolution
                 .as_ref()
                 .map(|resolution| resolution.terminal_state)
                 .unwrap_or(EmployeeTerminalActivityState::None),
             "Running process",
-            Some(format!("{} managed process(es)", active_process_ids.len())),
+            Some(format!(
+                "{} managed process(es)",
+                evidence.active_process_ids.len()
+            )),
             None,
             "managed_process_running",
         )
-    } else if let Some(terminal_activity) = terminal_resolution.as_ref() {
+    } else if let Some(terminal_activity) = evidence.terminal_resolution.as_ref() {
         terminal_activity.clone()
-    } else if review_counts.changed_files > 0 {
+    } else if evidence.review_counts.changed_files > 0 {
         activity_resolution(
             EmployeeActivityStatus::ReviewNeeded,
             EmployeeBehaviorState::WaitingAtOwner,
@@ -499,11 +652,14 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
             EmployeeAttentionPriority::Normal,
             EmployeeTerminalActivityState::None,
             "Review needed",
-            Some(format!("{} changed file(s)", review_counts.changed_files)),
+            Some(format!(
+                "{} changed file(s)",
+                evidence.review_counts.changed_files
+            )),
             None,
             "review_changes_pending",
         )
-    } else if handoff_ready {
+    } else if evidence.handoff_ready {
         activity_resolution(
             EmployeeActivityStatus::HandoffReady,
             EmployeeBehaviorState::WaitingAtOwner,
@@ -525,7 +681,8 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
             EmployeeTurnOwner::Owner,
             Some(EmployeeAttentionReason::ReadyToReport),
             EmployeeAttentionPriority::Normal,
-            terminal_resolution
+            evidence
+                .terminal_resolution
                 .as_ref()
                 .map(|resolution| resolution.terminal_state)
                 .unwrap_or(EmployeeTerminalActivityState::Completed),
@@ -548,51 +705,6 @@ fn derive_employee_activity(input: ActivityDerivationInput<'_>) -> EmployeeActiv
             None,
             "idle",
         )
-    };
-    let lifecycle = lifecycle_for_employee(employee);
-    let session_active_terminal = if employee.status == EmployeeStatus::Stopped {
-        None
-    } else {
-        active_terminal
-    };
-    let session = runtime_session_for_employee(employee, session_active_terminal);
-    let ActivityResolution {
-        status,
-        behavior,
-        work,
-        attention,
-        terminal_state,
-        label,
-        details,
-        active_action_id,
-        activity_reason,
-    } = resolution;
-
-    EmployeeActivity {
-        employee_id: employee.id.clone(),
-        status,
-        lifecycle,
-        behavior,
-        session,
-        agent,
-        work,
-        attention,
-        terminal_state,
-        activity_reason,
-        label,
-        details,
-        last_activity_at: last_activity_at(
-            employee,
-            &employee_sessions,
-            &employee_actions,
-            &employee_approvals,
-            &employee_processes,
-        ),
-        active_terminal_session_id,
-        active_action_id,
-        active_process_ids,
-        review_counts,
-        blockers,
     }
 }
 
@@ -848,7 +960,7 @@ fn runtime(
 
 fn active_terminal_session<'a>(
     employee: &Employee,
-    sessions: &'a [&TerminalSessionRecord],
+    sessions: &[&'a TerminalSessionRecord],
 ) -> Option<&'a TerminalSessionRecord> {
     if let Some(session_id) = employee.terminal_session_id.as_deref() {
         if let Some(session) = sessions.iter().copied().find(|session| {
@@ -1057,6 +1169,12 @@ mod tests {
     use super::*;
     use crate::{
         actions::{ActionKind, ActionManager, ActionStatus},
+        activity_contract::{
+            EmployeeActivityContractRenderActivity, EmployeeActivityContractRenderPlacement,
+            EmployeeActivityContractRenderPosture, EmployeeActivityContractSourceConfidence,
+            EmployeeActivityContractSourceRuntime, EmployeeActivityContractWorkKind,
+            EmployeeActivityContractWorkPhase,
+        },
         approvals::{ApprovalKind, ApprovalManager, ApprovalStatus},
         employees::{EmployeeManager, EmployeeRole, EmployeeStatus},
         processes::{ManagedProcessStatus, ProcessManager},
@@ -1075,6 +1193,7 @@ mod tests {
             workspace_root: Arc::new(RwLock::new(workspace_root.clone())),
             employees: EmployeeManager::default(),
             terminal: crate::terminal::TerminalManager::default(),
+            codex_app_server: crate::codex_app_server::CodexAppServerManager::default(),
             terminal_sessions: TerminalSessionStore::default(),
             agent_runtime: AgentRuntimeStore::default(),
             persistence: crate::persistence::PersistenceManager::new(
@@ -1104,6 +1223,42 @@ mod tests {
         state.agent_runtime.sync_from_terminal_session(&session);
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct ExpectedContractSummary {
+        work_kind: EmployeeActivityContractWorkKind,
+        work_phase: EmployeeActivityContractWorkPhase,
+        turn_owner: EmployeeTurnOwner,
+        placement: EmployeeActivityContractRenderPlacement,
+        posture: EmployeeActivityContractRenderPosture,
+        render_activity: EmployeeActivityContractRenderActivity,
+        attention_reason: Option<EmployeeAttentionReason>,
+        source_runtime: Option<EmployeeActivityContractSourceRuntime>,
+        source_confidence: Option<EmployeeActivityContractSourceConfidence>,
+    }
+
+    fn assert_contract_summary(activity: &EmployeeActivity, expected: ExpectedContractSummary) {
+        assert_eq!(activity.contract.work.kind, expected.work_kind);
+        assert_eq!(activity.contract.work.phase, expected.work_phase);
+        assert_eq!(activity.contract.work.turn_owner, expected.turn_owner);
+        assert_eq!(activity.contract.render.placement, expected.placement);
+        assert_eq!(activity.contract.render.posture, expected.posture);
+        assert_eq!(activity.contract.render.activity, expected.render_activity);
+        assert_eq!(
+            activity.contract.attention.required,
+            expected.attention_reason.is_some()
+        );
+        assert_eq!(
+            activity.contract.attention.reason,
+            expected.attention_reason
+        );
+        if let Some(source_runtime) = expected.source_runtime {
+            assert_eq!(activity.contract.source.runtime, source_runtime);
+        }
+        if let Some(source_confidence) = expected.source_confidence {
+            assert_eq!(activity.contract.source.confidence, source_confidence);
+        }
+    }
+
     #[test]
     fn idle_employee_activity_is_idle() {
         let root = test_root("idle");
@@ -1123,6 +1278,20 @@ mod tests {
         assert_eq!(activity.agent.state, AgentRuntimeState::NotActive);
         assert_eq!(activity.label, "Idle");
         assert_eq!(activity.active_terminal_session_id, None);
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::None,
+                work_phase: EmployeeActivityContractWorkPhase::Idle,
+                turn_owner: EmployeeTurnOwner::None,
+                placement: EmployeeActivityContractRenderPlacement::DoneRoom,
+                posture: EmployeeActivityContractRenderPosture::Standing,
+                render_activity: EmployeeActivityContractRenderActivity::Idle,
+                attention_reason: None,
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::None),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::None),
+            },
+        );
     }
 
     #[test]
@@ -1159,6 +1328,20 @@ mod tests {
             activity.active_terminal_session_id.as_deref(),
             Some("session-1")
         );
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::Shell,
+                work_phase: EmployeeActivityContractWorkPhase::Idle,
+                turn_owner: EmployeeTurnOwner::None,
+                placement: EmployeeActivityContractRenderPlacement::DoneRoom,
+                posture: EmployeeActivityContractRenderPosture::Standing,
+                render_activity: EmployeeActivityContractRenderActivity::Terminal,
+                attention_reason: None,
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+            },
+        );
     }
 
     #[test]
@@ -1174,7 +1357,7 @@ mod tests {
         );
         state
             .terminal_sessions
-            .mark_prompt_submitted(&session.session_id, "\r");
+            .record_input(&session.session_id, "\r");
         sync_agent_runtime(&state, &session.session_id);
         state.employees.update(&employee.id, |employee| {
             employee.status = EmployeeStatus::Running;
@@ -1196,6 +1379,20 @@ mod tests {
         assert_eq!(activity.work.phase, EmployeeWorkPhase::AgentWorking);
         assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::Agent);
         assert!(!activity.attention.required);
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::Codex,
+                work_phase: EmployeeActivityContractWorkPhase::Working,
+                turn_owner: EmployeeTurnOwner::Agent,
+                placement: EmployeeActivityContractRenderPlacement::Desk,
+                posture: EmployeeActivityContractRenderPosture::Sitting,
+                render_activity: EmployeeActivityContractRenderActivity::Working,
+                attention_reason: None,
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+            },
+        );
     }
 
     #[test]
@@ -1229,6 +1426,491 @@ mod tests {
         assert_eq!(activity.work.phase, EmployeeWorkPhase::AgentStarting);
         assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::None);
         assert!(!activity.attention.required);
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::Codex,
+                work_phase: EmployeeActivityContractWorkPhase::Starting,
+                turn_owner: EmployeeTurnOwner::None,
+                placement: EmployeeActivityContractRenderPlacement::DoneRoom,
+                posture: EmployeeActivityContractRenderPosture::Standing,
+                render_activity: EmployeeActivityContractRenderActivity::Terminal,
+                attention_reason: None,
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+            },
+        );
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum CodexTerminalContractSetup {
+        Starting,
+        SubmittedPrompt,
+        ActiveWorkOutput,
+        PromptReady,
+        OwnerDraftEcho,
+        ApprovalPrompt,
+    }
+
+    #[test]
+    fn codex_terminal_activity_contract_maps_turn_state_to_behavior() {
+        struct Case {
+            name: &'static str,
+            setup: CodexTerminalContractSetup,
+            status: EmployeeActivityStatus,
+            behavior: EmployeeBehaviorState,
+            terminal_state: EmployeeTerminalActivityState,
+            agent_state: AgentRuntimeState,
+            work_phase: EmployeeWorkPhase,
+            turn_owner: EmployeeTurnOwner,
+            attention_reason: Option<EmployeeAttentionReason>,
+            contract: ExpectedContractSummary,
+        }
+
+        let cases = [
+            Case {
+                name: "starting_without_prompt",
+                setup: CodexTerminalContractSetup::Starting,
+                status: EmployeeActivityStatus::CodexStarting,
+                behavior: EmployeeBehaviorState::AtDeskTerminal,
+                terminal_state: EmployeeTerminalActivityState::CodexStarting,
+                agent_state: AgentRuntimeState::Starting,
+                work_phase: EmployeeWorkPhase::AgentStarting,
+                turn_owner: EmployeeTurnOwner::None,
+                attention_reason: None,
+                contract: ExpectedContractSummary {
+                    work_kind: EmployeeActivityContractWorkKind::Codex,
+                    work_phase: EmployeeActivityContractWorkPhase::Starting,
+                    turn_owner: EmployeeTurnOwner::None,
+                    placement: EmployeeActivityContractRenderPlacement::DoneRoom,
+                    posture: EmployeeActivityContractRenderPosture::Standing,
+                    render_activity: EmployeeActivityContractRenderActivity::Terminal,
+                    attention_reason: None,
+                    source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                    source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+                },
+            },
+            Case {
+                name: "submitted_prompt",
+                setup: CodexTerminalContractSetup::SubmittedPrompt,
+                status: EmployeeActivityStatus::CodexRunning,
+                behavior: EmployeeBehaviorState::AtDeskWorking,
+                terminal_state: EmployeeTerminalActivityState::CodexRunning,
+                agent_state: AgentRuntimeState::Thinking,
+                work_phase: EmployeeWorkPhase::AgentWorking,
+                turn_owner: EmployeeTurnOwner::Agent,
+                attention_reason: None,
+                contract: ExpectedContractSummary {
+                    work_kind: EmployeeActivityContractWorkKind::Codex,
+                    work_phase: EmployeeActivityContractWorkPhase::Working,
+                    turn_owner: EmployeeTurnOwner::Agent,
+                    placement: EmployeeActivityContractRenderPlacement::Desk,
+                    posture: EmployeeActivityContractRenderPosture::Sitting,
+                    render_activity: EmployeeActivityContractRenderActivity::Working,
+                    attention_reason: None,
+                    source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                    source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+                },
+            },
+            Case {
+                name: "active_work_output_after_starting",
+                setup: CodexTerminalContractSetup::ActiveWorkOutput,
+                status: EmployeeActivityStatus::CodexRunning,
+                behavior: EmployeeBehaviorState::AtDeskWorking,
+                terminal_state: EmployeeTerminalActivityState::CodexRunning,
+                agent_state: AgentRuntimeState::Thinking,
+                work_phase: EmployeeWorkPhase::AgentWorking,
+                turn_owner: EmployeeTurnOwner::Agent,
+                attention_reason: None,
+                contract: ExpectedContractSummary {
+                    work_kind: EmployeeActivityContractWorkKind::Codex,
+                    work_phase: EmployeeActivityContractWorkPhase::Working,
+                    turn_owner: EmployeeTurnOwner::Agent,
+                    placement: EmployeeActivityContractRenderPlacement::Desk,
+                    posture: EmployeeActivityContractRenderPosture::Sitting,
+                    render_activity: EmployeeActivityContractRenderActivity::Working,
+                    attention_reason: None,
+                    source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                    source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+                },
+            },
+            Case {
+                name: "prompt_ready",
+                setup: CodexTerminalContractSetup::PromptReady,
+                status: EmployeeActivityStatus::CodexWaitingInstruction,
+                behavior: EmployeeBehaviorState::WaitingAtOwner,
+                terminal_state: EmployeeTerminalActivityState::CodexWaitingInstruction,
+                agent_state: AgentRuntimeState::WaitingPrompt,
+                work_phase: EmployeeWorkPhase::WaitingForOwner,
+                turn_owner: EmployeeTurnOwner::Owner,
+                attention_reason: Some(EmployeeAttentionReason::NeedsInstruction),
+                contract: ExpectedContractSummary {
+                    work_kind: EmployeeActivityContractWorkKind::Codex,
+                    work_phase: EmployeeActivityContractWorkPhase::WaitingOwner,
+                    turn_owner: EmployeeTurnOwner::Owner,
+                    placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                    posture: EmployeeActivityContractRenderPosture::Standing,
+                    render_activity: EmployeeActivityContractRenderActivity::WaitingInstruction,
+                    attention_reason: Some(EmployeeAttentionReason::NeedsInstruction),
+                    source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                    source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+                },
+            },
+            Case {
+                name: "owner_draft_echo",
+                setup: CodexTerminalContractSetup::OwnerDraftEcho,
+                status: EmployeeActivityStatus::CodexWaitingInstruction,
+                behavior: EmployeeBehaviorState::WaitingAtOwner,
+                terminal_state: EmployeeTerminalActivityState::CodexWaitingInstruction,
+                agent_state: AgentRuntimeState::WaitingPrompt,
+                work_phase: EmployeeWorkPhase::WaitingForOwner,
+                turn_owner: EmployeeTurnOwner::Owner,
+                attention_reason: Some(EmployeeAttentionReason::NeedsInstruction),
+                contract: ExpectedContractSummary {
+                    work_kind: EmployeeActivityContractWorkKind::Codex,
+                    work_phase: EmployeeActivityContractWorkPhase::WaitingOwner,
+                    turn_owner: EmployeeTurnOwner::Owner,
+                    placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                    posture: EmployeeActivityContractRenderPosture::Standing,
+                    render_activity: EmployeeActivityContractRenderActivity::WaitingInstruction,
+                    attention_reason: Some(EmployeeAttentionReason::NeedsInstruction),
+                    source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                    source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+                },
+            },
+            Case {
+                name: "approval_prompt",
+                setup: CodexTerminalContractSetup::ApprovalPrompt,
+                status: EmployeeActivityStatus::CodexWaitingApproval,
+                behavior: EmployeeBehaviorState::WaitingAtOwner,
+                terminal_state: EmployeeTerminalActivityState::CodexWaitingApproval,
+                agent_state: AgentRuntimeState::WaitingApproval,
+                work_phase: EmployeeWorkPhase::WaitingForOwner,
+                turn_owner: EmployeeTurnOwner::Owner,
+                attention_reason: Some(EmployeeAttentionReason::NeedsTerminalApproval),
+                contract: ExpectedContractSummary {
+                    work_kind: EmployeeActivityContractWorkKind::Codex,
+                    work_phase: EmployeeActivityContractWorkPhase::WaitingApproval,
+                    turn_owner: EmployeeTurnOwner::Owner,
+                    placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                    posture: EmployeeActivityContractRenderPosture::Standing,
+                    render_activity: EmployeeActivityContractRenderActivity::Approval,
+                    attention_reason: Some(EmployeeAttentionReason::NeedsTerminalApproval),
+                    source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                    source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+                },
+            },
+        ];
+
+        for case in cases {
+            let root = test_root(case.name);
+            let state = test_state(root.clone());
+            let employee = create_employee(&state);
+            let session = state.terminal_sessions.create(
+                "session-1".to_string(),
+                employee.id.clone(),
+                TerminalLaunchProfile::Codex,
+                root.to_string_lossy().to_string(),
+            );
+
+            match case.setup {
+                CodexTerminalContractSetup::Starting => {}
+                CodexTerminalContractSetup::SubmittedPrompt => {
+                    state
+                        .terminal_sessions
+                        .record_input(&session.session_id, "\r");
+                }
+                CodexTerminalContractSetup::ActiveWorkOutput => {
+                    state.terminal_sessions.record_output(
+                        &session.session_id,
+                        "\r\n• Working (10s • esc to interrupt)",
+                    );
+                }
+                CodexTerminalContractSetup::PromptReady => {
+                    state
+                        .terminal_sessions
+                        .record_output(&session.session_id, "\r\n› ");
+                }
+                CodexTerminalContractSetup::OwnerDraftEcho => {
+                    state
+                        .terminal_sessions
+                        .record_output(&session.session_id, "\r\n› ");
+                    state
+                        .terminal_sessions
+                        .record_input(&session.session_id, "Improve documentation");
+                    state
+                        .terminal_sessions
+                        .record_output(&session.session_id, "Improve documentation");
+                }
+                CodexTerminalContractSetup::ApprovalPrompt => {
+                    state
+                        .terminal_sessions
+                        .record_input(&session.session_id, "\r");
+                    state
+                        .terminal_sessions
+                        .record_output(&session.session_id, "Allow command to run?\n› Yes / No");
+                }
+            }
+
+            sync_agent_runtime(&state, &session.session_id);
+            state.employees.update(&employee.id, |employee| {
+                employee.status = EmployeeStatus::Running;
+                employee.current_command = Some("codex".to_string());
+                employee.terminal_session_id = Some(session.session_id.clone());
+            });
+
+            let activity = activity(&state, &employee.id);
+
+            assert_eq!(activity.status, case.status, "{}", case.name);
+            assert_eq!(activity.behavior, case.behavior, "{}", case.name);
+            assert_eq!(
+                activity.terminal_state, case.terminal_state,
+                "{}",
+                case.name
+            );
+            assert_eq!(activity.agent.state, case.agent_state, "{}", case.name);
+            assert_eq!(activity.work.phase, case.work_phase, "{}", case.name);
+            assert_eq!(activity.work.turn_owner, case.turn_owner, "{}", case.name);
+            assert_eq!(
+                activity.attention.reason, case.attention_reason,
+                "{}",
+                case.name
+            );
+            assert_contract_summary(&activity, case.contract);
+        }
+    }
+
+    #[test]
+    fn shell_launched_codex_working_output_after_owner_prompt_routes_to_desk() {
+        let root = test_root("shell-codex-owner-prompt-working");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Shell,
+            root.to_string_lossy().to_string(),
+        );
+        state
+            .terminal_sessions
+            .record_output(&session.session_id, "\r\n› ");
+        state
+            .terminal_sessions
+            .record_input(&session.session_id, "Implement feature");
+        state.terminal_sessions.record_output(
+            &session.session_id,
+            "\r\n› Implement feature\r\n\r\n• Working (2s • esc to interrupt)",
+        );
+        sync_agent_runtime(&state, &session.session_id);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Running;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+
+        let activity = activity(&state, &employee.id);
+
+        assert_eq!(activity.status, EmployeeActivityStatus::CodexRunning);
+        assert_eq!(activity.behavior, EmployeeBehaviorState::AtDeskWorking);
+        assert_eq!(
+            activity.terminal_state,
+            EmployeeTerminalActivityState::CodexRunning
+        );
+        assert_eq!(activity.agent.state, AgentRuntimeState::Thinking);
+        assert_eq!(activity.work.phase, EmployeeWorkPhase::AgentWorking);
+        assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::Agent);
+        assert_eq!(activity.attention.reason, None);
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::Codex,
+                work_phase: EmployeeActivityContractWorkPhase::Working,
+                turn_owner: EmployeeTurnOwner::Agent,
+                placement: EmployeeActivityContractRenderPlacement::Desk,
+                posture: EmployeeActivityContractRenderPosture::Sitting,
+                render_activity: EmployeeActivityContractRenderActivity::Working,
+                attention_reason: None,
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+            },
+        );
+    }
+
+    #[test]
+    fn codex_app_server_activity_contract_maps_structured_events_to_behavior() {
+        struct Case {
+            name: &'static str,
+            method: &'static str,
+            params: serde_json::Value,
+            status: EmployeeActivityStatus,
+            behavior: EmployeeBehaviorState,
+            terminal_state: EmployeeTerminalActivityState,
+            agent_state: AgentRuntimeState,
+            work_phase: EmployeeWorkPhase,
+            turn_owner: EmployeeTurnOwner,
+            attention_reason: Option<EmployeeAttentionReason>,
+            contract: ExpectedContractSummary,
+        }
+
+        let cases = [
+            Case {
+                name: "turn_started",
+                method: "turn/started",
+                params: serde_json::Value::Null,
+                status: EmployeeActivityStatus::CodexRunning,
+                behavior: EmployeeBehaviorState::AtDeskWorking,
+                terminal_state: EmployeeTerminalActivityState::CodexRunning,
+                agent_state: AgentRuntimeState::Thinking,
+                work_phase: EmployeeWorkPhase::AgentWorking,
+                turn_owner: EmployeeTurnOwner::Agent,
+                attention_reason: None,
+                contract: ExpectedContractSummary {
+                    work_kind: EmployeeActivityContractWorkKind::Codex,
+                    work_phase: EmployeeActivityContractWorkPhase::Working,
+                    turn_owner: EmployeeTurnOwner::Agent,
+                    placement: EmployeeActivityContractRenderPlacement::Desk,
+                    posture: EmployeeActivityContractRenderPosture::Sitting,
+                    render_activity: EmployeeActivityContractRenderActivity::Working,
+                    attention_reason: None,
+                    source_runtime: Some(EmployeeActivityContractSourceRuntime::CodexAppServer),
+                    source_confidence: Some(EmployeeActivityContractSourceConfidence::Structured),
+                },
+            },
+            Case {
+                name: "turn_completed_waits_for_owner",
+                method: "turn/completed",
+                params: serde_json::json!({ "turn": { "status": "completed" } }),
+                status: EmployeeActivityStatus::CodexWaitingInstruction,
+                behavior: EmployeeBehaviorState::WaitingAtOwner,
+                terminal_state: EmployeeTerminalActivityState::CodexWaitingInstruction,
+                agent_state: AgentRuntimeState::WaitingPrompt,
+                work_phase: EmployeeWorkPhase::WaitingForOwner,
+                turn_owner: EmployeeTurnOwner::Owner,
+                attention_reason: Some(EmployeeAttentionReason::NeedsInstruction),
+                contract: ExpectedContractSummary {
+                    work_kind: EmployeeActivityContractWorkKind::Codex,
+                    work_phase: EmployeeActivityContractWorkPhase::WaitingOwner,
+                    turn_owner: EmployeeTurnOwner::Owner,
+                    placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                    posture: EmployeeActivityContractRenderPosture::Standing,
+                    render_activity: EmployeeActivityContractRenderActivity::WaitingInstruction,
+                    attention_reason: Some(EmployeeAttentionReason::NeedsInstruction),
+                    source_runtime: Some(EmployeeActivityContractSourceRuntime::CodexAppServer),
+                    source_confidence: Some(EmployeeActivityContractSourceConfidence::Structured),
+                },
+            },
+            Case {
+                name: "approval_request",
+                method: "item/commandExecution/requestApproval",
+                params: serde_json::Value::Null,
+                status: EmployeeActivityStatus::CodexWaitingApproval,
+                behavior: EmployeeBehaviorState::WaitingAtOwner,
+                terminal_state: EmployeeTerminalActivityState::CodexWaitingApproval,
+                agent_state: AgentRuntimeState::WaitingApproval,
+                work_phase: EmployeeWorkPhase::WaitingForOwner,
+                turn_owner: EmployeeTurnOwner::Owner,
+                attention_reason: Some(EmployeeAttentionReason::NeedsTerminalApproval),
+                contract: ExpectedContractSummary {
+                    work_kind: EmployeeActivityContractWorkKind::Codex,
+                    work_phase: EmployeeActivityContractWorkPhase::WaitingApproval,
+                    turn_owner: EmployeeTurnOwner::Owner,
+                    placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                    posture: EmployeeActivityContractRenderPosture::Standing,
+                    render_activity: EmployeeActivityContractRenderActivity::Approval,
+                    attention_reason: Some(EmployeeAttentionReason::NeedsTerminalApproval),
+                    source_runtime: Some(EmployeeActivityContractSourceRuntime::CodexAppServer),
+                    source_confidence: Some(EmployeeActivityContractSourceConfidence::Structured),
+                },
+            },
+        ];
+
+        for case in cases {
+            let root = test_root(case.name);
+            let state = test_state(root.clone());
+            let employee = create_employee(&state);
+            let session = state.terminal_sessions.create_with_runtime(
+                "session-1".to_string(),
+                employee.id.clone(),
+                TerminalLaunchProfile::Codex,
+                root.to_string_lossy().to_string(),
+                crate::terminal::TerminalSessionRuntime::CodexAppServer,
+            );
+            state.agent_runtime.record_codex_app_server_notification(
+                &session.session_id,
+                case.method,
+                &case.params,
+            );
+            state.employees.update(&employee.id, |employee| {
+                employee.status = EmployeeStatus::Running;
+                employee.current_command = Some("codex".to_string());
+                employee.terminal_session_id = Some(session.session_id.clone());
+            });
+
+            let activity = activity(&state, &employee.id);
+
+            assert_eq!(activity.status, case.status, "{}", case.name);
+            assert_eq!(activity.behavior, case.behavior, "{}", case.name);
+            assert_eq!(
+                activity.terminal_state, case.terminal_state,
+                "{}",
+                case.name
+            );
+            assert_eq!(activity.agent.state, case.agent_state, "{}", case.name);
+            assert_eq!(activity.work.phase, case.work_phase, "{}", case.name);
+            assert_eq!(activity.work.turn_owner, case.turn_owner, "{}", case.name);
+            assert_eq!(
+                activity.attention.reason, case.attention_reason,
+                "{}",
+                case.name
+            );
+            assert_contract_summary(&activity, case.contract);
+        }
+    }
+
+    #[test]
+    fn codex_app_server_prompt_submission_contract_uses_structured_source_before_notification() {
+        let root = test_root("app-server-prompt-submitted");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create_with_runtime(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+            crate::terminal::TerminalSessionRuntime::CodexAppServer,
+        );
+        let prompt_record = state
+            .terminal_sessions
+            .record_input(&session.session_id, "\r")
+            .unwrap();
+        state
+            .agent_runtime
+            .sync_from_terminal_session(&prompt_record);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Running;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+
+        let activity = activity(&state, &employee.id);
+
+        assert_eq!(activity.status, EmployeeActivityStatus::CodexRunning);
+        assert_eq!(activity.agent.kind, AgentKind::Codex);
+        assert_eq!(activity.agent.state, AgentRuntimeState::Thinking);
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::Codex,
+                work_phase: EmployeeActivityContractWorkPhase::Working,
+                turn_owner: EmployeeTurnOwner::Agent,
+                placement: EmployeeActivityContractRenderPlacement::Desk,
+                posture: EmployeeActivityContractRenderPosture::Sitting,
+                render_activity: EmployeeActivityContractRenderActivity::Working,
+                attention_reason: None,
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::CodexAppServer),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::Structured),
+            },
+        );
     }
 
     #[test]
@@ -1274,6 +1956,44 @@ mod tests {
     }
 
     #[test]
+    fn codex_owner_draft_input_does_not_become_working_activity() {
+        let root = test_root("codex-owner-composing");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+        );
+        state
+            .terminal_sessions
+            .record_output(&session.session_id, "\r\n› ");
+        state
+            .terminal_sessions
+            .record_input(&session.session_id, "Improve documentation");
+        state
+            .terminal_sessions
+            .record_output(&session.session_id, "Improve documentation");
+        sync_agent_runtime(&state, &session.session_id);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Running;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+
+        let activity = activity(&state, &employee.id);
+
+        assert_eq!(
+            activity.status,
+            EmployeeActivityStatus::CodexWaitingInstruction
+        );
+        assert_eq!(activity.behavior, EmployeeBehaviorState::WaitingAtOwner);
+        assert_eq!(activity.agent.state, AgentRuntimeState::WaitingPrompt);
+        assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::Owner);
+    }
+
+    #[test]
     fn codex_terminal_approval_prompt_requires_owner_approval() {
         let root = test_root("codex-terminal-approval");
         let state = test_state(root.clone());
@@ -1286,7 +2006,7 @@ mod tests {
         );
         state
             .terminal_sessions
-            .mark_prompt_submitted(&session.session_id, "\r");
+            .record_input(&session.session_id, "\r");
         state
             .terminal_sessions
             .record_output(&session.session_id, "Allow command to run?\n› Yes / No");
@@ -1317,6 +2037,20 @@ mod tests {
             activity.attention.reason,
             Some(EmployeeAttentionReason::NeedsTerminalApproval)
         );
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::Codex,
+                work_phase: EmployeeActivityContractWorkPhase::WaitingApproval,
+                turn_owner: EmployeeTurnOwner::Owner,
+                placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                posture: EmployeeActivityContractRenderPosture::Standing,
+                render_activity: EmployeeActivityContractRenderActivity::Approval,
+                attention_reason: Some(EmployeeAttentionReason::NeedsTerminalApproval),
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+            },
+        );
     }
 
     #[test]
@@ -1344,6 +2078,20 @@ mod tests {
             activity.active_terminal_session_id.as_deref(),
             Some("session-1")
         );
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::None,
+                work_phase: EmployeeActivityContractWorkPhase::Idle,
+                turn_owner: EmployeeTurnOwner::None,
+                placement: EmployeeActivityContractRenderPlacement::Standby,
+                posture: EmployeeActivityContractRenderPosture::Standing,
+                render_activity: EmployeeActivityContractRenderActivity::Idle,
+                attention_reason: None,
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+            },
+        );
     }
 
     #[test]
@@ -1370,6 +2118,20 @@ mod tests {
         assert_eq!(activity.behavior, EmployeeBehaviorState::Offline);
         assert_eq!(activity.active_terminal_session_id, None);
         assert_eq!(activity.session.state, EmployeeSessionState::Exited);
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::None,
+                work_phase: EmployeeActivityContractWorkPhase::Idle,
+                turn_owner: EmployeeTurnOwner::None,
+                placement: EmployeeActivityContractRenderPlacement::Offline,
+                posture: EmployeeActivityContractRenderPosture::Standing,
+                render_activity: EmployeeActivityContractRenderActivity::Idle,
+                attention_reason: None,
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::None),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::None),
+            },
+        );
     }
 
     #[test]
@@ -1401,6 +2163,20 @@ mod tests {
         assert_eq!(activity.agent.kind, AgentKind::None);
         assert_eq!(activity.agent.state, AgentRuntimeState::NotActive);
         assert!(!activity.attention.required);
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::None,
+                work_phase: EmployeeActivityContractWorkPhase::Idle,
+                turn_owner: EmployeeTurnOwner::None,
+                placement: EmployeeActivityContractRenderPlacement::Offline,
+                posture: EmployeeActivityContractRenderPosture::Standing,
+                render_activity: EmployeeActivityContractRenderActivity::Idle,
+                attention_reason: None,
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::None),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::None),
+            },
+        );
     }
 
     #[test]
@@ -1415,6 +2191,7 @@ mod tests {
             root.to_string_lossy().to_string(),
         );
         state.terminal_sessions.finish(&session.session_id, 1);
+        sync_agent_runtime(&state, &session.session_id);
         state.employees.update(&employee.id, |employee| {
             employee.status = EmployeeStatus::Stopped;
             employee.terminal_session_id = Some(session.session_id.clone());
@@ -1426,6 +2203,86 @@ mod tests {
         assert_eq!(activity.status, EmployeeActivityStatus::Stopped);
         assert_eq!(activity.agent.kind, AgentKind::None);
         assert_eq!(activity.agent.state, AgentRuntimeState::NotActive);
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::None,
+                work_phase: EmployeeActivityContractWorkPhase::Idle,
+                turn_owner: EmployeeTurnOwner::None,
+                placement: EmployeeActivityContractRenderPlacement::Offline,
+                posture: EmployeeActivityContractRenderPosture::Standing,
+                render_activity: EmployeeActivityContractRenderActivity::Idle,
+                attention_reason: None,
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::None),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::None),
+            },
+        );
+    }
+
+    #[test]
+    fn closed_failed_agent_session_does_not_block_done_or_idle_contract() {
+        let root = test_root("done-failed-agent");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+        );
+        state.terminal_sessions.finish(&session.session_id, 1);
+        sync_agent_runtime(&state, &session.session_id);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Done;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+
+        let done_activity = activity(&state, &employee.id);
+
+        assert_eq!(done_activity.status, EmployeeActivityStatus::DoneClean);
+        assert_eq!(done_activity.agent.kind, AgentKind::Codex);
+        assert_eq!(done_activity.agent.state, AgentRuntimeState::Failed);
+        assert_contract_summary(
+            &done_activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::Review,
+                work_phase: EmployeeActivityContractWorkPhase::Ready,
+                turn_owner: EmployeeTurnOwner::Owner,
+                placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                posture: EmployeeActivityContractRenderPosture::Standing,
+                render_activity: EmployeeActivityContractRenderActivity::Handoff,
+                attention_reason: Some(EmployeeAttentionReason::ReadyToReport),
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+            },
+        );
+
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Idle;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+
+        let idle_activity = activity(&state, &employee.id);
+
+        assert_eq!(idle_activity.status, EmployeeActivityStatus::Idle);
+        assert_eq!(idle_activity.agent.kind, AgentKind::None);
+        assert_eq!(idle_activity.agent.state, AgentRuntimeState::NotActive);
+        assert_contract_summary(
+            &idle_activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::None,
+                work_phase: EmployeeActivityContractWorkPhase::Idle,
+                turn_owner: EmployeeTurnOwner::None,
+                placement: EmployeeActivityContractRenderPlacement::DoneRoom,
+                posture: EmployeeActivityContractRenderPosture::Standing,
+                render_activity: EmployeeActivityContractRenderActivity::Idle,
+                attention_reason: None,
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::None),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::None),
+            },
+        );
     }
 
     #[test]
@@ -1441,7 +2298,7 @@ mod tests {
         );
         state
             .terminal_sessions
-            .mark_prompt_submitted(&session.session_id, "\r");
+            .record_input(&session.session_id, "\r");
         sync_agent_runtime(&state, &session.session_id);
         state.employees.update(&employee.id, |employee| {
             employee.status = EmployeeStatus::Running;
@@ -1474,6 +2331,20 @@ mod tests {
             activity.active_action_id.as_deref(),
             Some(action.id.as_str())
         );
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::Action,
+                work_phase: EmployeeActivityContractWorkPhase::WaitingApproval,
+                turn_owner: EmployeeTurnOwner::Owner,
+                placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                posture: EmployeeActivityContractRenderPosture::Standing,
+                render_activity: EmployeeActivityContractRenderActivity::Approval,
+                attention_reason: Some(EmployeeAttentionReason::NeedsAppApproval),
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+            },
+        );
     }
 
     #[test]
@@ -1489,7 +2360,7 @@ mod tests {
         );
         state
             .terminal_sessions
-            .mark_prompt_submitted(&session.session_id, "\r");
+            .record_input(&session.session_id, "\r");
         state
             .terminal_sessions
             .record_output(&session.session_id, "Allow command to run?\n› Yes / No");
@@ -1543,6 +2414,20 @@ mod tests {
             activity.attention.reason,
             Some(EmployeeAttentionReason::NeedsTerminalApproval)
         );
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::Codex,
+                work_phase: EmployeeActivityContractWorkPhase::WaitingApproval,
+                turn_owner: EmployeeTurnOwner::Owner,
+                placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                posture: EmployeeActivityContractRenderPosture::Standing,
+                render_activity: EmployeeActivityContractRenderActivity::Approval,
+                attention_reason: Some(EmployeeAttentionReason::NeedsTerminalApproval),
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+            },
+        );
     }
 
     #[test]
@@ -1558,7 +2443,7 @@ mod tests {
         );
         state
             .terminal_sessions
-            .mark_prompt_submitted(&session.session_id, "\r");
+            .record_input(&session.session_id, "\r");
         state
             .terminal_sessions
             .record_output(&session.session_id, "Allow command to run?\n› Yes / No");
@@ -1593,6 +2478,71 @@ mod tests {
             activity.activity_reason,
             "terminal_waiting_approval_over_active_work"
         );
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::Codex,
+                work_phase: EmployeeActivityContractWorkPhase::WaitingApproval,
+                turn_owner: EmployeeTurnOwner::Owner,
+                placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                posture: EmployeeActivityContractRenderPosture::Standing,
+                render_activity: EmployeeActivityContractRenderActivity::Approval,
+                attention_reason: Some(EmployeeAttentionReason::NeedsTerminalApproval),
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+            },
+        );
+    }
+
+    #[test]
+    fn running_action_activity_reports_action_contract() {
+        let root = test_root("active-action-contract");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+        );
+        state
+            .terminal_sessions
+            .record_input(&session.session_id, "\r");
+        sync_agent_runtime(&state, &session.session_id);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Running;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+        let action = sample_action(&employee.id, ActionStatus::Running);
+        let action_id = action.id.clone();
+        state.actions.replace_all(vec![action]);
+
+        let activity = activity(&state, &employee.id);
+
+        assert_eq!(activity.status, EmployeeActivityStatus::ActionRunning);
+        assert_eq!(
+            activity.terminal_state,
+            EmployeeTerminalActivityState::CodexRunning
+        );
+        assert_eq!(
+            activity.active_action_id.as_deref(),
+            Some(action_id.as_str())
+        );
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::Action,
+                work_phase: EmployeeActivityContractWorkPhase::Working,
+                turn_owner: EmployeeTurnOwner::Tool,
+                placement: EmployeeActivityContractRenderPlacement::Desk,
+                posture: EmployeeActivityContractRenderPosture::Sitting,
+                render_activity: EmployeeActivityContractRenderActivity::Working,
+                attention_reason: None,
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+            },
+        );
     }
 
     #[test]
@@ -1608,7 +2558,7 @@ mod tests {
         );
         state
             .terminal_sessions
-            .mark_prompt_submitted(&session.session_id, "\r");
+            .record_input(&session.session_id, "\r");
         state
             .terminal_sessions
             .record_output(&session.session_id, "Allow command to run?\n› Yes / No");
@@ -1688,6 +2638,20 @@ mod tests {
             activity.activity_reason,
             "terminal_waiting_instruction_over_active_work"
         );
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::Codex,
+                work_phase: EmployeeActivityContractWorkPhase::WaitingOwner,
+                turn_owner: EmployeeTurnOwner::Owner,
+                placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                posture: EmployeeActivityContractRenderPosture::Standing,
+                render_activity: EmployeeActivityContractRenderActivity::WaitingInstruction,
+                attention_reason: Some(EmployeeAttentionReason::NeedsInstruction),
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+            },
+        );
     }
 
     #[test]
@@ -1745,6 +2709,20 @@ mod tests {
         assert_eq!(activity.work.phase, EmployeeWorkPhase::ToolRunning);
         assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::Tool);
         assert_eq!(activity.active_process_ids, vec!["process-1".to_string()]);
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::Process,
+                work_phase: EmployeeActivityContractWorkPhase::Working,
+                turn_owner: EmployeeTurnOwner::Tool,
+                placement: EmployeeActivityContractRenderPlacement::Desk,
+                posture: EmployeeActivityContractRenderPosture::Sitting,
+                render_activity: EmployeeActivityContractRenderActivity::Terminal,
+                attention_reason: None,
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::None),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::None),
+            },
+        );
     }
 
     #[test]
@@ -1803,6 +2781,20 @@ mod tests {
         assert_eq!(
             activity.attention.reason,
             Some(EmployeeAttentionReason::ReadyToReport)
+        );
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::Review,
+                work_phase: EmployeeActivityContractWorkPhase::Ready,
+                turn_owner: EmployeeTurnOwner::Owner,
+                placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                posture: EmployeeActivityContractRenderPosture::Standing,
+                render_activity: EmployeeActivityContractRenderActivity::Handoff,
+                attention_reason: Some(EmployeeAttentionReason::ReadyToReport),
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+            },
         );
     }
 
