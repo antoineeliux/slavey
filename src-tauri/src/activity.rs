@@ -1888,6 +1888,29 @@ mod tests {
                     source_confidence: Some(EmployeeActivityContractSourceConfidence::Structured),
                 },
             },
+            Case {
+                name: "error_failed",
+                method: "error",
+                params: serde_json::Value::Null,
+                status: EmployeeActivityStatus::Blocked,
+                behavior: EmployeeBehaviorState::WaitingAtOwner,
+                terminal_state: EmployeeTerminalActivityState::Failed,
+                agent_state: AgentRuntimeState::Failed,
+                work_phase: EmployeeWorkPhase::Blocked,
+                turn_owner: EmployeeTurnOwner::Owner,
+                attention_reason: Some(EmployeeAttentionReason::BlockedNeedsHelp),
+                contract: ExpectedContractSummary {
+                    work_kind: EmployeeActivityContractWorkKind::None,
+                    work_phase: EmployeeActivityContractWorkPhase::Blocked,
+                    turn_owner: EmployeeTurnOwner::Owner,
+                    placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                    posture: EmployeeActivityContractRenderPosture::Standing,
+                    render_activity: EmployeeActivityContractRenderActivity::Blocked,
+                    attention_reason: Some(EmployeeAttentionReason::BlockedNeedsHelp),
+                    source_runtime: Some(EmployeeActivityContractSourceRuntime::CodexAppServer),
+                    source_confidence: Some(EmployeeActivityContractSourceConfidence::Structured),
+                },
+            },
         ];
 
         for case in cases {

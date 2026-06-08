@@ -655,6 +655,7 @@ fn codex_session_event_handler(
             CodexAppServerEvent::Notification { method, params } => (method, params),
             CodexAppServerEvent::Request { method, params } => (method, params),
         };
+        let mut emitted_terminal_update = false;
         if let Some(snapshot) =
             agent_runtime.record_codex_app_server_notification(&session_id, &method, &params)
         {
@@ -669,18 +670,32 @@ fn codex_session_event_handler(
                     "\r\n[Codex] Waiting for next instruction.\r\n› ".to_string(),
                 );
             }
+            if let Some(record) =
+                terminal_sessions.record_app_server_runtime_state(&session_id, snapshot.state)
+            {
+                emit_terminal_session_updated(&app, record);
+                emitted_terminal_update = true;
+            }
         }
         if let Some(data) = transcript_delta_for_app_server_event(&method, &params) {
             append_app_server_transcript(&app_server, &app, &employee_id, &session_id, data);
         }
         if method == "error" {
-            if let Some(record) =
-                terminal_sessions.fail_start(&session_id, "Codex app-server error")
-            {
-                agent_runtime.sync_from_terminal_session(&record);
-                emit_terminal_session_updated(&app, record);
+            let should_mark_failed = terminal_sessions
+                .get(&session_id)
+                .map(|record| record.status == TerminalSessionStatus::Running)
+                .unwrap_or(false);
+            if should_mark_failed {
+                if let Some(record) =
+                    terminal_sessions.fail_start(&session_id, "Codex app-server error")
+                {
+                    agent_runtime.sync_from_terminal_session(&record);
+                    emit_terminal_session_updated(&app, record);
+                    emitted_terminal_update = true;
+                }
             }
-        } else {
+        }
+        if !emitted_terminal_update {
             emit_employee_activity_updated(&app, Some(employee_id.clone()));
         }
     })

@@ -10,7 +10,7 @@ use super::{
         codex_output_suggests_approval_prompt, codex_output_suggests_prompt_ready,
         codex_session_is_active, codex_session_is_waiting_for_approval,
         codex_session_is_waiting_for_instruction, codex_session_should_track_prompt,
-        terminal_input_submits_prompt, terminal_input_updates_owner_prompt,
+        terminal_input_submits_prompt, terminal_input_updates_owner_prompt, AgentRuntimeState,
     },
     TerminalLaunchProfile, TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE, TERMINAL_LABEL_MAX_CHARS,
 };
@@ -108,6 +108,7 @@ enum TerminalTurnTransitionKind {
     Input,
     ActiveProfile,
     Finish,
+    AppServer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +126,12 @@ enum TerminalTurnTransitionReason {
     ActiveProfileChangedToCodex,
     SessionFinishedCompleted,
     SessionFinishedFailed,
+    AppServerStarting,
+    AppServerThinking,
+    AppServerWaitingPrompt,
+    AppServerWaitingApproval,
+    AppServerCompleted,
+    AppServerFailed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -459,6 +466,40 @@ impl TerminalSessionStore {
         Some(record.clone())
     }
 
+    pub fn record_app_server_runtime_state(
+        &self,
+        session_id: &str,
+        state: AgentRuntimeState,
+    ) -> Option<TerminalSessionRecord> {
+        if state == AgentRuntimeState::NotActive {
+            return None;
+        }
+
+        let mut records = self.records.lock();
+        let record = records.get_mut(session_id)?;
+        if record.runtime != TerminalSessionRuntime::CodexAppServer
+            || record.status != TerminalSessionStatus::Running
+        {
+            return None;
+        }
+
+        let previous_active_profile = record.active_profile;
+        let previous_prompt_ready_at = record.last_prompt_ready_at;
+        let previous_prompt_submitted_at = record.last_prompt_submitted_at;
+        let previous_approval_prompt_at = record.last_approval_prompt_at;
+        let previous_turn_state = record.turn_state;
+
+        let transition = resolve_app_server_runtime_state_transition(record, state);
+        apply_terminal_turn_transition(record, transition, crate::events::now_ms());
+
+        let activity_relevant_change = previous_active_profile != record.active_profile
+            || previous_prompt_ready_at != record.last_prompt_ready_at
+            || previous_prompt_submitted_at != record.last_prompt_submitted_at
+            || previous_approval_prompt_at != record.last_approval_prompt_at
+            || previous_turn_state != record.turn_state;
+        activity_relevant_change.then(|| record.clone())
+    }
+
     pub fn rename(&self, session_id: &str, label: &str) -> Result<TerminalSessionRecord, String> {
         let label = cleaned_session_label(label)?;
         let mut records = self.records.lock();
@@ -707,6 +748,79 @@ fn resolve_finish_transition(
     }
 }
 
+fn resolve_app_server_runtime_state_transition(
+    record: &TerminalSessionRecord,
+    state: AgentRuntimeState,
+) -> TerminalTurnTransition {
+    match state {
+        AgentRuntimeState::NotActive => TerminalTurnTransition::no_change(
+            TerminalTurnTransitionReason::NoActivityRelevantChange,
+        ),
+        AgentRuntimeState::Starting => TerminalTurnTransition::new(
+            TerminalTurnTransitionKind::AppServer,
+            TerminalTurnTransitionReason::AppServerStarting,
+        )
+        .with_active_profile(TerminalLaunchProfile::Codex)
+        .with_turn_state(TerminalTurnState::CodexStarting),
+        AgentRuntimeState::Thinking => TerminalTurnTransition::new(
+            TerminalTurnTransitionKind::AppServer,
+            TerminalTurnTransitionReason::AppServerThinking,
+        )
+        .with_active_profile(TerminalLaunchProfile::Codex)
+        .with_prompt_ready_at(TimestampTransition::Clear)
+        .with_approval_prompt_at(TimestampTransition::Clear)
+        .with_turn_state(TerminalTurnState::AgentWorking),
+        AgentRuntimeState::WaitingPrompt => {
+            let prompt_ready_at = if record.turn_state == TerminalTurnState::OwnerPromptReady
+                && record.last_prompt_ready_at.is_some()
+            {
+                TimestampTransition::Unchanged
+            } else {
+                TimestampTransition::SetNow
+            };
+
+            TerminalTurnTransition::new(
+                TerminalTurnTransitionKind::AppServer,
+                TerminalTurnTransitionReason::AppServerWaitingPrompt,
+            )
+            .with_active_profile(TerminalLaunchProfile::Codex)
+            .with_prompt_ready_at(prompt_ready_at)
+            .with_approval_prompt_at(TimestampTransition::Clear)
+            .with_turn_state(TerminalTurnState::OwnerPromptReady)
+        }
+        AgentRuntimeState::WaitingApproval => {
+            let approval_prompt_at = if record.turn_state == TerminalTurnState::WaitingApproval
+                && record.last_approval_prompt_at.is_some()
+            {
+                TimestampTransition::Unchanged
+            } else {
+                TimestampTransition::SetNow
+            };
+
+            TerminalTurnTransition::new(
+                TerminalTurnTransitionKind::AppServer,
+                TerminalTurnTransitionReason::AppServerWaitingApproval,
+            )
+            .with_active_profile(TerminalLaunchProfile::Codex)
+            .with_prompt_ready_at(TimestampTransition::Clear)
+            .with_approval_prompt_at(approval_prompt_at)
+            .with_turn_state(TerminalTurnState::WaitingApproval)
+        }
+        AgentRuntimeState::Completed => TerminalTurnTransition::new(
+            TerminalTurnTransitionKind::AppServer,
+            TerminalTurnTransitionReason::AppServerCompleted,
+        )
+        .with_active_profile(TerminalLaunchProfile::Codex)
+        .with_turn_state(TerminalTurnState::Completed),
+        AgentRuntimeState::Failed => TerminalTurnTransition::new(
+            TerminalTurnTransitionKind::AppServer,
+            TerminalTurnTransitionReason::AppServerFailed,
+        )
+        .with_active_profile(TerminalLaunchProfile::Codex)
+        .with_turn_state(TerminalTurnState::Failed),
+    }
+}
+
 fn apply_terminal_turn_transition(
     record: &mut TerminalSessionRecord,
     transition: TerminalTurnTransition,
@@ -719,7 +833,8 @@ fn apply_terminal_turn_transition(
         TerminalTurnTransitionKind::Output
         | TerminalTurnTransitionKind::Input
         | TerminalTurnTransitionKind::ActiveProfile
-        | TerminalTurnTransitionKind::Finish => {}
+        | TerminalTurnTransitionKind::Finish
+        | TerminalTurnTransitionKind::AppServer => {}
     }
 
     if let Some(active_profile) = transition.active_profile {
@@ -930,7 +1045,10 @@ fn cleaned_session_label(label: &str) -> Result<String, String> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::super::{TerminalLaunchProfile, TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE};
+    use super::super::{
+        AgentRuntimeConfidence, AgentRuntimeSnapshot, AgentRuntimeSource, AgentRuntimeState,
+        AgentRuntimeStore, TerminalLaunchProfile, TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE,
+    };
     use super::{
         codex_session_is_waiting_for_instruction, output_for_prompt_detection,
         resolve_active_profile_transition, resolve_finish_transition, resolve_input_transition,
@@ -1432,6 +1550,181 @@ mod tests {
     }
 
     #[test]
+    fn app_server_turn_started_maps_session_to_agent_working() {
+        let store = TerminalSessionStore::default();
+        let runtime = AgentRuntimeStore::default();
+        let submitted = create_app_server_prompt_submitted_session(&store);
+        let submitted_at = submitted.last_prompt_submitted_at;
+
+        let (snapshot, updated) = apply_app_server_event(
+            &store,
+            &runtime,
+            &submitted.session_id,
+            "turn/started",
+            None,
+        );
+
+        assert_eq!(snapshot.state, AgentRuntimeState::Thinking);
+        assert_structured_app_server_snapshot(snapshot);
+        let updated = updated.unwrap();
+        assert_eq!(updated.status, TerminalSessionStatus::Running);
+        assert_eq!(updated.active_profile, Some(TerminalLaunchProfile::Codex));
+        assert_eq!(updated.turn_state, TerminalTurnState::AgentWorking);
+        assert_eq!(updated.last_prompt_submitted_at, submitted_at);
+        assert_eq!(updated.last_prompt_ready_at, None);
+        assert_eq!(updated.last_approval_prompt_at, None);
+    }
+
+    #[test]
+    fn app_server_successful_turn_completed_maps_session_to_prompt_ready() {
+        let store = TerminalSessionStore::default();
+        let runtime = AgentRuntimeStore::default();
+        let submitted = create_app_server_prompt_submitted_session(&store);
+
+        let (snapshot, updated) = apply_app_server_event(
+            &store,
+            &runtime,
+            &submitted.session_id,
+            "turn/completed",
+            Some(serde_json::json!({ "turn": { "status": "completed" } })),
+        );
+
+        assert_eq!(snapshot.state, AgentRuntimeState::WaitingPrompt);
+        assert_structured_app_server_snapshot(snapshot);
+        let updated = updated.unwrap();
+        assert_eq!(updated.status, TerminalSessionStatus::Running);
+        assert_eq!(updated.active_profile, Some(TerminalLaunchProfile::Codex));
+        assert_eq!(updated.turn_state, TerminalTurnState::OwnerPromptReady);
+        assert!(updated.last_prompt_ready_at.is_some());
+        assert_eq!(updated.last_approval_prompt_at, None);
+    }
+
+    #[test]
+    fn app_server_approval_request_maps_session_to_waiting_approval() {
+        let store = TerminalSessionStore::default();
+        let runtime = AgentRuntimeStore::default();
+        let submitted = create_app_server_prompt_submitted_session(&store);
+        let (_, ready) = apply_app_server_event(
+            &store,
+            &runtime,
+            &submitted.session_id,
+            "turn/completed",
+            Some(serde_json::json!({ "turn": { "status": "completed" } })),
+        );
+        assert!(ready.unwrap().last_prompt_ready_at.is_some());
+
+        let (snapshot, approval) = apply_app_server_event(
+            &store,
+            &runtime,
+            &submitted.session_id,
+            "item/commandExecution/requestApproval",
+            None,
+        );
+
+        assert_eq!(snapshot.state, AgentRuntimeState::WaitingApproval);
+        assert_structured_app_server_snapshot(snapshot);
+        let approval = approval.unwrap();
+        assert_eq!(approval.status, TerminalSessionStatus::Running);
+        assert_eq!(approval.active_profile, Some(TerminalLaunchProfile::Codex));
+        assert_eq!(approval.turn_state, TerminalTurnState::WaitingApproval);
+        assert_eq!(approval.last_prompt_ready_at, None);
+        assert!(approval.last_approval_prompt_at.is_some());
+    }
+
+    #[test]
+    fn app_server_failed_turn_or_error_maps_session_to_failed_turn_state() {
+        for (method, params) in [
+            (
+                "turn/completed",
+                Some(serde_json::json!({ "turn": { "status": "failed" } })),
+            ),
+            ("error", None),
+        ] {
+            let store = TerminalSessionStore::default();
+            let runtime = AgentRuntimeStore::default();
+            let submitted = create_app_server_prompt_submitted_session(&store);
+
+            let (snapshot, updated) =
+                apply_app_server_event(&store, &runtime, &submitted.session_id, method, params);
+
+            assert_eq!(snapshot.state, AgentRuntimeState::Failed);
+            assert_structured_app_server_snapshot(snapshot);
+            let updated = updated.unwrap();
+            assert_eq!(updated.status, TerminalSessionStatus::Running);
+            assert_eq!(updated.active_profile, Some(TerminalLaunchProfile::Codex));
+            assert_eq!(updated.turn_state, TerminalTurnState::Failed);
+        }
+    }
+
+    #[test]
+    fn app_server_thread_closed_maps_session_to_completed_turn_state() {
+        let store = TerminalSessionStore::default();
+        let runtime = AgentRuntimeStore::default();
+        let submitted = create_app_server_prompt_submitted_session(&store);
+
+        let (snapshot, updated) = apply_app_server_event(
+            &store,
+            &runtime,
+            &submitted.session_id,
+            "thread/closed",
+            None,
+        );
+
+        assert_eq!(snapshot.state, AgentRuntimeState::Completed);
+        assert_structured_app_server_snapshot(snapshot);
+        let updated = updated.unwrap();
+        assert_eq!(updated.status, TerminalSessionStatus::Running);
+        assert_eq!(updated.active_profile, Some(TerminalLaunchProfile::Codex));
+        assert_eq!(updated.turn_state, TerminalTurnState::Completed);
+    }
+
+    #[test]
+    fn duplicate_app_server_runtime_state_does_not_return_changed_session_record() {
+        let store = TerminalSessionStore::default();
+        let runtime = AgentRuntimeStore::default();
+        let submitted = create_app_server_prompt_submitted_session(&store);
+
+        let (_, first_update) = apply_app_server_event(
+            &store,
+            &runtime,
+            &submitted.session_id,
+            "turn/started",
+            None,
+        );
+        let (_, duplicate_update) = apply_app_server_event(
+            &store,
+            &runtime,
+            &submitted.session_id,
+            "turn/started",
+            None,
+        );
+
+        assert!(first_update.is_some());
+        assert!(duplicate_update.is_none());
+    }
+
+    #[test]
+    fn app_server_session_sync_does_not_downgrade_structured_runtime_snapshot() {
+        let store = TerminalSessionStore::default();
+        let runtime = AgentRuntimeStore::default();
+        let submitted = create_app_server_prompt_submitted_session(&store);
+
+        let (snapshot, updated) = apply_app_server_event(
+            &store,
+            &runtime,
+            &submitted.session_id,
+            "turn/completed",
+            Some(serde_json::json!({ "turn": { "status": "completed" } })),
+        );
+
+        assert!(updated.is_some());
+        assert_structured_app_server_snapshot(snapshot);
+        let stored = runtime.snapshot(&submitted.session_id).unwrap();
+        assert_eq!(stored.state, AgentRuntimeState::WaitingPrompt);
+        assert_structured_app_server_snapshot(stored);
+    }
+
+    #[test]
     fn terminal_session_history_is_capped_per_employee() {
         let store = TerminalSessionStore::default();
         let records = (0..(TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE + 5))
@@ -1543,5 +1836,38 @@ mod tests {
             last_output_tail: String::new(),
             message: None,
         }
+    }
+
+    fn create_app_server_prompt_submitted_session(
+        store: &TerminalSessionStore,
+    ) -> TerminalSessionRecord {
+        store.create_with_runtime(
+            "app-server-session".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+            TerminalSessionRuntime::CodexAppServer,
+        );
+        store.record_input("app-server-session", "\r").unwrap()
+    }
+
+    fn apply_app_server_event(
+        store: &TerminalSessionStore,
+        runtime: &AgentRuntimeStore,
+        session_id: &str,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> (AgentRuntimeSnapshot, Option<TerminalSessionRecord>) {
+        let params = params.unwrap_or(serde_json::Value::Null);
+        let snapshot = runtime
+            .record_codex_app_server_notification(session_id, method, &params)
+            .unwrap();
+        let updated = store.record_app_server_runtime_state(session_id, snapshot.state);
+        (snapshot, updated)
+    }
+
+    fn assert_structured_app_server_snapshot(snapshot: AgentRuntimeSnapshot) {
+        assert_eq!(snapshot.source, AgentRuntimeSource::CodexAppServer);
+        assert_eq!(snapshot.confidence, AgentRuntimeConfidence::Structured);
     }
 }

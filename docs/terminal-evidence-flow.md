@@ -171,9 +171,13 @@ The structured Codex app-server path starts at `codex_task_submit`.
 7. Responses resolve pending request waiters. Notifications and requests are routed to the session handler using the thread id.
 8. App-server requests are answered with conservative default responses. Approval requests are declined or denied by default.
 9. The session handler records app-server notifications in `AgentRuntimeStore` with `source: codex_app_server` and `confidence: structured`.
-10. Transcript deltas from agent messages, command output, file changes, and reasoning summaries are appended to the app-server transcript and emitted as `terminal:data`.
-11. `turn/completed` with a successful status records `waiting_prompt` and appends a waiting-for-next-instruction prompt to the transcript.
-12. `error` marks the terminal session failed and emits `terminal:session-updated`. Other structured events emit `employee:activity-updated` directly.
+10. When a structured app-server event maps to an `AgentRuntimeState`, `TerminalSessionStore.record_app_server_runtime_state` semantically updates the owning app-server `TerminalSessionRecord` and emits `terminal:session-updated` if active profile, turn state, or prompt/approval timestamps changed.
+11. Transcript deltas from agent messages, command output, file changes, and reasoning summaries are appended to the app-server transcript and emitted as `terminal:data`.
+12. `turn/started` rewrites the app-server terminal record from `prompt_submitted` to `agent_working`, preserving the submitted timestamp and clearing prompt-ready and approval timestamps.
+13. `turn/completed` with a successful status records `waiting_prompt`, rewrites the terminal record to `owner_prompt_ready`, sets `lastPromptReadyAt` when entering that state, and appends a waiting-for-next-instruction prompt to the transcript.
+14. Approval request events rewrite the terminal record to `waiting_approval`, set `lastApprovalPromptAt` when entering that state, and clear the prompt-ready timestamp.
+15. `turn/completed` with failed status and `error` rewrite the terminal record to `failed`. The `error` path also keeps the existing terminal-status failure behavior and emits `terminal:session-updated` for that status change.
+16. If a structured runtime event changes only the runtime snapshot and not the terminal session record, the handler emits `employee:activity-updated` directly.
 
 For app-server sessions, activity state is driven by structured `AgentRuntimeStore` snapshots whenever those snapshots exist. The terminal transcript exists for user visibility and replay, not as the source of truth for employee activity.
 
@@ -190,8 +194,10 @@ For app-server sessions, activity state is driven by structured `AgentRuntimeSto
 | Final answer / prompt returns | `owner_prompt_ready` | `waiting_prompt` | `codex_waiting_instruction` | `owner_office` / `waiting_instruction` | `needs_instruction` |
 | Approval prompt | `waiting_approval` | `waiting_approval` | `codex_waiting_approval` | `owner_office` / `approval` | `needs_terminal_approval` |
 | Approval resolved | `prompt_submitted` or `agent_working` until the next prompt or failure signal | `thinking` until the next prompt or failure signal | `codex_running` | `desk` / `working` | No |
-| App-server turn started | usually `prompt_submitted`; app-server notifications do not rewrite `turnState` | `thinking` | `codex_running` | `desk` / `working` | No |
-| App-server turn completed | usually unchanged from submit; structured snapshot carries the owner-wait state | `waiting_prompt` | `codex_waiting_instruction` | `owner_office` / `waiting_instruction` | `needs_instruction` |
+| App-server turn started | `agent_working` | `thinking` | `codex_running` | `desk` / `working` | No |
+| App-server turn completed | `owner_prompt_ready` with `lastPromptReadyAt` set on entry | `waiting_prompt` | `codex_waiting_instruction` | `owner_office` / `waiting_instruction` | `needs_instruction` |
+| App-server approval request | `waiting_approval` with `lastApprovalPromptAt` set on entry | `waiting_approval` | `codex_waiting_approval` | `owner_office` / `approval` | `needs_terminal_approval` |
+| App-server failed turn / error | `failed` | `failed` | `blocked` | `owner_office` / `blocked` | `blocked_needs_help` |
 | Error/failure | `failed` | `failed` | `blocked` | `owner_office` / `blocked` | `blocked_needs_help` |
 | Terminal stopped/exited | explicit stop and clean Codex process exit use `completed`; failed Codex process exit uses `failed` | `completed` or `failed` for Codex sessions | explicit stop becomes `stopped`; clean completion usually becomes `done_clean`; failure becomes `blocked` | `offline` / `idle`, `owner_office` / `handoff`, or `owner_office` / `blocked` | None, `ready_to_report`, or `blocked_needs_help` |
 | Review needed | no terminal signal required | usually `not_active` unless historical agent evidence exists | `review_needed` | `owner_office` / `review` | `review_needed` |
@@ -223,7 +229,6 @@ The floor must not infer employee state directly from terminal text because term
 - Frontend terminal buffers may update before the matching `terminal:session-updated` record arrives. During that gap, terminal text can be fresher than terminal session turn metadata, but backend session records remain authoritative for Codex state.
 - The fixture corpus is not complete yet. Existing tests cover important prompt-ready, approval, active-work, owner-draft, app-server, and stale-redraw cases, but they are not a broad transcript replay suite.
 - Structured app-server evidence is preferred, but shell-launched Codex still relies on PTY fallback and wrapper markers.
-- App-server notifications update `AgentRuntimeStore` and activity directly, but most notifications do not rewrite `TerminalSessionRecord.turnState`. Activity can still be correct through the structured runtime snapshot, while terminal-session display may lag or show the submission state until another session update arrives.
 - Backend PTY transition reasons are currently internal and testable only. They are not exposed through diagnostics, so debugging production edge cases still requires looking at session state and logs rather than a transition trace.
 - CWD markers are currently shell-integration dependent. Unsupported shells or failed shell integration can leave `current_cwd` at the start directory even when terminal output and activity continue normally.
 
@@ -233,10 +238,11 @@ The items above are hardening risks to carry into later phases. This document re
 
 These phases are listed for planning context only. This document does not implement them.
 
+Phase 5 structured Codex app-server state sync is reflected in the current app-server flow and state table above. Remaining planned phases:
+
 - Phase 2: Build a terminal transcript fixture corpus and replay harness for PTY parser regressions.
 - Phase 3: Consolidate parser ownership and add backend/frontend parity coverage where local display still mirrors backend logic.
 - Phase 4: Harden event ordering, session update freshness, and activity refresh behavior under rapid terminal output.
-- Phase 5: Strengthen Codex app-server state handling, including request/approval edge cases and terminal-session display consistency.
 - Phase 6: Expand diagnostics for terminal evidence decisions, runtime source/confidence, and activity contract traces.
 - Phase 7: Add state-driven frontend and browser smoke coverage for critical terminal/activity/floor transitions.
 - Phase 8: Reduce reliance on PTY fallback for shell-launched Codex where a structured source can be used.
