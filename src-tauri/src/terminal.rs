@@ -48,6 +48,7 @@ pub use self::codex_status::codex_cli_status_impl;
 pub(crate) use self::session_store::{
     restore_terminal_session_records, TerminalSessionRecord, TerminalSessionRuntime,
     TerminalSessionStatus, TerminalSessionStore, TerminalStopReason, TerminalTurnState,
+    TerminalTurnTransitionReason,
 };
 
 pub const DEFAULT_PTY_SIZE: PtySize = PtySize {

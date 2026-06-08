@@ -448,6 +448,7 @@ mod tests {
             last_prompt_ready_at: None,
             last_approval_prompt_at: None,
             turn_state: crate::terminal::TerminalTurnState::Completed,
+            last_transition_reason: None,
             last_output_tail: String::new(),
             message: Some("stopped".to_string()),
         }

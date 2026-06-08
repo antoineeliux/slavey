@@ -18,7 +18,7 @@ use crate::{
     terminal::{
         codex_cli_status_impl, AgentRuntimeSnapshot, CodexCliStatus, TerminalLaunchProfile,
         TerminalSessionRecord, TerminalSessionRuntime, TerminalSessionStatus, TerminalStopReason,
-        TerminalTurnState,
+        TerminalTurnState, TerminalTurnTransitionReason,
     },
     workspace::{repo_health_for_workspace, RepoHealth},
     AppState,
@@ -155,6 +155,50 @@ pub struct DiagnosticsEmployeeActivityMetadata {
     pub review_counts: EmployeeReviewCounts,
     pub blockers: Vec<String>,
     pub last_activity_at: Option<u64>,
+    pub trace: DiagnosticsEmployeeActivityTrace,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsEmployeeActivityTrace {
+    pub employee_id: String,
+    pub legacy: DiagnosticsLegacyActivityTrace,
+    pub active_terminal_session_id: Option<String>,
+    pub terminal: Option<DiagnosticsTerminalEvidenceTrace>,
+    pub agent_runtime: AgentRuntimeSnapshot,
+    pub contract: EmployeeActivityContract,
+    pub active_action_id: Option<String>,
+    pub active_process_ids: Vec<String>,
+    pub active_process_count: usize,
+    pub review_counts: EmployeeReviewCounts,
+    pub blockers: Vec<String>,
+    pub last_activity_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsLegacyActivityTrace {
+    pub status: EmployeeActivityStatus,
+    pub lifecycle: EmployeeLifecycleState,
+    pub behavior: EmployeeBehaviorState,
+    pub terminal_state: EmployeeTerminalActivityState,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsTerminalEvidenceTrace {
+    pub session_id: String,
+    pub employee_id: String,
+    pub status: TerminalSessionStatus,
+    pub runtime: TerminalSessionRuntime,
+    pub profile: TerminalLaunchProfile,
+    pub active_profile: Option<TerminalLaunchProfile>,
+    pub turn_state: TerminalTurnState,
+    pub last_prompt_submitted_at: Option<u64>,
+    pub last_prompt_ready_at: Option<u64>,
+    pub last_approval_prompt_at: Option<u64>,
+    pub last_transition_reason: Option<TerminalTurnTransitionReason>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -179,6 +223,7 @@ pub struct DiagnosticsTerminalSessionMetadata {
     pub last_prompt_ready_at: Option<u64>,
     pub last_approval_prompt_at: Option<u64>,
     pub turn_state: TerminalTurnState,
+    pub last_transition_reason: Option<TerminalTurnTransitionReason>,
     pub message: Option<String>,
 }
 
@@ -250,9 +295,14 @@ fn diagnostics_summary_impl(state: &AppState) -> DiagnosticsSummary {
 fn diagnostics_export_bundle_impl(state: &AppState) -> DiagnosticsExportBundle {
     let workspace_root = state.workspace_root();
     let repo_health = repo_health_for_workspace(&workspace_root, codex_cli_status_impl());
+    let terminal_session_records = state.terminal_sessions.list(None);
+    let terminal_sessions_by_id = terminal_session_records
+        .iter()
+        .map(|session| (session.session_id.clone(), session.clone()))
+        .collect::<BTreeMap<_, _>>();
     let employee_activities = recent_items(employee_activity_list_impl(state), MAX_EXPORT_ITEMS)
         .into_iter()
-        .map(sanitize_employee_activity_metadata)
+        .map(|activity| sanitize_employee_activity_metadata(activity, &terminal_sessions_by_id))
         .collect();
     let actions = recent_items(state.actions.list(None), MAX_EXPORT_ITEMS)
         .into_iter()
@@ -262,7 +312,7 @@ fn diagnostics_export_bundle_impl(state: &AppState) -> DiagnosticsExportBundle {
         .into_iter()
         .map(sanitize_approval_metadata)
         .collect();
-    let terminal_sessions = recent_items(state.terminal_sessions.list(None), MAX_EXPORT_ITEMS)
+    let terminal_sessions = recent_items(terminal_session_records, MAX_EXPORT_ITEMS)
         .into_iter()
         .map(sanitize_terminal_session_metadata)
         .collect();
@@ -483,14 +533,43 @@ fn sanitize_approval_metadata(approval: ApprovalRequest) -> DiagnosticsApprovalM
 
 fn sanitize_employee_activity_metadata(
     activity: EmployeeActivity,
+    terminal_sessions_by_id: &BTreeMap<String, TerminalSessionRecord>,
 ) -> DiagnosticsEmployeeActivityMetadata {
+    let activity_reason = redact_diagnostic_string(&activity.activity_reason);
+    let blockers = sanitize_strings(activity.blockers);
+    let terminal = activity
+        .active_terminal_session_id
+        .as_deref()
+        .and_then(|session_id| terminal_sessions_by_id.get(session_id))
+        .map(sanitize_terminal_evidence_trace);
+    let trace = DiagnosticsEmployeeActivityTrace {
+        employee_id: activity.employee_id.clone(),
+        legacy: DiagnosticsLegacyActivityTrace {
+            status: activity.status,
+            lifecycle: activity.lifecycle,
+            behavior: activity.behavior,
+            terminal_state: activity.terminal_state,
+            reason: activity_reason.clone(),
+        },
+        active_terminal_session_id: activity.active_terminal_session_id.clone(),
+        terminal,
+        agent_runtime: activity.agent,
+        contract: activity.contract,
+        active_action_id: activity.active_action_id.clone(),
+        active_process_ids: activity.active_process_ids.clone(),
+        active_process_count: activity.active_process_ids.len(),
+        review_counts: activity.review_counts.clone(),
+        blockers: blockers.clone(),
+        last_activity_at: activity.last_activity_at,
+    };
+
     DiagnosticsEmployeeActivityMetadata {
         employee_id: activity.employee_id,
         status: activity.status,
         lifecycle: activity.lifecycle,
         behavior: activity.behavior,
         terminal_state: activity.terminal_state,
-        activity_reason: redact_diagnostic_string(&activity.activity_reason),
+        activity_reason,
         session: activity.session,
         agent: activity.agent,
         work: activity.work,
@@ -500,8 +579,27 @@ fn sanitize_employee_activity_metadata(
         active_action_id: activity.active_action_id,
         active_process_ids: activity.active_process_ids,
         review_counts: activity.review_counts,
-        blockers: sanitize_strings(activity.blockers),
+        blockers,
         last_activity_at: activity.last_activity_at,
+        trace,
+    }
+}
+
+fn sanitize_terminal_evidence_trace(
+    session: &TerminalSessionRecord,
+) -> DiagnosticsTerminalEvidenceTrace {
+    DiagnosticsTerminalEvidenceTrace {
+        session_id: session.session_id.clone(),
+        employee_id: session.employee_id.clone(),
+        status: session.status,
+        runtime: session.runtime,
+        profile: session.profile,
+        active_profile: session.active_profile,
+        turn_state: session.turn_state,
+        last_prompt_submitted_at: session.last_prompt_submitted_at,
+        last_prompt_ready_at: session.last_prompt_ready_at,
+        last_approval_prompt_at: session.last_approval_prompt_at,
+        last_transition_reason: session.last_transition_reason,
     }
 }
 
@@ -528,6 +626,7 @@ fn sanitize_terminal_session_metadata(
         last_prompt_ready_at: session.last_prompt_ready_at,
         last_approval_prompt_at: session.last_approval_prompt_at,
         turn_state: session.turn_state,
+        last_transition_reason: session.last_transition_reason,
         message: session.message.as_deref().map(redact_diagnostic_string),
     }
 }
@@ -615,7 +714,10 @@ mod tests {
         approvals::{ApprovalManager, ApprovalRequest},
         employees::{EmployeeManager, EmployeeRole, EmployeeStatus},
         processes::{ManagedProcess, ProcessManager},
-        terminal::{AgentRuntimeSource, AgentRuntimeState, TerminalManager, TerminalSessionStore},
+        terminal::{
+            AgentRuntimeConfidence, AgentRuntimeSource, AgentRuntimeState, TerminalManager,
+            TerminalSessionStore, TerminalTurnTransitionReason,
+        },
     };
 
     #[test]
@@ -654,6 +756,7 @@ mod tests {
             last_prompt_ready_at: None,
             last_approval_prompt_at: None,
             turn_state: crate::terminal::TerminalTurnState::Shell,
+            last_transition_reason: None,
             last_output_tail: String::new(),
             message: None,
         }];
@@ -748,6 +851,116 @@ mod tests {
             activity.active_terminal_session_id.as_deref(),
             Some("session-1")
         );
+        assert_eq!(activity.trace.employee_id, employee.id);
+        assert_eq!(
+            activity.trace.legacy.status,
+            EmployeeActivityStatus::CodexRunning
+        );
+        assert_eq!(activity.trace.legacy.reason, "terminal_agent_working");
+        assert_eq!(
+            activity
+                .trace
+                .terminal
+                .as_ref()
+                .expect("trace should include terminal evidence")
+                .runtime,
+            TerminalSessionRuntime::CodexAppServer
+        );
+        assert_eq!(
+            activity.trace.terminal.as_ref().unwrap().turn_state,
+            TerminalTurnState::PromptSubmitted
+        );
+        assert_eq!(
+            activity
+                .trace
+                .terminal
+                .as_ref()
+                .unwrap()
+                .last_prompt_submitted_at,
+            prompt_record.last_prompt_submitted_at
+        );
+        assert_eq!(
+            activity
+                .trace
+                .terminal
+                .as_ref()
+                .unwrap()
+                .last_transition_reason,
+            Some(TerminalTurnTransitionReason::OwnerInputSubmitted)
+        );
+        assert_eq!(
+            activity.trace.agent_runtime.source,
+            AgentRuntimeSource::CodexAppServer
+        );
+        assert_eq!(
+            activity.trace.agent_runtime.confidence,
+            AgentRuntimeConfidence::Structured
+        );
+        assert_eq!(
+            activity.trace.contract.source.confidence,
+            EmployeeActivityContractSourceConfidence::Structured
+        );
+        assert_eq!(activity.trace.active_process_count, 0);
+    }
+
+    #[test]
+    fn export_bundle_includes_pty_terminal_transition_reason_trace() {
+        let root = test_root("pty-transition-trace");
+        let state = test_state(root.clone());
+        let employee = state.employees.create(
+            "Ada".to_string(),
+            EmployeeRole::General,
+            state.workspace_root(),
+        );
+        let session = state.terminal_sessions.create(
+            "session-pty".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+        );
+        let ready_record = state
+            .terminal_sessions
+            .record_output(&session.session_id, "\r\n› ")
+            .unwrap();
+        state
+            .agent_runtime
+            .sync_from_terminal_session(&ready_record);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Running;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+
+        let bundle = diagnostics_export_bundle_impl(&state);
+        let activity = bundle
+            .employee_activities
+            .iter()
+            .find(|activity| activity.employee_id == employee.id)
+            .expect("employee activity diagnostics should include employee");
+        let terminal = activity
+            .trace
+            .terminal
+            .as_ref()
+            .expect("trace should include active terminal evidence");
+
+        assert_eq!(
+            activity.status,
+            EmployeeActivityStatus::CodexWaitingInstruction
+        );
+        assert_eq!(terminal.runtime, TerminalSessionRuntime::Pty);
+        assert_eq!(terminal.turn_state, TerminalTurnState::OwnerPromptReady);
+        assert_eq!(
+            terminal.last_transition_reason,
+            Some(TerminalTurnTransitionReason::CodexPromptReady)
+        );
+        assert_eq!(
+            activity.trace.agent_runtime.source,
+            AgentRuntimeSource::TerminalFallback
+        );
+        assert_eq!(
+            activity.trace.agent_runtime.confidence,
+            AgentRuntimeConfidence::TerminalFallback
+        );
     }
 
     #[test]
@@ -774,6 +987,7 @@ mod tests {
             last_prompt_ready_at: Some(4),
             last_approval_prompt_at: Some(5),
             turn_state: TerminalTurnState::WaitingApproval,
+            last_transition_reason: Some(TerminalTurnTransitionReason::CodexApprovalPrompt),
             last_output_tail: "raw terminal output TOKEN=abc123".to_string(),
             message: Some("password: hunter2".to_string()),
         });
@@ -789,10 +1003,15 @@ mod tests {
         assert_eq!(metadata.last_prompt_ready_at, Some(4));
         assert_eq!(metadata.last_approval_prompt_at, Some(5));
         assert_eq!(metadata.turn_state, TerminalTurnState::WaitingApproval);
+        assert_eq!(
+            metadata.last_transition_reason,
+            Some(TerminalTurnTransitionReason::CodexApprovalPrompt)
+        );
 
         let json = serde_json::to_string(&metadata).unwrap();
         assert!(json.contains("codex_app_server"));
         assert!(json.contains("waiting_approval"));
+        assert!(json.contains("codex_approval_prompt"));
         assert!(!json.contains("raw terminal output"));
         assert!(!json.contains("lastOutputTail"));
         assert!(!json.contains("abc123"));

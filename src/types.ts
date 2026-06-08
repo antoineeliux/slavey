@@ -60,6 +60,27 @@ export type TerminalTurnState =
   | "completed"
   | "failed";
 
+export type TerminalTurnTransitionReason =
+  | "shell_output"
+  | "codex_approval_prompt"
+  | "codex_active_work"
+  | "codex_prompt_ready"
+  | "codex_prompt_ready_at_end_stale_work_redraw"
+  | "owner_prompt_echo_ignored"
+  | "owner_input_submitted"
+  | "owner_composing"
+  | "no_activity_relevant_change"
+  | "active_profile_reset_to_shell"
+  | "active_profile_changed_to_codex"
+  | "session_finished_completed"
+  | "session_finished_failed"
+  | "app_server_starting"
+  | "app_server_thinking"
+  | "app_server_waiting_prompt"
+  | "app_server_waiting_approval"
+  | "app_server_completed"
+  | "app_server_failed";
+
 export type TerminalSessionRecord = {
   sessionId: string;
   employeeId: string;
@@ -80,6 +101,7 @@ export type TerminalSessionRecord = {
   lastPromptReadyAt?: number | null;
   lastApprovalPromptAt?: number | null;
   turnState: TerminalTurnState;
+  lastTransitionReason?: TerminalTurnTransitionReason | null;
   message?: string | null;
 };
 
@@ -496,6 +518,44 @@ export type DiagnosticsEmployeeActivityMetadata = {
   reviewCounts: EmployeeReviewCounts;
   blockers: string[];
   lastActivityAt?: number | null;
+  trace: DiagnosticsEmployeeActivityTrace;
+};
+
+export type DiagnosticsEmployeeActivityTrace = {
+  employeeId: string;
+  legacy: DiagnosticsLegacyActivityTrace;
+  activeTerminalSessionId?: string | null;
+  terminal?: DiagnosticsTerminalEvidenceTrace | null;
+  agentRuntime: AgentRuntimeSnapshot;
+  contract: EmployeeActivityContract;
+  activeActionId?: string | null;
+  activeProcessIds: string[];
+  activeProcessCount: number;
+  reviewCounts: EmployeeReviewCounts;
+  blockers: string[];
+  lastActivityAt?: number | null;
+};
+
+export type DiagnosticsLegacyActivityTrace = {
+  status: EmployeeActivityStatus;
+  lifecycle: EmployeeLifecycleState;
+  behavior: EmployeeBehaviorState;
+  terminalState: EmployeeTerminalActivityState;
+  reason: string;
+};
+
+export type DiagnosticsTerminalEvidenceTrace = {
+  sessionId: string;
+  employeeId: string;
+  status: TerminalSessionStatus;
+  runtime: TerminalSessionRuntime;
+  profile: TerminalSessionProfile;
+  activeProfile?: TerminalSessionProfile | null;
+  turnState: TerminalTurnState;
+  lastPromptSubmittedAt?: number | null;
+  lastPromptReadyAt?: number | null;
+  lastApprovalPromptAt?: number | null;
+  lastTransitionReason?: TerminalTurnTransitionReason | null;
 };
 
 export type DiagnosticsTerminalSessionMetadata = {
@@ -518,6 +578,7 @@ export type DiagnosticsTerminalSessionMetadata = {
   lastPromptReadyAt?: number | null;
   lastApprovalPromptAt?: number | null;
   turnState: TerminalTurnState;
+  lastTransitionReason?: TerminalTurnTransitionReason | null;
   message?: string | null;
 };
 

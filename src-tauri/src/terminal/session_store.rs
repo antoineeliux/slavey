@@ -90,6 +90,8 @@ pub struct TerminalSessionRecord {
     pub last_approval_prompt_at: Option<u64>,
     #[serde(default = "default_terminal_turn_state")]
     pub turn_state: TerminalTurnState,
+    #[serde(default)]
+    pub last_transition_reason: Option<TerminalTurnTransitionReason>,
     #[serde(default, skip_serializing)]
     pub last_output_tail: String,
     #[serde(default)]
@@ -111,8 +113,9 @@ enum TerminalTurnTransitionKind {
     AppServer,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TerminalTurnTransitionReason {
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalTurnTransitionReason {
     ShellOutput,
     CodexApprovalPrompt,
     CodexActiveWork,
@@ -275,6 +278,7 @@ impl TerminalSessionStore {
             last_prompt_ready_at: None,
             last_approval_prompt_at: None,
             turn_state: initial_turn_state_for_profile(profile),
+            last_transition_reason: None,
             last_output_tail: String::new(),
             message: None,
         };
@@ -826,7 +830,9 @@ fn apply_terminal_turn_transition(
     transition: TerminalTurnTransition,
     now: u64,
 ) {
-    let _reason = transition.reason;
+    if transition.reason != TerminalTurnTransitionReason::NoActivityRelevantChange {
+        record.last_transition_reason = Some(transition.reason);
+    }
 
     match transition.kind {
         TerminalTurnTransitionKind::NoChange => return,
@@ -965,6 +971,15 @@ fn set_terminal_stopped(
             TerminalTurnState::Completed
         }
         TerminalSessionStatus::Failed => TerminalTurnState::Failed,
+    };
+    record.last_transition_reason = match status {
+        TerminalSessionStatus::Exited => {
+            Some(TerminalTurnTransitionReason::SessionFinishedCompleted)
+        }
+        TerminalSessionStatus::Failed => Some(TerminalTurnTransitionReason::SessionFinishedFailed),
+        TerminalSessionStatus::Running | TerminalSessionStatus::Stopped => {
+            record.last_transition_reason
+        }
     };
 }
 
@@ -1760,6 +1775,7 @@ mod tests {
             last_prompt_ready_at: None,
             last_approval_prompt_at: None,
             turn_state: TerminalTurnState::CodexStarting,
+            last_transition_reason: None,
             last_output_tail: String::new(),
             message: None,
         }]);
@@ -1803,6 +1819,7 @@ mod tests {
             last_prompt_ready_at: None,
             last_approval_prompt_at: None,
             turn_state: TerminalTurnState::Completed,
+            last_transition_reason: None,
             last_output_tail: String::new(),
             message: None,
         }
@@ -1833,6 +1850,7 @@ mod tests {
             last_prompt_ready_at: None,
             last_approval_prompt_at: None,
             turn_state,
+            last_transition_reason: None,
             last_output_tail: String::new(),
             message: None,
         }

@@ -1038,6 +1038,19 @@ function diagnosticsEmployeeActivity(
 ): DiagnosticsEmployeeActivityMetadata {
   const lifecycle = activity.lifecycle ?? "active";
   const reviewNeeded = activity.status === "review_needed";
+  const behavior = activity.behavior ?? (reviewNeeded ? "waiting_at_owner" : "at_desk_idle");
+  const terminalState = activity.terminalState ?? "none";
+  const activityReason = activity.activityReason ?? activity.status;
+  const session = activity.session ?? { kind: "none", state: "closed" };
+  const agent =
+    activity.agent ??
+    ({
+      kind: "none",
+      state: "not_active",
+      source: "none",
+      confidence: "none",
+      turnOwner: "none",
+    } as const);
   const attention =
     activity.attention ??
     ({
@@ -1051,24 +1064,19 @@ function diagnosticsEmployeeActivity(
       phase: reviewNeeded ? "ready_to_report" : "idle",
       turnOwner: reviewNeeded ? "owner" : "none",
     } as const);
+  const activeTerminal = activity.activeTerminalSessionId
+    ? terminalSessions.find((session) => session.sessionId === activity.activeTerminalSessionId)
+    : null;
 
   return {
     employeeId: activity.employeeId,
     status: activity.status,
     lifecycle,
-    behavior: activity.behavior ?? (reviewNeeded ? "waiting_at_owner" : "at_desk_idle"),
-    terminalState: activity.terminalState ?? "none",
-    activityReason: activity.activityReason ?? activity.status,
-    session: activity.session ?? { kind: "none", state: "closed" },
-    agent:
-      activity.agent ??
-      ({
-        kind: "none",
-        state: "not_active",
-        source: "none",
-        confidence: "none",
-        turnOwner: "none",
-      } as const),
+    behavior,
+    terminalState,
+    activityReason,
+    session,
+    agent,
     work,
     attention,
     contract: activity.contract,
@@ -1078,6 +1086,40 @@ function diagnosticsEmployeeActivity(
     reviewCounts: activity.reviewCounts,
     blockers: activity.blockers,
     lastActivityAt: activity.lastActivityAt ?? null,
+    trace: {
+      employeeId: activity.employeeId,
+      legacy: {
+        status: activity.status,
+        lifecycle,
+        behavior,
+        terminalState,
+        reason: activityReason,
+      },
+      activeTerminalSessionId: activity.activeTerminalSessionId ?? null,
+      terminal: activeTerminal
+        ? {
+            sessionId: activeTerminal.sessionId,
+            employeeId: activeTerminal.employeeId,
+            status: activeTerminal.status,
+            runtime: activeTerminal.runtime,
+            profile: activeTerminal.profile,
+            activeProfile: activeTerminal.activeProfile ?? activeTerminal.profile,
+            turnState: activeTerminal.turnState,
+            lastPromptSubmittedAt: activeTerminal.lastPromptSubmittedAt ?? null,
+            lastPromptReadyAt: activeTerminal.lastPromptReadyAt ?? null,
+            lastApprovalPromptAt: activeTerminal.lastApprovalPromptAt ?? null,
+            lastTransitionReason: activeTerminal.lastTransitionReason ?? null,
+          }
+        : null,
+      agentRuntime: agent,
+      contract: activity.contract,
+      activeActionId: activity.activeActionId ?? null,
+      activeProcessIds: activity.activeProcessIds,
+      activeProcessCount: activity.activeProcessIds.length,
+      reviewCounts: activity.reviewCounts,
+      blockers: activity.blockers,
+      lastActivityAt: activity.lastActivityAt ?? null,
+    },
   };
 }
 
@@ -1098,6 +1140,7 @@ function diagnosticsTerminalSession(
     lastPromptReadyAt: session.lastPromptReadyAt ?? null,
     lastApprovalPromptAt: session.lastApprovalPromptAt ?? null,
     turnState: session.turnState,
+    lastTransitionReason: session.lastTransitionReason ?? null,
     message: session.message ?? null,
   };
 }

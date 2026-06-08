@@ -148,7 +148,7 @@ Input follows a separate path:
 
 The recent stale-redraw fix lives in this flow: if a final output chunk contains stale `Working ... esc to interrupt` text but the last meaningful line is the `›` prompt, prompt-ready wins over active work.
 
-The resolver records internal, testable transition reasons such as `shell_output`, `codex_approval_prompt`, `codex_active_work`, `codex_prompt_ready`, `codex_prompt_ready_at_end_stale_work_redraw`, `owner_prompt_echo_ignored`, `owner_input_submitted`, `owner_composing`, `no_activity_relevant_change`, `active_profile_reset_to_shell`, `active_profile_changed_to_codex`, `session_finished_completed`, and `session_finished_failed`. These labels are not currently emitted as user-visible diagnostics.
+The resolver records transition reasons such as `shell_output`, `codex_approval_prompt`, `codex_active_work`, `codex_prompt_ready`, `codex_prompt_ready_at_end_stale_work_redraw`, `owner_prompt_echo_ignored`, `owner_input_submitted`, `owner_composing`, `active_profile_reset_to_shell`, `active_profile_changed_to_codex`, `session_finished_completed`, and `session_finished_failed`. App-server session sync records app-server transition reasons such as `app_server_thinking`, `app_server_waiting_prompt`, `app_server_waiting_approval`, `app_server_completed`, and `app_server_failed`. These labels are persisted on `TerminalSessionRecord.lastTransitionReason` for support/debugging; they are not UI routing state.
 
 ## Fixture Corpus
 
@@ -236,15 +236,29 @@ The Phase 6 audit covered terminal output/input, active-profile changes, CWD cha
 
 On the frontend, activity refreshes are protected against out-of-order async responses. Each per-employee `employee_activity_get` request receives a monotonic sequence id, and only the latest request for that employee can write to `employeeActivities`. A global `employee_activity_list` reload also receives a sequence id; stale global responses are ignored, and a global reload does not overwrite newer per-employee refresh results. This keeps rapid `terminal:session-updated` and `employee:activity-updated` delivery from leaving the floor stuck on stale activity when a slower earlier refresh resolves after a newer one.
 
+### Diagnostics Trace
+
+The diagnostics export includes an employee activity trace for each exported `EmployeeActivity`. The trace is compact and answers why the backend placed an employee in a given state:
+
+- legacy activity evidence: status, lifecycle, behavior, terminal state, and activity reason.
+- active terminal evidence: session id, status, runtime, launch profile, active profile, turn state, prompt/approval timestamp fields, and `lastTransitionReason`.
+- agent runtime evidence: kind, state, source, confidence, and turn owner.
+- canonical contract evidence: lifecycle, work, render, attention, source runtime, and source confidence.
+- surrounding context: active action id, active process ids/count, review counts, blockers, and last activity timestamp.
+
+Terminal session diagnostics also include `lastTransitionReason` alongside runtime, profile, active profile, turn state, and prompt timestamps. This reason is intended for support/debugging so a wrong-state report can be traced back to the most recent backend transition decision. Frontend floor placement must still route through `EmployeeActivity.contract`; transition reasons are not a presentation API.
+
+Diagnostics continue to exclude raw terminal output, raw process logs, environment variables, credentials/tokens, and file-write contents. Paths, labels, messages, and other diagnostic strings are redacted/truncated at export time.
+
 ## Current Risk Areas
 
 - PTY output is not a stable protocol. Codex UI text, prompt glyphs, progress wording, and redraw behavior can change outside Slavey's control.
 - Redraws, ANSI/control sequences, carriage returns, and split chunks can create edge cases. The parser handles known stale redraws and split Slavey control markers, but the corpus is not complete.
 - Frontend terminal buffers may update before the matching `terminal:session-updated` record arrives. During that gap, terminal text can be fresher than terminal session turn metadata, but backend session records remain authoritative for Codex state.
 - Activity refresh responses can still be delayed by IPC or command latency, but stale responses are ignored so a slower old refresh should not overwrite a newer backend activity contract.
+- Diagnostics now expose the terminal/session evidence, runtime source/confidence, activity reason, and activity contract chain. They make wrong-state bugs easier to explain, but they do not make PTY fallback signals less heuristic.
 - The fixture corpus is not complete yet. Existing tests cover important prompt-ready, approval, active-work, owner-draft, app-server, and stale-redraw cases, but they are not a broad transcript replay suite.
 - Structured app-server evidence is preferred, but shell-launched Codex still relies on PTY fallback and wrapper markers.
-- Backend PTY transition reasons are currently internal and testable only. They are not exposed through diagnostics, so debugging production edge cases still requires looking at session state and logs rather than a transition trace.
 - CWD markers are currently shell-integration dependent. Unsupported shells or failed shell integration can leave `current_cwd` at the start directory even when terminal output and activity continue normally.
 
 The items above are hardening risks to carry into later phases. This document records current behavior and does not imply runtime changes.
@@ -259,7 +273,7 @@ Phase 5 structured Codex app-server state sync is reflected in the current app-s
 - Phase 3: Consolidate parser ownership and add backend/frontend parity coverage where local display still mirrors backend logic.
 - Phase 4: Harden event ordering, session update freshness, and activity refresh behavior under rapid terminal output.
 - Phase 6: Activity refresh guarantees and frontend stale-response protection are reflected above.
-- Later diagnostics: Expand diagnostics for terminal evidence decisions, runtime source/confidence, and activity contract traces.
-- Phase 7: Add state-driven frontend and browser smoke coverage for critical terminal/activity/floor transitions.
-- Phase 8: Reduce reliance on PTY fallback for shell-launched Codex where a structured source can be used.
-- Phase 9: Final validation, cleanup, and release-readiness pass for terminal/Codex hardening.
+- Phase 7: Diagnostics for terminal evidence decisions, runtime source/confidence, and activity contract traces are reflected above.
+- Later frontend coverage: Add state-driven frontend and browser smoke coverage for critical terminal/activity/floor transitions.
+- Later structured-source hardening: Reduce reliance on PTY fallback for shell-launched Codex where a structured source can be used.
+- Later release validation: Final cleanup and release-readiness pass for terminal/Codex hardening.
