@@ -7,6 +7,8 @@ import type {
   AppSettingsUpdate,
   AppStateSnapshot,
   ApprovalRequest,
+  CodexAppServerStatus,
+  CodexTaskSubmitInput,
   CodexCliStatus,
   DiagnosticsExportBundle,
   DiagnosticsSummary,
@@ -220,6 +222,16 @@ export function terminalImageUploadPath(
 
 export function codexCliStatus(): Promise<CodexCliStatus> {
   return invokeCommand("codex_cli_status");
+}
+
+export function codexAppServerStatus(): Promise<CodexAppServerStatus> {
+  return invokeCommand("codex_app_server_status");
+}
+
+export function codexTaskSubmit(
+  payload: CodexTaskSubmitInput,
+): Promise<TerminalSessionRecord> {
+  return invokeCommand("codex_task_submit", { payload });
 }
 
 export function diagnosticsSummary(): Promise<DiagnosticsSummary> {

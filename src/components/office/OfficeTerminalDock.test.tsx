@@ -30,10 +30,12 @@ const session: TerminalSessionRecord = {
   sessionId: "term-1",
   employeeId: "employee-1",
   profile: "codex",
+  runtime: "pty",
   cwd: "/workspace",
   status: "running",
   startedAt: 1,
   label: "Codex",
+  turnState: "codex_starting",
 };
 
 describe("OfficeTerminalDock", () => {

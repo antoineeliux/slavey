@@ -14,6 +14,7 @@ import type {
   AppTab,
   ApprovalRequest,
   CodexCliStatus,
+  CodexTaskSubmitInput,
   Employee,
   EmployeeActivity,
   FileMetadata,
@@ -91,6 +92,7 @@ export type AppStore = {
   selectEmployee: (employeeId: string | null) => Promise<void>;
   setEmployeeWorkingFolder: (employeeId: string, path: string) => Promise<void>;
   startTerminal: (employeeId: string) => Promise<void>;
+  submitCodexTask: (input: CodexTaskSubmitInput) => Promise<void>;
   setEmployeeStandby: (employeeId: string) => Promise<void>;
   resumeEmployeeFromStandby: (employeeId: string) => Promise<void>;
   stopTerminal: (employeeId: string) => Promise<void>;

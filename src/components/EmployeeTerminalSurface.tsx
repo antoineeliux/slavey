@@ -251,6 +251,9 @@ export function EmployeeTerminalSurface({
         .getState()
         .employees.find((item) => item.id === nextEmployeeId);
       const currentSession = currentEmployee?.terminalSessionId ?? sessionIdRef.current;
+      if (currentSession && terminalSessionIsCodexAppServer(currentSession)) {
+        return;
+      }
       if (currentEmployee && currentSession) {
         void writeTerminal(currentEmployee.id, currentSession, input);
       }
@@ -995,6 +998,9 @@ function fitAndResizeVisibleTerminal(
   if (!currentEmployee || !currentSession) {
     return hostChanged || previousCols !== terminal.cols || previousRows !== terminal.rows;
   }
+  if (terminalSessionIsCodexAppServer(currentSession)) {
+    return hostChanged || previousCols !== terminal.cols || previousRows !== terminal.rows;
+  }
 
   const nextSize = {
     employeeId: currentEmployee.id,
@@ -1015,6 +1021,15 @@ function fitAndResizeVisibleTerminal(
   lastResizeRef.current = nextSize;
   void resizeTerminal(nextSize.employeeId, nextSize.sessionId, nextSize.cols, nextSize.rows);
   return true;
+}
+
+function terminalSessionIsCodexAppServer(sessionId: string): boolean {
+  return useAppStore
+    .getState()
+    .terminalSessions.some(
+      (session) =>
+        session.sessionId === sessionId && session.runtime === "codex_app_server",
+    );
 }
 
 function captureTerminalViewport(terminal: Terminal): TerminalViewportSnapshot {

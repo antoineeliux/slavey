@@ -1,8 +1,19 @@
-import { useEffect } from "react";
-import { Code2, GitBranch, History, Pencil, RefreshCw, ShieldQuestion, Square } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  Bot,
+  Code2,
+  GitBranch,
+  History,
+  Pencil,
+  RefreshCw,
+  Send,
+  ShieldQuestion,
+  Square,
+} from "lucide-react";
 
 import { useAppStore } from "../store/appStore";
 import type { Employee, EmployeeActivity, TerminalSessionRecord } from "../types";
+import { resolveEmployeeActivityContractView } from "../lib/employeeActivityContractView";
 import { ActionPanel, ApprovalPanel } from "./ActionApprovalPanel";
 import { EmployeeDashboard } from "./EmployeeDashboard";
 import {
@@ -120,6 +131,11 @@ export function EmployeeDetailsPanel() {
     .filter((session) => session.employeeId === selectedEmployee.id)
     .sort((a, b) => b.startedAt - a.startedAt)
     .slice(0, 5);
+  const activeSession = selectedEmployee.terminalSessionId
+    ? terminalSessions.find(
+        (session) => session.sessionId === selectedEmployee.terminalSessionId,
+      ) ?? null
+    : null;
   const rolePolicy = rolePolicies.find((policy) => policy.role === selectedEmployee.role);
   const activeSessionReason = selectedEmployee.terminalSessionId
     ? "Employee already has an active terminal session"
@@ -328,6 +344,7 @@ export function EmployeeDetailsPanel() {
             })
           }
         />
+        <CodexTaskPanel employee={selectedEmployee} activeSession={activeSession} />
         <ActionPanel employeeId={selectedEmployee.id} cwd={selectedEmployee.cwd} actions={employeeActions} />
         <TerminalSessionHistory
           activeSessionId={selectedEmployee.terminalSessionId ?? null}
@@ -376,42 +393,82 @@ export function EmployeeDetailsPanel() {
   );
 }
 
+function CodexTaskPanel({
+  employee,
+  activeSession,
+}: {
+  employee: Employee;
+  activeSession: TerminalSessionRecord | null;
+}) {
+  const submitCodexTask = useAppStore((state) => state.submitCodexTask);
+  const [prompt, setPrompt] = useState("");
+  const trimmedPrompt = prompt.trim();
+  const appServerSession =
+    activeSession?.runtime === "codex_app_server" ? activeSession : null;
+  const blockedByTerminal =
+    activeSession && activeSession.runtime !== "codex_app_server"
+      ? "Stop the active terminal session before starting Codex app-server"
+      : null;
+  const disabledReason =
+    blockedByTerminal ??
+    (trimmedPrompt ? null : "Enter a Codex instruction");
+
+  return (
+    <section className="codex-task-panel">
+      <div className="section-heading">
+        <Bot size={15} />
+        Codex
+      </div>
+      <div className="codex-task-input-row">
+        <textarea
+          className="codex-task-input"
+          value={prompt}
+          placeholder="Implement the next backend change..."
+          rows={4}
+          disabled={Boolean(blockedByTerminal)}
+          onChange={(event) => setPrompt(event.target.value)}
+        />
+        <button
+          className="command-button primary"
+          disabled={Boolean(disabledReason)}
+          title={disabledReason ?? (appServerSession ? "Send to Codex" : "Start Codex")}
+          onClick={() => {
+            if (!trimmedPrompt || blockedByTerminal) {
+              return;
+            }
+            void submitCodexTask({
+              employeeId: employee.id,
+              sessionId: appServerSession?.sessionId ?? null,
+              prompt: trimmedPrompt,
+            });
+            setPrompt("");
+          }}
+        >
+          <Send size={14} />
+          {appServerSession ? "Send" : "Start"}
+        </button>
+      </div>
+      {blockedByTerminal ? <div className="inline-note">{blockedByTerminal}.</div> : null}
+    </section>
+  );
+}
+
 function displayStatusFor(
   employee: Employee,
   activity: EmployeeActivity | null,
   pendingApprovals: number,
 ): string {
-  if (employee.status === "standby" || activity?.lifecycle === "standby") {
+  if (activity) {
+    return resolveEmployeeActivityContractView(activity).state;
+  }
+
+  if (employee.status === "standby") {
     return "standby";
   }
-  if (employee.status === "stopped" || activity?.lifecycle === "stopped") {
+  if (employee.status === "stopped") {
     return "stopped";
   }
-  if (activity?.attention?.required) {
-    switch (activity.attention.reason) {
-      case "needs_terminal_approval":
-        return "codex_waiting_approval";
-      case "needs_app_approval":
-        return "waiting_approval";
-      case "needs_instruction":
-        return "codex_waiting_instruction";
-      case "ready_to_report":
-        return "done_clean";
-      case "review_needed":
-        return "review_needed";
-      case "handoff_ready":
-        return "handoff_ready";
-      case "blocked_needs_help":
-        return "blocked";
-      case "needs_approval":
-        return activity.terminalState === "codex_waiting_approval"
-          ? "codex_waiting_approval"
-          : "waiting_approval";
-      default:
-        break;
-    }
-  }
-  return activity?.status ?? (pendingApprovals > 0 ? "waiting_approval" : employee.status);
+  return pendingApprovals > 0 ? "waiting_approval" : employee.status;
 }
 
 function TerminalSessionHistory({

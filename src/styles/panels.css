@@ -204,6 +204,7 @@
 
 .policy-panel,
 .action-panel,
+.codex-task-panel,
 .session-panel,
 .handoff-panel,
 .process-panel,
@@ -211,6 +212,36 @@
   display: grid;
   gap: 10px;
   min-width: 0;
+}
+
+.codex-task-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.codex-task-input {
+  min-height: 84px;
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  padding: 9px 10px;
+  font: inherit;
+  line-height: 1.4;
+}
+
+.codex-task-input:disabled {
+  color: var(--text-muted);
+  background: var(--bg-panel-subtle);
+}
+
+.codex-task-input-row .command-button {
+  align-self: end;
 }
 
 .policy-panel .section-heading {

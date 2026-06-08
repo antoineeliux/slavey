@@ -33,7 +33,7 @@ describe("EmployeeDetailsPanel", () => {
     expect(statusPill).toHaveTextContent("codex waiting approval");
   });
 
-  it("does not let stale activity override a standby employee", () => {
+  it("uses canonical standby contract for a standby employee", () => {
     const selectedEmployee = employee({
       id: "employee-1",
       status: "standby",
@@ -44,7 +44,7 @@ describe("EmployeeDetailsPanel", () => {
       employees: [selectedEmployee],
       selectedEmployeeId: selectedEmployee.id,
       employeeActivities: {
-        [selectedEmployee.id]: activity(selectedEmployee.id, "codex_waiting_approval"),
+        [selectedEmployee.id]: activity(selectedEmployee.id, "standby"),
       },
     });
 
@@ -55,7 +55,7 @@ describe("EmployeeDetailsPanel", () => {
     expect(statusPill).toHaveTextContent("standby");
   });
 
-  it("uses owner-instruction attention for the status pill", () => {
+  it("uses owner-instruction contract for the status pill", () => {
     const selectedEmployee = employee({
       id: "employee-1",
       status: "running",
@@ -66,7 +66,7 @@ describe("EmployeeDetailsPanel", () => {
       employees: [selectedEmployee],
       selectedEmployeeId: selectedEmployee.id,
       employeeActivities: {
-        [selectedEmployee.id]: activity(selectedEmployee.id, "codex_running", {
+        [selectedEmployee.id]: activity(selectedEmployee.id, "codex_waiting_instruction", {
           attention: { required: true, reason: "needs_instruction", priority: "normal" },
           agent: { kind: "codex", state: "waiting_prompt", lastStateChangedAt: 1 },
           terminalState: "codex_waiting_instruction",
@@ -113,6 +113,7 @@ function activity(
     agent: { kind: "codex", state: "waiting_approval", lastStateChangedAt: 1 },
     work: { phase: "waiting_for_owner", turnOwner: "owner" },
     attention: { required: true, reason: "needs_terminal_approval", priority: "urgent" },
+    contract: defaultActivityContract(status),
     terminalState: "codex_waiting_approval",
     activityReason: "terminal_waiting_approval",
     label: "Terminal approval required",
@@ -125,4 +126,38 @@ function activity(
     blockers: [],
     ...overrides,
   };
+}
+
+function defaultActivityContract(status: EmployeeActivity["status"]): EmployeeActivity["contract"] {
+  switch (status) {
+    case "standby":
+      return {
+        lifecycle: "standby",
+        work: { kind: "none", phase: "idle", turnOwner: "none" },
+        render: { placement: "standby", posture: "standing", activity: "idle" },
+        attention: { required: false, reason: null, priority: "none" },
+        source: { runtime: "none", confidence: "none" },
+      };
+    case "codex_waiting_instruction":
+      return {
+        lifecycle: "active",
+        work: { kind: "codex", phase: "waiting_owner", turnOwner: "owner" },
+        render: {
+          placement: "owner_office",
+          posture: "standing",
+          activity: "waiting_instruction",
+        },
+        attention: { required: true, reason: "needs_instruction", priority: "normal" },
+        source: { runtime: "pty", confidence: "fallback" },
+      };
+    case "codex_waiting_approval":
+    default:
+      return {
+        lifecycle: "active",
+        work: { kind: "codex", phase: "waiting_approval", turnOwner: "owner" },
+        render: { placement: "owner_office", posture: "standing", activity: "approval" },
+        attention: { required: true, reason: "needs_terminal_approval", priority: "urgent" },
+        source: { runtime: "pty", confidence: "fallback" },
+      };
+  }
 }

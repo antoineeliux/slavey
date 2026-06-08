@@ -113,16 +113,15 @@ const floorStateByPresentationState: Record<EmployeeVisualState, FloorStateConfi
     muted: false,
   },
   shell_running: {
-    officeState: "running_terminal",
-    visualState: "desk_terminal",
-    zone: "desk",
+    officeState: "idle_available",
+    visualState: "social_idle",
+    zone: "done_room",
     markerColor: "#c8a96a",
-    worksAtDesk: true,
   },
   codex_starting: {
-    officeState: "running_terminal",
-    visualState: "desk_terminal",
-    zone: "desk",
+    officeState: "idle_available",
+    visualState: "social_idle",
+    zone: "done_room",
     markerColor: "#c8a96a",
   },
   codex_running: {
@@ -255,6 +254,15 @@ export function createEmployeeFloorViewModel({
 function floorStateConfigForPresentation(
   presentation: EmployeeActivityPresentation,
 ): FloorStateConfig {
+  const contractConfig = floorStateConfigForContract(presentation);
+  if (contractConfig) {
+    return contractConfig;
+  }
+
+  if (presentation.state === "codex_running") {
+    return floorStateByPresentationState.codex_running;
+  }
+
   switch (presentation.behavior) {
     case "coming_to_owner":
     case "waiting_at_owner":
@@ -275,6 +283,121 @@ function floorStateConfigForPresentation(
   }
 }
 
+function floorStateConfigForContract(
+  presentation: EmployeeActivityPresentation,
+): FloorStateConfig | null {
+  const floorIntent = presentation.contractView?.floorIntent;
+  if (!floorIntent) {
+    return null;
+  }
+
+  switch (floorIntent) {
+    case "desk_working":
+      return {
+        officeState: "working_at_desk",
+        visualState: "desk_working",
+        zone: "desk",
+        markerColor: markerColorForPresentation(presentation),
+        worksAtDesk: true,
+      };
+    case "desk_terminal":
+      return {
+        officeState: "running_terminal",
+        visualState: "desk_terminal",
+        zone: "desk",
+        markerColor: markerColorForPresentation(presentation),
+        worksAtDesk: true,
+      };
+    case "done_room_idle":
+      return doneRoomFloorStateConfig(presentation);
+    case "owner_waiting_instruction":
+      return {
+        officeState: "waiting_instruction",
+        visualState: "desk_waiting_instruction",
+        zone: "executive_office",
+        markerColor: floorStateByPresentationState.codex_waiting_instruction.markerColor,
+        worksAtDesk: false,
+      };
+    case "owner_terminal_approval":
+      return {
+        officeState: "terminal_waiting_approval",
+        visualState: "desk_waiting_approval",
+        zone: "executive_office",
+        markerColor: floorStateByPresentationState.codex_waiting_approval.markerColor,
+        worksAtDesk: false,
+      };
+    case "owner_approval":
+      return {
+        officeState: "waiting_approval",
+        visualState: "desk_waiting_approval",
+        zone: "executive_office",
+        markerColor: floorStateByPresentationState.waiting_approval.markerColor,
+        worksAtDesk: false,
+      };
+    case "owner_review":
+      return {
+        officeState: "reviewing_changes",
+        visualState: "desk_review",
+        zone: "executive_office",
+        markerColor: floorStateByPresentationState.review_needed.markerColor,
+        worksAtDesk: false,
+      };
+    case "owner_handoff":
+      return {
+        officeState: "handoff_ready",
+        visualState: "social_handoff_ready",
+        zone: "executive_office",
+        markerColor: floorStateByPresentationState.handoff_ready.markerColor,
+        worksAtDesk: false,
+      };
+    case "owner_blocked":
+      return {
+        officeState: "blocked",
+        visualState: "desk_blocked",
+        zone: "executive_office",
+        markerColor: floorStateByPresentationState.blocked.markerColor,
+        worksAtDesk: false,
+      };
+    case "standby":
+      return {
+        officeState: "on_standby",
+        visualState: "social_idle",
+        zone: "standby",
+        markerColor: markerColorForPresentation(presentation),
+        worksAtDesk: false,
+      };
+    case "offline":
+      return {
+        officeState: "offline",
+        visualState: "offline_stopped",
+        zone: "offline",
+        markerColor: floorStateByPresentationState.stopped.markerColor,
+        muted: true,
+        worksAtDesk: false,
+      };
+  }
+
+  return assertNever(floorIntent);
+}
+
+function doneRoomFloorStateConfig(
+  presentation: EmployeeActivityPresentation,
+): FloorStateConfig {
+  return {
+    officeState: "idle_available",
+    visualState: "social_idle",
+    zone: "done_room",
+    markerColor: markerColorForPresentation(presentation),
+    worksAtDesk: false,
+  };
+}
+
+function markerColorForPresentation(
+  presentation: EmployeeActivityPresentation,
+): string {
+  return floorStateByPresentationState[presentation.state].markerColor;
+}
+
 function atDeskTerminalFloorStateConfig(
   presentation: EmployeeActivityPresentation,
 ): FloorStateConfig {
@@ -288,7 +411,7 @@ function atDeskTerminalFloorStateConfig(
         worksAtDesk: true,
       };
     case "codex_running":
-      return floorStateByPresentationState.codex_starting;
+      return floorStateByPresentationState.codex_running;
     default:
       return floorStateByPresentationState[presentation.state];
   }
@@ -315,6 +438,10 @@ function ownerAttentionFloorStateConfig(
     default:
       return floorStateByPresentationState[presentation.state];
   }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled employee floor contract intent: ${String(value)}`);
 }
 
 export function createEmployeeFloorViewModels(

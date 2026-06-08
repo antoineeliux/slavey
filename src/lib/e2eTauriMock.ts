@@ -5,8 +5,11 @@ import type {
   AppStateSnapshot,
   ApprovalRequest,
   CodexCliStatus,
+  CodexTaskSubmitInput,
+  DiagnosticsEmployeeActivityMetadata,
   DiagnosticsExportBundle,
   DiagnosticsSummary,
+  DiagnosticsTerminalSessionMetadata,
   Employee,
   EmployeeActivity,
   EmployeeRole,
@@ -86,6 +89,7 @@ const employeeActivities: EmployeeActivity[] = [
   {
     employeeId: "emp-frontend",
     status: "review_needed",
+    contract: mockActivityContract("review_needed"),
     label: "Review needed",
     details: "Applying layout smoke fixtures",
     lastActivityAt: now - 45_000,
@@ -102,6 +106,7 @@ const employeeActivities: EmployeeActivity[] = [
   {
     employeeId: "emp-reviewer",
     status: "idle",
+    contract: mockActivityContract("idle"),
     label: "Idle",
     details: "Ready for review assignment",
     lastActivityAt: now - 120_000,
@@ -122,18 +127,21 @@ const terminalSessions: TerminalSessionRecord[] = [
     sessionId: "term-frontend",
     employeeId: "emp-frontend",
     profile: "shell",
+    runtime: "pty",
     cwd: frontendCwd,
     currentCwd: `${frontendCwd}/src`,
     status: "running",
     startedAt: now - 1_200_000,
     label: "Mock shell",
     lastOutputAt: now - 30_000,
+    turnState: "shell",
     message: "Browser smoke session seeded by VITE_SLAVEY_E2E.",
   },
   {
     sessionId: "term-review",
     employeeId: "emp-reviewer",
     profile: "codex",
+    runtime: "pty",
     cwd: workspaceRoot,
     currentCwd: workspaceRoot,
     status: "stopped",
@@ -143,6 +151,7 @@ const terminalSessions: TerminalSessionRecord[] = [
     stoppedAt: now - 1_900_000,
     stopReason: "user_stopped",
     label: "Completed review check",
+    turnState: "completed",
     message: "Stopped cleanly.",
   },
 ];
@@ -525,6 +534,8 @@ export async function invokeE2eTauriCommand<T>(
       return clone(withStatus(stringArg(args, "employeeId"), "running"));
     case "employee_start_terminal":
       return clone(withTerminal(stringArg(args, "employeeId")));
+    case "codex_task_submit":
+      return clone(createMockCodexSession(payload<CodexTaskSubmitInput>(args)));
     case "employee_stop_terminal":
       return clone(withoutTerminal(stringArg(args, "employeeId")));
     case "terminal_session_list": {
@@ -554,6 +565,15 @@ export async function invokeE2eTauriCommand<T>(
       return undefined as T;
     case "codex_cli_status":
       return clone(codexCliStatus);
+    case "codex_app_server_status":
+      return clone({
+        available: true,
+        userAgent: "mock codex app-server",
+        codexHome: "/tmp/codex",
+        platformFamily: "unix",
+        platformOs: "mock",
+        message: "Mock Codex app-server is available",
+      });
     case "diagnostics_summary":
       return clone(diagnosticsSummary);
     case "diagnostics_export_bundle":
@@ -682,6 +702,26 @@ function withTerminal(employeeId: string): Employee {
   return { ...employee, terminalSessionId: employee.terminalSessionId ?? "term-frontend" };
 }
 
+function createMockCodexSession(input: CodexTaskSubmitInput | null): TerminalSessionRecord {
+  const employeeId = input?.employeeId ?? "emp-frontend";
+  const sessionId = input?.sessionId ?? `codex-app-${employeeId}`;
+  return {
+    sessionId,
+    employeeId,
+    profile: "codex",
+    runtime: "codex_app_server",
+    activeProfile: "codex",
+    cwd: employeeById(employeeId).cwd,
+    currentCwd: employeeById(employeeId).cwd,
+    status: "running",
+    startedAt: now,
+    label: "Codex app-server session",
+    lastPromptSubmittedAt: now,
+    turnState: "prompt_submitted",
+    message: input?.prompt ?? "Mock Codex task",
+  };
+}
+
 function withoutTerminal(employeeId: string): Employee {
   return { ...employeeById(employeeId), terminalSessionId: null, status: "stopped" };
 }
@@ -731,6 +771,9 @@ function renameSession(sessionId: string, label: string): TerminalSessionRecord 
 }
 
 function terminalOutput(sessionId: string): string {
+  if (sessionId.startsWith("codex-app-")) {
+    return "› Mock Codex task\r\n[Codex] Working...\r\nMock Codex response.\r\n› ";
+  }
   if (sessionId === "term-frontend") {
     return [
       "$ npm run test:web:run",
@@ -917,12 +960,144 @@ function diagnosticsExportBundle(): DiagnosticsExportBundle {
       switchBlockers: [],
       codexCliStatus,
     },
+    employeeActivities: employeeActivities.map(diagnosticsEmployeeActivity),
     actions,
     approvals,
-    terminalSessions,
+    terminalSessions: terminalSessions.map(diagnosticsTerminalSession),
     processes,
     notes: [
       "Browser smoke mock excludes secrets, terminal output, environment variables, raw logs, and file-write contents.",
     ],
+  };
+}
+
+function mockActivityContract(status: EmployeeActivity["status"]): EmployeeActivity["contract"] {
+  switch (status) {
+    case "review_needed":
+      return {
+        lifecycle: "active",
+        work: { kind: "review", phase: "ready", turnOwner: "owner" },
+        render: { placement: "owner_office", posture: "standing", activity: "review" },
+        attention: { required: true, reason: "review_needed", priority: "normal" },
+        source: { runtime: "none", confidence: "none" },
+      };
+    case "handoff_ready":
+    case "done_clean":
+      return {
+        lifecycle: "active",
+        work: { kind: "review", phase: "ready", turnOwner: "owner" },
+        render: { placement: "owner_office", posture: "standing", activity: "handoff" },
+        attention: {
+          required: true,
+          reason: status === "done_clean" ? "ready_to_report" : "handoff_ready",
+          priority: "normal",
+        },
+        source: { runtime: "none", confidence: "none" },
+      };
+    case "codex_running":
+      return {
+        lifecycle: "active",
+        work: { kind: "codex", phase: "working", turnOwner: "agent" },
+        render: { placement: "desk", posture: "sitting", activity: "working" },
+        attention: { required: false, reason: null, priority: "none" },
+        source: { runtime: "codex_app_server", confidence: "structured" },
+      };
+    case "shell_running":
+      return {
+        lifecycle: "active",
+        work: { kind: "shell", phase: "idle", turnOwner: "none" },
+        render: { placement: "done_room", posture: "standing", activity: "terminal" },
+        attention: { required: false, reason: null, priority: "none" },
+        source: { runtime: "pty", confidence: "fallback" },
+      };
+    case "stopped":
+      return {
+        lifecycle: "stopped",
+        work: { kind: "none", phase: "idle", turnOwner: "none" },
+        render: { placement: "offline", posture: "standing", activity: "idle" },
+        attention: { required: false, reason: null, priority: "none" },
+        source: { runtime: "none", confidence: "none" },
+      };
+    default:
+      return {
+        lifecycle: status === "standby" ? "standby" : "active",
+        work: { kind: "none", phase: "idle", turnOwner: "none" },
+        render: {
+          placement: status === "standby" ? "standby" : "done_room",
+          posture: "standing",
+          activity: "idle",
+        },
+        attention: { required: false, reason: null, priority: "none" },
+        source: { runtime: "none", confidence: "none" },
+      };
+  }
+}
+
+function diagnosticsEmployeeActivity(
+  activity: EmployeeActivity,
+): DiagnosticsEmployeeActivityMetadata {
+  const lifecycle = activity.lifecycle ?? "active";
+  const reviewNeeded = activity.status === "review_needed";
+  const attention =
+    activity.attention ??
+    ({
+      required: reviewNeeded,
+      reason: reviewNeeded ? "review_needed" : null,
+      priority: reviewNeeded ? "normal" : "none",
+    } as const);
+  const work =
+    activity.work ??
+    ({
+      phase: reviewNeeded ? "ready_to_report" : "idle",
+      turnOwner: reviewNeeded ? "owner" : "none",
+    } as const);
+
+  return {
+    employeeId: activity.employeeId,
+    status: activity.status,
+    lifecycle,
+    behavior: activity.behavior ?? (reviewNeeded ? "waiting_at_owner" : "at_desk_idle"),
+    terminalState: activity.terminalState ?? "none",
+    activityReason: activity.activityReason ?? activity.status,
+    session: activity.session ?? { kind: "none", state: "closed" },
+    agent:
+      activity.agent ??
+      ({
+        kind: "none",
+        state: "not_active",
+        source: "none",
+        confidence: "none",
+        turnOwner: "none",
+      } as const),
+    work,
+    attention,
+    contract: activity.contract,
+    activeTerminalSessionId: activity.activeTerminalSessionId ?? null,
+    activeActionId: activity.activeActionId ?? null,
+    activeProcessIds: activity.activeProcessIds,
+    reviewCounts: activity.reviewCounts,
+    blockers: activity.blockers,
+    lastActivityAt: activity.lastActivityAt ?? null,
+  };
+}
+
+function diagnosticsTerminalSession(
+  session: TerminalSessionRecord,
+): DiagnosticsTerminalSessionMetadata {
+  return {
+    ...session,
+    runtime: session.runtime,
+    activeProfile: session.activeProfile ?? session.profile,
+    currentCwd: session.currentCwd ?? null,
+    exitCode: session.exitCode ?? null,
+    endedAt: session.endedAt ?? null,
+    stoppedAt: session.stoppedAt ?? null,
+    stopReason: session.stopReason ?? null,
+    lastOutputAt: session.lastOutputAt ?? null,
+    lastPromptSubmittedAt: session.lastPromptSubmittedAt ?? null,
+    lastPromptReadyAt: session.lastPromptReadyAt ?? null,
+    lastApprovalPromptAt: session.lastApprovalPromptAt ?? null,
+    turnState: session.turnState,
+    message: session.message ?? null,
   };
 }

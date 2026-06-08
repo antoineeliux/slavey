@@ -73,6 +73,7 @@ describe("store helpers", () => {
       {
         employeeId: "employee-1",
         status: "idle",
+        contract: contract("idle"),
         label: "Idle",
         details: null,
         lastActivityAt: null,
@@ -85,6 +86,7 @@ describe("store helpers", () => {
       {
         employeeId: "employee-2",
         status: "shell_running",
+        contract: contract("shell_running"),
         label: "Shell running",
         details: "session",
         lastActivityAt: 2,
@@ -101,3 +103,22 @@ describe("store helpers", () => {
     expect(byEmployee["employee-2"]?.activeTerminalSessionId).toBe("session-2");
   });
 });
+
+function contract(status: EmployeeActivity["status"]): EmployeeActivity["contract"] {
+  if (status === "shell_running") {
+    return {
+      lifecycle: "active",
+      work: { kind: "shell", phase: "idle", turnOwner: "none" },
+      render: { placement: "done_room", posture: "standing", activity: "terminal" },
+      attention: { required: false, reason: null, priority: "none" },
+      source: { runtime: "pty", confidence: "fallback" },
+    };
+  }
+  return {
+    lifecycle: "active",
+    work: { kind: "none", phase: "idle", turnOwner: "none" },
+    render: { placement: "done_room", posture: "standing", activity: "idle" },
+    attention: { required: false, reason: null, priority: "none" },
+    source: { runtime: "none", confidence: "none" },
+  };
+}

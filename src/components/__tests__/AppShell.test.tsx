@@ -139,10 +139,12 @@ describe("AppShell", () => {
           sessionId: "term-1",
           employeeId: "employee-1",
           profile: "shell",
+          runtime: "pty",
           cwd: "/workspace",
           status: "running",
           startedAt: 1,
           label: "Shell",
+          turnState: "shell",
         },
       ],
       openFile: {

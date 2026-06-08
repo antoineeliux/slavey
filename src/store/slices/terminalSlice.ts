@@ -7,6 +7,7 @@ import {
   terminalSessionIsCodexActive,
   terminalOutputSuggestsCodexApprovalChoice,
   terminalOutputSuggestsCodexApprovalPrompt,
+  terminalOutputSuggestsCodexActiveWork,
   terminalOutputSuggestsCodexPromptReady,
   terminalInputSubmitsPrompt,
 } from "../../lib/codexPromptState";
@@ -26,6 +27,7 @@ type TerminalSlice = Pick<
   | "terminalBuffers"
   | "terminalSessions"
   | "startTerminal"
+  | "submitCodexTask"
   | "stopTerminal"
   | "stopTerminalSession"
   | "renameTerminalSession"
@@ -136,6 +138,30 @@ export const createTerminalSlice: AppStoreSlice<TerminalSlice> = (set, get) => {
     }
   },
 
+  submitCodexTask: async (input) => {
+    try {
+      const session = await commands.codexTaskSubmit(input);
+      set((state) => ({
+        employees: state.employees.map((employee) =>
+          employee.id === input.employeeId
+            ? {
+                ...employee,
+                status: "running",
+                currentCommand: "codex",
+                terminalSessionId: session.sessionId,
+                updatedAt: Date.now(),
+              }
+            : employee,
+        ),
+      }));
+      get().upsertTerminalSession(session);
+      void get().loadTerminalSessions(input.employeeId);
+      void get().refreshEmployeeActivity(input.employeeId);
+    } catch (error) {
+      get().addLog(localLog("error", `Codex task failed: ${formatError(error)}`));
+    }
+  },
+
   stopTerminal: async (employeeId) => {
     try {
       const employee = await commands.employeeStopTerminal(employeeId);
@@ -217,7 +243,9 @@ export const createTerminalSlice: AppStoreSlice<TerminalSlice> = (set, get) => {
   writeTerminal: async (employeeId, sessionId, input) => {
     try {
       await commands.terminalWrite(employeeId, sessionId, input);
-      if (terminalInputSubmitsPrompt(input)) {
+      const promptSubmitted = terminalInputSubmitsPrompt(input);
+      const ownerInputUpdated = terminalInputUpdatesOwnerPrompt(input);
+      if (promptSubmitted || ownerInputUpdated) {
         flushPendingTerminalData();
         const submittedAt = Date.now();
         set((state) => ({
@@ -229,13 +257,23 @@ export const createTerminalSlice: AppStoreSlice<TerminalSlice> = (set, get) => {
               state.terminalBuffers[sessionId] ?? "",
             ) &&
             session.status === "running"
-              ? {
-                  ...session,
-                  activeProfile: "codex",
-                  lastPromptSubmittedAt: submittedAt,
-                  lastPromptReadyAt: null,
-                  lastApprovalPromptAt: null,
-                }
+              ? promptSubmitted
+                ? {
+                    ...session,
+                    activeProfile: "codex",
+                    lastPromptSubmittedAt: submittedAt,
+                    lastPromptReadyAt: null,
+                    lastApprovalPromptAt: null,
+                    turnState: "prompt_submitted",
+                  }
+                : codexSessionIsWaitingForInstruction(session) ||
+                    codexSessionIsWaitingForApproval(session)
+                  ? {
+                      ...session,
+                      activeProfile: "codex",
+                      turnState: "owner_composing",
+                    }
+                  : session
               : session,
           ),
         }));
@@ -371,6 +409,11 @@ function mergeTerminalOutputTimestamp(
     (terminalOutputSuggestsCodexApprovalChoice(data) &&
       terminalOutputSuggestsCodexApprovalPrompt(promptDetectionData));
   const codexPromptReady = terminalOutputSuggestsCodexPromptReady(data);
+  const codexActiveWork =
+    terminalOutputSuggestsCodexActiveWork(data) ||
+    (!codexPromptReady &&
+      !codexApprovalPrompt &&
+      terminalOutputSuggestsCodexActiveWork(promptDetectionData));
   if (
     session.status === "running" &&
     codexApprovalPrompt &&
@@ -382,6 +425,28 @@ function mergeTerminalOutputTimestamp(
       lastOutputAt: receivedAt,
       lastPromptReadyAt: null,
       lastApprovalPromptAt: receivedAt,
+      turnState: "waiting_approval",
+    };
+  }
+  if (
+    session.status === "running" &&
+    codexActiveWork &&
+    (terminalSessionIsCodexActive(session) || session.profile === "shell")
+  ) {
+    return {
+      ...session,
+      activeProfile: "codex",
+      lastOutputAt: receivedAt,
+      lastPromptSubmittedAt:
+        !session.lastPromptSubmittedAt &&
+        (session.turnState === "owner_prompt_ready" ||
+          session.turnState === "owner_composing" ||
+          session.turnState === "waiting_approval")
+          ? receivedAt
+          : session.lastPromptSubmittedAt,
+      lastPromptReadyAt: null,
+      lastApprovalPromptAt: null,
+      turnState: "agent_working",
     };
   }
   if (
@@ -395,12 +460,12 @@ function mergeTerminalOutputTimestamp(
       lastOutputAt: receivedAt,
       lastPromptReadyAt: receivedAt,
       lastApprovalPromptAt: null,
+      turnState: "owner_prompt_ready",
     };
   }
   if (
     (codexSessionIsWaitingForInstruction(session) ||
-      codexSessionIsWaitingForApproval(session)) &&
-    !terminalOutputHasVisibleText(data)
+      codexSessionIsWaitingForApproval(session))
   ) {
     return session;
   }
@@ -409,7 +474,18 @@ function mergeTerminalOutputTimestamp(
     lastOutputAt: receivedAt,
     lastPromptReadyAt: null,
     lastApprovalPromptAt: null,
+    turnState:
+      terminalSessionIsCodexActive(session) &&
+      terminalOutputHasVisibleText(data) &&
+      ((session.turnState === "prompt_submitted" || session.turnState === "agent_working") ||
+        codexActiveWork)
+        ? "agent_working"
+        : session.turnState,
   };
+}
+
+function terminalInputUpdatesOwnerPrompt(input: string): boolean {
+  return input.length > 0 && !terminalInputSubmitsPrompt(input);
 }
 
 function terminalSessionShouldTrackCodexPrompt(
@@ -435,7 +511,8 @@ function mergeLocalTerminalSessionState(
   const backendCarriesPromptState =
     session.lastPromptSubmittedAt !== undefined ||
     session.lastPromptReadyAt !== undefined ||
-    session.lastApprovalPromptAt !== undefined;
+    session.lastApprovalPromptAt !== undefined ||
+    session.turnState !== undefined;
   if (
     !previous?.lastPromptSubmittedAt &&
     !previous?.lastPromptReadyAt &&
@@ -451,5 +528,6 @@ function mergeLocalTerminalSessionState(
     lastPromptSubmittedAt: previous.lastPromptSubmittedAt,
     lastPromptReadyAt: previous.lastPromptReadyAt,
     lastApprovalPromptAt: previous.lastApprovalPromptAt,
+    turnState: previous.turnState,
   };
 }

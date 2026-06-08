@@ -1,11 +1,14 @@
-import { act } from "@testing-library/react";
+import { act, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { resetAppStore } from "../../test/storeTestUtils";
-import { mockTauriInvoke } from "../../test/setup";
+import { mockTauriInvoke, mockTauriListen } from "../../test/setup";
+import { presentEmployeeActivity } from "../../components/employee-scene/activityPresentation";
+import { createEmployeeFloorViewModel } from "../../components/employee-floor/employeeFloorViewModel";
 import type {
   AppStateSnapshot,
   Employee,
+  EmployeeActivity,
   TerminalSessionRecord,
   WorkspaceInfo,
 } from "../../types";
@@ -34,10 +37,12 @@ function terminalSession(overrides: Partial<TerminalSessionRecord> = {}): Termin
     sessionId: "codex-session",
     employeeId: "employee-1",
     profile: "codex",
+    runtime: "pty",
     cwd: "/workspace",
     status: "running",
     startedAt: 1,
     label: "Codex",
+    turnState: "codex_starting",
     ...overrides,
   };
 }
@@ -149,7 +154,7 @@ describe("app store smoke behavior", () => {
     expect(useAppStore.getState().terminalSessions[0]?.lastOutputAt).toBeGreaterThan(staleOutputAt);
   });
 
-  it("clears Codex prompt-waiting state when generation output arrives", async () => {
+  it("keeps Codex prompt-waiting state while owner draft input is echoed", async () => {
     const staleOutputAt = Date.now() - 20_000;
     act(() => {
       useAppStore.setState({
@@ -158,6 +163,83 @@ describe("app store smoke behavior", () => {
           terminalSession({
             lastOutputAt: staleOutputAt,
             lastPromptReadyAt: staleOutputAt + 1,
+            turnState: "owner_prompt_ready",
+          }),
+        ],
+        settings: { ...DEFAULT_SETTINGS, maxTerminalBufferChars: 250 },
+      });
+    });
+
+    await act(async () => {
+      await useAppStore
+        .getState()
+        .writeTerminal("employee-1", "codex-session", "Improve documentation");
+    });
+
+    expect(useAppStore.getState().terminalSessions[0]?.turnState).toBe("owner_composing");
+
+    act(() => {
+      useAppStore.getState().appendTerminalData({
+        employeeId: "employee-1",
+        sessionId: "codex-session",
+        data: "Improve documentation",
+      });
+    });
+    await flushTerminalDataBatch();
+
+    expect(useAppStore.getState().terminalSessions[0]?.lastOutputAt).toBe(staleOutputAt);
+    expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBe(staleOutputAt + 1);
+    expect(useAppStore.getState().terminalSessions[0]?.turnState).toBe("owner_composing");
+  });
+
+  it("recovers shell-launched Codex owner prompt state when working output arrives", async () => {
+    const staleOutputAt = Date.now() - 20_000;
+    act(() => {
+      useAppStore.setState({
+        employees: [employee({ terminalSessionId: "shell-session" })],
+        terminalSessions: [
+          terminalSession({
+            sessionId: "shell-session",
+            profile: "shell",
+            activeProfile: "codex",
+            lastOutputAt: staleOutputAt,
+            lastPromptReadyAt: staleOutputAt + 1,
+            lastPromptSubmittedAt: null,
+            lastApprovalPromptAt: null,
+            turnState: "owner_composing",
+          }),
+        ],
+        settings: { ...DEFAULT_SETTINGS, maxTerminalBufferChars: 250 },
+      });
+      useAppStore.getState().appendTerminalData({
+        employeeId: "employee-1",
+        sessionId: "shell-session",
+        data: "\r\n› Implement feature\r\n\r\n• Working (2s • esc to interrupt)",
+      });
+    });
+    await flushTerminalDataBatch();
+
+    expect(useAppStore.getState().terminalSessions[0]).toMatchObject({
+      profile: "shell",
+      activeProfile: "codex",
+      lastPromptReadyAt: null,
+      lastApprovalPromptAt: null,
+      turnState: "agent_working",
+    });
+    expect(useAppStore.getState().terminalSessions[0]?.lastOutputAt).toBeGreaterThan(staleOutputAt);
+    expect(useAppStore.getState().terminalSessions[0]?.lastPromptSubmittedAt).toBeGreaterThan(staleOutputAt);
+  });
+
+  it("marks Codex agent-working state when generation output arrives after submission", async () => {
+    const staleOutputAt = Date.now() - 20_000;
+    act(() => {
+      useAppStore.setState({
+        employees: [employee({ terminalSessionId: "codex-session" })],
+        terminalSessions: [
+          terminalSession({
+            lastOutputAt: staleOutputAt,
+            lastPromptSubmittedAt: staleOutputAt + 1,
+            turnState: "prompt_submitted",
           }),
         ],
         settings: { ...DEFAULT_SETTINGS, maxTerminalBufferChars: 250 },
@@ -172,6 +254,34 @@ describe("app store smoke behavior", () => {
 
     expect(useAppStore.getState().terminalSessions[0]?.lastOutputAt).toBeGreaterThan(staleOutputAt);
     expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBeNull();
+    expect(useAppStore.getState().terminalSessions[0]?.turnState).toBe("agent_working");
+  });
+
+  it("recovers Codex agent-working state from active status output after startup", async () => {
+    const staleOutputAt = Date.now() - 20_000;
+    act(() => {
+      useAppStore.setState({
+        employees: [employee({ terminalSessionId: "codex-session" })],
+        terminalSessions: [
+          terminalSession({
+            lastOutputAt: staleOutputAt,
+            lastPromptSubmittedAt: null,
+            turnState: "codex_starting",
+          }),
+        ],
+        settings: { ...DEFAULT_SETTINGS, maxTerminalBufferChars: 250 },
+      });
+      useAppStore.getState().appendTerminalData({
+        employeeId: "employee-1",
+        sessionId: "codex-session",
+        data: "\r\n• Working (10s • esc to interrupt)",
+      });
+    });
+    await flushTerminalDataBatch();
+
+    expect(useAppStore.getState().terminalSessions[0]?.lastOutputAt).toBeGreaterThan(staleOutputAt);
+    expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBeNull();
+    expect(useAppStore.getState().terminalSessions[0]?.turnState).toBe("agent_working");
   });
 
   it("marks Codex sessions prompt-ready when the prompt returns", async () => {
@@ -473,6 +583,137 @@ describe("app store smoke behavior", () => {
     expect(useAppStore.getState().selectedEmployee()?.name).toBe("Grace");
   });
 
+  it("refreshes desk activity after submitting a Codex app-server task", async () => {
+    const workingSession = codexAppServerWorkingSession();
+    const workingActivity = codexDeskWorkingActivity("employee-1", {
+      activeTerminalSessionId: workingSession.sessionId,
+    });
+    (mockTauriInvoke as InvokeMock).mockImplementation(
+      async (command: string, args?: Record<string, unknown>) => {
+        switch (command) {
+          case "codex_task_submit":
+            return workingSession;
+          case "terminal_session_list":
+            return [workingSession];
+          case "employee_activity_get":
+            expect(args).toEqual({ employeeId: "employee-1" });
+            return workingActivity;
+          default:
+            return null;
+        }
+      },
+    );
+
+    act(() => {
+      useAppStore.setState({
+        employees: [employee()],
+        selectedEmployeeId: "employee-1",
+      });
+    });
+
+    await act(async () => {
+      await useAppStore.getState().submitCodexTask({
+        employeeId: "employee-1",
+        sessionId: null,
+        prompt: "Implement the activity contract refresh",
+      });
+    });
+
+    await waitFor(() => {
+      expect(
+        useAppStore.getState().employeeActivities["employee-1"]?.contract.render.placement,
+      ).toBe("desk");
+    });
+
+    const state = useAppStore.getState();
+    expect(state.employees.find((item) => item.id === "employee-1")?.terminalSessionId).toBe(
+      workingSession.sessionId,
+    );
+    expect(state.terminalSessions.find((session) => session.sessionId === workingSession.sessionId))
+      .toMatchObject({
+        runtime: "codex_app_server",
+        turnState: "prompt_submitted",
+      });
+    expect(state.employeeActivities["employee-1"]?.contract).toMatchObject({
+      render: { placement: "desk", posture: "sitting", activity: "working" },
+      work: { kind: "codex", phase: "working" },
+      source: { runtime: "codex_app_server", confidence: "structured" },
+    });
+
+    const { presentation, model } = floorModelFromStore("employee-1");
+    expect(presentation.state).toBe("codex_running");
+    expect(model.zone).toBe("desk");
+    expect(model.worksAtDesk).toBe(true);
+  });
+
+  it("refreshes desk activity from live session and activity events", async () => {
+    const workingSession = codexAppServerWorkingSession({
+      sessionId: "codex-event-session",
+      turnState: "agent_working",
+    });
+    const workingActivity = codexDeskWorkingActivity("employee-1", {
+      activeTerminalSessionId: workingSession.sessionId,
+    });
+    const handlers: Record<string, CapturedTauriEventHandler> = {};
+    (mockTauriListen as unknown as ListenMock).mockImplementation(async (eventName, handler) => {
+      handlers[eventName] = handler;
+      return () => undefined;
+    });
+    (mockTauriInvoke as InvokeMock).mockImplementation(
+      async (command: string, args?: Record<string, unknown>) => {
+        switch (command) {
+          case "employee_activity_get":
+            expect(args).toEqual({ employeeId: "employee-1" });
+            return workingActivity;
+          default:
+            return null;
+        }
+      },
+    );
+
+    act(() => {
+      useAppStore.setState({
+        employees: [
+          employee({
+            terminalSessionId: workingSession.sessionId,
+          }),
+        ],
+        selectedEmployeeId: "employee-1",
+      });
+    });
+
+    const unlisten = await useAppStore.getState().connectEvents();
+    expect(unlisten).toHaveLength(9);
+    expect(handlers["terminal:session-updated"]).toBeDefined();
+    expect(handlers["employee:activity-updated"]).toBeDefined();
+
+    act(() => {
+      handlers["terminal:session-updated"]?.({
+        payload: { session: workingSession },
+      });
+      handlers["employee:activity-updated"]?.({
+        payload: { employeeId: "employee-1" },
+      });
+    });
+
+    await waitFor(() => {
+      expect(
+        useAppStore.getState().employeeActivities["employee-1"]?.contract.render.placement,
+      ).toBe("desk");
+    });
+
+    expect(useAppStore.getState().terminalSessions[0]).toMatchObject({
+      sessionId: workingSession.sessionId,
+      runtime: "codex_app_server",
+      turnState: "agent_working",
+    });
+
+    const { presentation, model } = floorModelFromStore("employee-1");
+    expect(presentation.state).toBe("codex_running");
+    expect(model.zone).toBe("desk");
+    expect(model.worksAtDesk).toBe(true);
+  });
+
   it("bootstrap starts on office when the user has not changed tabs", async () => {
     mockBootstrapCommands({ activeTab: "editor" });
 
@@ -549,6 +790,104 @@ type InvokeMock = {
     implementation: (command: string, args?: Record<string, unknown>) => Promise<unknown>,
   ) => void;
 };
+
+type CapturedTauriEventHandler = (event: { payload: unknown }) => void;
+
+type ListenMock = {
+  mockImplementation: (
+    implementation: (
+      eventName: string,
+      handler: CapturedTauriEventHandler,
+    ) => Promise<() => void>,
+  ) => void;
+};
+
+function codexAppServerWorkingSession(
+  overrides: Partial<TerminalSessionRecord> = {},
+): TerminalSessionRecord {
+  return terminalSession({
+    sessionId: "codex-app-session",
+    profile: "codex",
+    runtime: "codex_app_server",
+    activeProfile: "codex",
+    label: "Codex app-server",
+    lastPromptSubmittedAt: 1_000,
+    turnState: "prompt_submitted",
+    ...overrides,
+  });
+}
+
+function codexDeskWorkingActivity(
+  employeeId: string,
+  overrides: Partial<EmployeeActivity> = {},
+): EmployeeActivity {
+  return {
+    employeeId,
+    status: "codex_running",
+    contract: {
+      lifecycle: "active",
+      work: {
+        kind: "codex",
+        phase: "working",
+        turnOwner: "agent",
+      },
+      render: {
+        placement: "desk",
+        posture: "sitting",
+        activity: "working",
+      },
+      attention: {
+        required: false,
+        reason: null,
+        priority: "none",
+      },
+      source: {
+        runtime: "codex_app_server",
+        confidence: "structured",
+      },
+    },
+    label: "Codex running",
+    details: "Working on task",
+    lastActivityAt: 1_000,
+    activeTerminalSessionId: null,
+    activeActionId: null,
+    activeProcessIds: [],
+    reviewCounts: {
+      changedFiles: 0,
+      stagedFiles: 0,
+      untrackedFiles: 0,
+    },
+    blockers: [],
+    ...overrides,
+  };
+}
+
+function floorModelFromStore(employeeId: string) {
+  const state = useAppStore.getState();
+  const nextEmployee = state.employees.find((item) => item.id === employeeId);
+  if (!nextEmployee) {
+    throw new Error(`Missing employee ${employeeId}`);
+  }
+  const presentation = presentEmployeeActivity({
+    employee: nextEmployee,
+    activity: state.employeeActivities[employeeId] ?? null,
+    terminalSessions: state.terminalSessions,
+    approvals: state.approvals,
+    actions: state.actions,
+    processes: state.processes,
+    review: null,
+    handoff: null,
+  });
+  return {
+    presentation,
+    model: createEmployeeFloorViewModel({
+      employee: nextEmployee,
+      presentation,
+      selected: false,
+      deskIndex: 0,
+    }),
+  };
+}
 
 function snapshot(overrides: Partial<AppStateSnapshot> = {}): AppStateSnapshot {
   return {

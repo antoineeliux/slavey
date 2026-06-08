@@ -16,27 +16,18 @@ import type {
   WorktreeReview,
 } from "../../types";
 import {
+  codexSessionHasActiveTurn,
   codexSessionIsWaitingForApproval,
   codexSessionIsWaitingForInstruction,
   terminalSessionEffectiveProfile,
 } from "../../lib/codexPromptState";
+import {
+  resolveEmployeeActivityContractView,
+  type EmployeeActivityContractView,
+  type EmployeeVisualState,
+} from "../../lib/employeeActivityContractView";
 
-export type EmployeeVisualState =
-  | "idle"
-  | "shell_running"
-  | "codex_starting"
-  | "codex_running"
-  | "codex_waiting_instruction"
-  | "codex_waiting_approval"
-  | "standby"
-  | "waiting_approval"
-  | "action_running"
-  | "process_running"
-  | "review_needed"
-  | "handoff_ready"
-  | "done_clean"
-  | "blocked"
-  | "stopped";
+export type { EmployeeVisualState } from "../../lib/employeeActivityContractView";
 
 export type EmployeeActivityPresentation = {
   state: EmployeeVisualState;
@@ -58,6 +49,8 @@ export type EmployeeActivityPresentation = {
   activityReason: string | null;
   agentKind: AgentKind | null;
   agentState: AgentRuntimeState | null;
+  contract: EmployeeActivity["contract"] | null;
+  contractView: EmployeeActivityContractView | null;
   blockers: string[];
 };
 
@@ -110,45 +103,47 @@ export function presentEmployeeActivity({
     ...(review?.blockers ?? []),
     ...((review?.conflictedFiles.length ?? 0) > 0 ? ["Worktree has conflicted files"] : []),
   ];
-  const hasReviewNeeded =
-    activity?.status === "review_needed" ||
-    changedFiles > 0 ||
+  const fallbackHasReviewNeeded =
+    (review?.changedFiles.length ?? review?.files.length ?? 0) > 0 ||
     review?.clean === false ||
     (review?.conflictedFiles.length ?? 0) > 0;
-  const hasHandoffReady =
-    activity?.status === "handoff_ready" ||
-    activity?.attention?.reason === "handoff_ready" ||
-    handoff?.canApply === true;
+  const fallbackHasHandoffReady = handoff?.canApply === true;
+  const contractView = activity ? resolveEmployeeActivityContractView(activity) : null;
+  const hasReviewNeeded = contractView?.state === "review_needed" || fallbackHasReviewNeeded;
+  const hasHandoffReady = contractView?.state === "handoff_ready" || fallbackHasHandoffReady;
 
-  const state = visualStateFor({
-    employee,
-    activity,
-    activeSession,
-    pendingApprovals: employeeApprovals.length + pendingActions.length,
-    runningActions: runningActions.length,
-    runningProcesses: runningProcesses.length,
-    failedActions: failedActions.length,
-    failedProcesses: failedProcesses.length,
-    hasReviewNeeded,
-    hasHandoffReady,
-    blockers: hardBlockers,
-  });
-  const label = labelFor(state, activity);
-  const detail = detailFor({
-    employee,
-    activity,
-    activeSession,
-    pendingApprovals: employeeApprovals.length + pendingActions.length,
-    runningActions: runningActions.length,
-    runningProcesses: runningProcesses.length,
-    changedFiles,
-    hasHandoffReady,
-    blockers,
-    state,
-  });
+  const state =
+    contractView?.state ??
+    fallbackVisualStateWithoutActivity({
+      employee,
+      activeSession,
+      pendingApprovals: employeeApprovals.length + pendingActions.length,
+      runningActions: runningActions.length,
+      runningProcesses: runningProcesses.length,
+      failedActions: failedActions.length,
+      failedProcesses: failedProcesses.length,
+      hasReviewNeeded: fallbackHasReviewNeeded,
+      hasHandoffReady: fallbackHasHandoffReady,
+      blockers: hardBlockers,
+    });
+  const label = contractView?.label ?? labelForFallbackState(state);
+  const detail =
+    contractView?.detail ??
+    detailForFallbackState({
+      employee,
+      activeSession,
+      pendingApprovals: employeeApprovals.length + pendingActions.length,
+      runningActions: runningActions.length,
+      runningProcesses: runningProcesses.length,
+      changedFiles,
+      hasHandoffReady: fallbackHasHandoffReady,
+      blockers,
+      state,
+    });
 
   const fallbackAttentionReason = fallbackAttentionReasonForState(state);
-  const backendAttentionRequired = activity?.attention?.required ?? false;
+  const attentionRequired = contractView?.attentionRequired ?? ownerAttentionState(state);
+  const attentionReason = contractView?.attentionReason ?? fallbackAttentionReason;
 
   return {
     state,
@@ -161,10 +156,8 @@ export function presentEmployeeActivity({
     changedFiles,
     hasHandoffReady,
     hasReviewNeeded,
-    attentionRequired: backendAttentionRequired || ownerAttentionState(state),
-    attentionReason: backendAttentionRequired
-      ? activity?.attention?.reason ?? fallbackAttentionReason
-      : fallbackAttentionReason,
+    attentionRequired,
+    attentionReason,
     behavior: activity?.behavior ?? null,
     workPhase: activity?.work?.phase ?? null,
     turnOwner: activity?.work?.turnOwner ?? null,
@@ -172,13 +165,14 @@ export function presentEmployeeActivity({
     activityReason: activity?.activityReason ?? null,
     agentKind: activity?.agent?.kind ?? null,
     agentState: activity?.agent?.state ?? null,
+    contract: activity?.contract ?? null,
+    contractView,
     blockers,
   };
 }
 
-function visualStateFor({
+function fallbackVisualStateWithoutActivity({
   employee,
-  activity,
   activeSession,
   pendingApprovals,
   runningActions,
@@ -190,7 +184,6 @@ function visualStateFor({
   blockers,
 }: {
   employee: Employee;
-  activity?: EmployeeActivity | null;
   activeSession: TerminalSessionRecord | null;
   pendingApprovals: number;
   runningActions: number;
@@ -201,76 +194,34 @@ function visualStateFor({
   hasHandoffReady: boolean;
   blockers: string[];
 }): EmployeeVisualState {
-  const structuredState = structuredVisualStateForActivity(employee, activity);
-  if (structuredState) {
-    return structuredState;
-  }
-
-  if (employee.status === "standby" || activity?.status === "standby") {
+  if (employee.status === "standby") {
     return "standby";
   }
-  if (employee.status === "stopped" || activity?.status === "stopped") {
+  if (employee.status === "stopped") {
     return "stopped";
-  }
-  if (activity?.attention?.required && activity.attention.reason === "blocked_needs_help") {
-    return "blocked";
   }
   if (
     employee.status === "blocked" ||
     employee.status === "failed" ||
-    activity?.status === "blocked" ||
     failedActions > 0 ||
     failedProcesses > 0 ||
     blockers.length > 0
   ) {
     return "blocked";
   }
-  if (activity?.status === "codex_waiting_approval") {
-    return "codex_waiting_approval";
-  }
-  if (activity?.status === "review_needed") {
-    return "review_needed";
-  }
-  if (activity?.status === "handoff_ready") {
-    return "handoff_ready";
-  }
-  if (employee.status === "done" || activity?.status === "done_clean") {
+  if (employee.status === "done") {
     return "done_clean";
   }
-  if (activity?.attention?.required) {
-    switch (activity.attention.reason) {
-      case "needs_instruction":
-        return "codex_waiting_instruction";
-      case "needs_terminal_approval":
-        return "codex_waiting_approval";
-      case "needs_app_approval":
-      case "needs_approval":
-        return "waiting_approval";
-      case "review_needed":
-        return "review_needed";
-      case "handoff_ready":
-        return "handoff_ready";
-      case "ready_to_report":
-        return "done_clean";
-      default:
-        break;
-    }
-  }
-  if (pendingApprovals > 0 || activity?.status === "action_pending_approval") {
+  if (pendingApprovals > 0) {
     return "waiting_approval";
   }
-  if (
-    activity?.agent?.state === "waiting_approval" ||
-    (activeSession && codexSessionIsWaitingForApproval(activeSession))
-  ) {
+  if (activeSession && codexSessionIsWaitingForApproval(activeSession)) {
     return "codex_waiting_approval";
   }
-  if (runningActions > 0 || activity?.status === "action_running") {
+  if (runningActions > 0) {
     return "action_running";
   }
   if (
-    activity?.agent?.state === "waiting_prompt" ||
-    activity?.status === "codex_waiting_instruction" ||
     activeSession &&
     terminalSessionEffectiveProfile(activeSession) === "codex" &&
     codexSessionIsWaitingForInstruction(activeSession)
@@ -278,27 +229,23 @@ function visualStateFor({
     return "codex_waiting_instruction";
   }
   if (
-    activity?.agent?.state === "starting" ||
-    activity?.status === "codex_starting" ||
+    activeSession &&
+    terminalSessionEffectiveProfile(activeSession) === "codex" &&
+    codexSessionHasActiveTurn(activeSession)
+  ) {
+    return "codex_running";
+  }
+  if (
     (activeSession &&
       terminalSessionEffectiveProfile(activeSession) === "codex" &&
       !activeSession.lastPromptSubmittedAt)
   ) {
     return "codex_starting";
   }
-  if (
-    (activity?.agent?.state === "thinking" && activity?.agent?.kind === "codex") ||
-    activity?.status === "codex_running" ||
-    (activeSession &&
-      terminalSessionEffectiveProfile(activeSession) === "codex" &&
-      Boolean(activeSession.lastPromptSubmittedAt))
-  ) {
-    return "codex_running";
-  }
-  if (activity?.status === "shell_running" || activeSession?.profile === "shell") {
+  if (activeSession?.profile === "shell") {
     return "shell_running";
   }
-  if (runningProcesses > 0 || activity?.status === "process_running") {
+  if (runningProcesses > 0) {
     return "process_running";
   }
   if (hasHandoffReady) {
@@ -308,116 +255,6 @@ function visualStateFor({
     return "review_needed";
   }
   return "idle";
-}
-
-function structuredVisualStateForActivity(
-  employee: Employee,
-  activity: EmployeeActivity | null | undefined,
-): EmployeeVisualState | null {
-  if (!activity || !activityHasStructuredContract(activity)) {
-    return null;
-  }
-  if (
-    employee.status === "standby" ||
-    activity.lifecycle === "standby" ||
-    activity.behavior === "on_standby" ||
-    activity.status === "standby"
-  ) {
-    return "standby";
-  }
-  if (
-    employee.status === "stopped" ||
-    activity.lifecycle === "stopped" ||
-    activity.behavior === "offline" ||
-    activity.status === "stopped"
-  ) {
-    return "stopped";
-  }
-
-  const attentionReason = activity.attention?.required ? activity.attention.reason : null;
-  switch (attentionReason) {
-    case "blocked_needs_help":
-      return "blocked";
-    case "needs_instruction":
-      return "codex_waiting_instruction";
-    case "needs_terminal_approval":
-      return "codex_waiting_approval";
-    case "needs_app_approval":
-      return "waiting_approval";
-    case "needs_approval":
-      return activity.terminalState === "codex_waiting_approval" ||
-        activity.status === "codex_waiting_approval"
-        ? "codex_waiting_approval"
-        : "waiting_approval";
-    case "review_needed":
-      return "review_needed";
-    case "handoff_ready":
-      return "handoff_ready";
-    case "ready_to_report":
-      return "done_clean";
-    default:
-      break;
-  }
-
-  switch (activity.status) {
-    case "action_pending_approval":
-      return "waiting_approval";
-    case "action_running":
-      return "action_running";
-    case "process_running":
-      return "process_running";
-    case "review_needed":
-      return "review_needed";
-    case "handoff_ready":
-      return "handoff_ready";
-    case "done_clean":
-      return "done_clean";
-    case "blocked":
-      return "blocked";
-    default:
-      break;
-  }
-
-  switch (activity.terminalState) {
-    case "codex_waiting_approval":
-      return "codex_waiting_approval";
-    case "codex_waiting_instruction":
-      return "codex_waiting_instruction";
-    case "codex_starting":
-      return "codex_starting";
-    case "codex_running":
-      return "codex_running";
-    case "shell_running":
-      return "shell_running";
-    case "failed":
-      return "blocked";
-    case "completed":
-      return "done_clean";
-    case "none":
-    default:
-      break;
-  }
-
-  return visualStateFromLegacyStatus(activity.status);
-}
-
-function activityHasStructuredContract(activity: EmployeeActivity): boolean {
-  return Boolean(
-    activity.behavior ||
-      activity.terminalState ||
-      activity.lifecycle ||
-      activity.work ||
-      activity.attention,
-  );
-}
-
-function visualStateFromLegacyStatus(status: EmployeeActivity["status"]): EmployeeVisualState {
-  switch (status) {
-    case "action_pending_approval":
-      return "waiting_approval";
-    default:
-      return status;
-  }
 }
 
 function activeTerminalSession(
@@ -436,10 +273,7 @@ function activeTerminalSession(
   );
 }
 
-function labelFor(
-  state: EmployeeVisualState,
-  activity: EmployeeActivity | null | undefined,
-): string {
+function labelForFallbackState(state: EmployeeVisualState): string {
   if (state === "codex_waiting_instruction") {
     return "Awaiting prompt";
   }
@@ -454,9 +288,6 @@ function labelFor(
   }
   if (state === "done_clean") {
     return "Done";
-  }
-  if (activity?.label && activity.status !== "idle") {
-    return activity.label;
   }
   switch (state) {
     case "shell_running":
@@ -483,9 +314,8 @@ function labelFor(
   }
 }
 
-function detailFor({
+function detailForFallbackState({
   employee,
-  activity,
   activeSession,
   pendingApprovals,
   runningActions,
@@ -496,7 +326,6 @@ function detailFor({
   state,
 }: {
   employee: Employee;
-  activity?: EmployeeActivity | null;
   activeSession: TerminalSessionRecord | null;
   pendingApprovals: number;
   runningActions: number;
@@ -521,9 +350,6 @@ function detailFor({
   if (state === "done_clean") {
     return "Ready to report";
   }
-  if (activity?.details && activity.status !== "blocked") {
-    return activity.details;
-  }
   if (blockers.length > 0) {
     return blockers[0];
   }
@@ -545,7 +371,7 @@ function detailFor({
   if (changedFiles > 0) {
     return `${changedFiles} changed file${changedFiles === 1 ? "" : "s"}`;
   }
-  return activity?.details ?? employee.currentCommand ?? shortPath(employee.cwd);
+  return employee.currentCommand ?? shortPath(employee.cwd);
 }
 
 function ownerAttentionState(state: EmployeeVisualState): boolean {

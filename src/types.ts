@@ -38,6 +38,8 @@ export type TerminalDataPayload = {
 
 export type TerminalSessionProfile = "shell" | "codex";
 
+export type TerminalSessionRuntime = "pty" | "codex_app_server";
+
 export type TerminalSessionStatus = "running" | "exited" | "failed" | "stopped";
 
 export type TerminalStopReason =
@@ -46,10 +48,23 @@ export type TerminalStopReason =
   | "failed_to_start"
   | "app_restarted";
 
+export type TerminalTurnState =
+  | "unknown"
+  | "shell"
+  | "codex_starting"
+  | "owner_prompt_ready"
+  | "owner_composing"
+  | "prompt_submitted"
+  | "agent_working"
+  | "waiting_approval"
+  | "completed"
+  | "failed";
+
 export type TerminalSessionRecord = {
   sessionId: string;
   employeeId: string;
   profile: TerminalSessionProfile;
+  runtime: TerminalSessionRuntime;
   activeProfile?: TerminalSessionProfile | null;
   cwd: string;
   currentCwd?: string | null;
@@ -64,6 +79,7 @@ export type TerminalSessionRecord = {
   lastPromptSubmittedAt?: number | null;
   lastPromptReadyAt?: number | null;
   lastApprovalPromptAt?: number | null;
+  turnState: TerminalTurnState;
   message?: string | null;
 };
 
@@ -144,6 +160,9 @@ export type AgentRuntimeSnapshot = {
   kind: AgentKind;
   state: AgentRuntimeState;
   lastStateChangedAt?: number | null;
+  source?: "none" | "terminal_fallback" | "codex_app_server";
+  confidence?: "none" | "terminal_fallback" | "structured";
+  turnOwner?: EmployeeTurnOwner;
 };
 
 export type EmployeeWorkPhase =
@@ -197,6 +216,71 @@ export type EmployeeReviewCounts = {
   untrackedFiles: number;
 };
 
+export type EmployeeActivityContractWorkKind =
+  | "none"
+  | "shell"
+  | "codex"
+  | "action"
+  | "process"
+  | "review";
+
+export type EmployeeActivityContractWorkPhase =
+  | "idle"
+  | "starting"
+  | "working"
+  | "waiting_owner"
+  | "waiting_approval"
+  | "ready"
+  | "blocked";
+
+export type EmployeeActivityContractWork = {
+  kind: EmployeeActivityContractWorkKind;
+  phase: EmployeeActivityContractWorkPhase;
+  turnOwner: EmployeeTurnOwner;
+};
+
+export type EmployeeActivityContractRenderPlacement =
+  | "desk"
+  | "owner_office"
+  | "standby"
+  | "done_room"
+  | "offline";
+
+export type EmployeeActivityContractRenderPosture = "sitting" | "standing";
+
+export type EmployeeActivityContractRenderActivity =
+  | "idle"
+  | "working"
+  | "terminal"
+  | "waiting_instruction"
+  | "approval"
+  | "review"
+  | "handoff"
+  | "blocked";
+
+export type EmployeeActivityContractRender = {
+  placement: EmployeeActivityContractRenderPlacement;
+  posture: EmployeeActivityContractRenderPosture;
+  activity: EmployeeActivityContractRenderActivity;
+};
+
+export type EmployeeActivityContractSourceRuntime = "none" | "pty" | "codex_app_server";
+
+export type EmployeeActivityContractSourceConfidence = "none" | "fallback" | "structured";
+
+export type EmployeeActivityContractSource = {
+  runtime: EmployeeActivityContractSourceRuntime;
+  confidence: EmployeeActivityContractSourceConfidence;
+};
+
+export type EmployeeActivityContract = {
+  lifecycle: EmployeeLifecycleState;
+  work: EmployeeActivityContractWork;
+  render: EmployeeActivityContractRender;
+  attention: EmployeeAttention;
+  source: EmployeeActivityContractSource;
+};
+
 export type EmployeeActivity = {
   employeeId: string;
   status: EmployeeActivityStatus;
@@ -206,6 +290,7 @@ export type EmployeeActivity = {
   agent?: AgentRuntimeSnapshot;
   work?: EmployeeWorkState;
   attention?: EmployeeAttention;
+  contract: EmployeeActivityContract;
   terminalState?: EmployeeTerminalActivityState;
   activityReason?: string | null;
   label: string;
@@ -393,6 +478,49 @@ export type DiagnosticsApprovalMetadata = {
   resolvedAt?: number | null;
 };
 
+export type DiagnosticsEmployeeActivityMetadata = {
+  employeeId: string;
+  status: EmployeeActivityStatus;
+  lifecycle: EmployeeLifecycleState;
+  behavior: EmployeeBehaviorState;
+  terminalState: EmployeeTerminalActivityState;
+  activityReason: string;
+  session: EmployeeRuntimeSession;
+  agent: AgentRuntimeSnapshot;
+  work: EmployeeWorkState;
+  attention: EmployeeAttention;
+  contract: EmployeeActivityContract;
+  activeTerminalSessionId?: string | null;
+  activeActionId?: string | null;
+  activeProcessIds: string[];
+  reviewCounts: EmployeeReviewCounts;
+  blockers: string[];
+  lastActivityAt?: number | null;
+};
+
+export type DiagnosticsTerminalSessionMetadata = {
+  sessionId: string;
+  employeeId: string;
+  profile: TerminalSessionProfile;
+  runtime: TerminalSessionRuntime;
+  activeProfile?: TerminalSessionProfile | null;
+  cwd: string;
+  currentCwd?: string | null;
+  status: TerminalSessionStatus;
+  exitCode?: number | null;
+  startedAt: number;
+  endedAt?: number | null;
+  stoppedAt?: number | null;
+  stopReason?: TerminalStopReason | null;
+  label: string;
+  lastOutputAt?: number | null;
+  lastPromptSubmittedAt?: number | null;
+  lastPromptReadyAt?: number | null;
+  lastApprovalPromptAt?: number | null;
+  turnState: TerminalTurnState;
+  message?: string | null;
+};
+
 export type DiagnosticsProcessMetadata = {
   id: string;
   employeeId?: string | null;
@@ -409,9 +537,10 @@ export type DiagnosticsExportBundle = {
   summary: DiagnosticsSummary;
   settings: AppSettings;
   workspace: DiagnosticsWorkspaceInfo;
+  employeeActivities: DiagnosticsEmployeeActivityMetadata[];
   actions: DiagnosticsActionMetadata[];
   approvals: DiagnosticsApprovalMetadata[];
-  terminalSessions: TerminalSessionRecord[];
+  terminalSessions: DiagnosticsTerminalSessionMetadata[];
   processes: DiagnosticsProcessMetadata[];
   notes: string[];
 };
@@ -670,4 +799,19 @@ export type CodexCliStatus = {
   available: boolean;
   version?: string | null;
   message: string;
+};
+
+export type CodexAppServerStatus = {
+  available: boolean;
+  userAgent?: string | null;
+  codexHome?: string | null;
+  platformFamily?: string | null;
+  platformOs?: string | null;
+  message: string;
+};
+
+export type CodexTaskSubmitInput = {
+  employeeId: string;
+  sessionId?: string | null;
+  prompt: string;
 };
