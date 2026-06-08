@@ -15,7 +15,21 @@ import {
 } from "./navigationObstacles";
 import {
   samePoint2D,
+  type WalkArea,
 } from "./navigationTypes";
+
+type OpenAreaRoute = {
+  transit: THREE.Vector3;
+  waypoints: THREE.Vector3[];
+};
+
+const OPEN_WORK_AREA_IDS = new Set<WalkArea["id"]>([
+  "main",
+  "left_hall",
+  "right_hall",
+  "front_hall",
+  "back_hall",
+]);
 
 export function createNavigationPath(
   start: THREE.Vector3,
@@ -24,20 +38,63 @@ export function createNavigationPath(
   const end = clampToWalkable(destination);
   const startArea = walkAreaForPoint(start);
   const endArea = walkAreaForPoint(end);
-  if (startArea?.id === endArea?.id) {
+  if (startArea?.id === endArea?.id || (isOpenWorkArea(startArea) && isOpenWorkArea(endArea))) {
     return obstacleAwarePath(start, [end]);
   }
 
-  const startExit = exitToCorridor(start, startArea, end);
-  const endEntry = entryFromCorridor(end, endArea, start);
+  const startExit = exitToOpenArea(start, startArea, end);
+  const endEntry = entryFromOpenArea(end, endArea, start);
+  const transit = routeOpenAreaTransit(startExit.transit, endEntry.transit);
   const path = [
     ...startExit.waypoints,
-    ...corridorRoute(startExit.corridor, endEntry.corridor),
+    ...transit,
     ...endEntry.waypoints,
     end,
   ];
 
   return obstacleAwarePath(start, compactPath(path));
+}
+
+function exitToOpenArea(
+  start: THREE.Vector3,
+  area: WalkArea | null,
+  destination: THREE.Vector3,
+): OpenAreaRoute {
+  if (isOpenWorkArea(area)) {
+    return { transit: clampToWalkable(start), waypoints: [] };
+  }
+
+  const exit = exitToCorridor(start, area, destination);
+  return { transit: exit.corridor, waypoints: exit.waypoints };
+}
+
+function entryFromOpenArea(
+  destination: THREE.Vector3,
+  area: WalkArea | null,
+  start: THREE.Vector3,
+): OpenAreaRoute {
+  if (isOpenWorkArea(area)) {
+    return { transit: clampToWalkable(destination), waypoints: [] };
+  }
+
+  const entry = entryFromCorridor(destination, area, start);
+  return { transit: entry.corridor, waypoints: entry.waypoints };
+}
+
+function routeOpenAreaTransit(start: THREE.Vector3, end: THREE.Vector3): THREE.Vector3[] {
+  if (isOpenWorkPoint(start) && isOpenWorkPoint(end)) {
+    return [end];
+  }
+
+  return corridorRoute(start, end);
+}
+
+function isOpenWorkPoint(pointValue: THREE.Vector3): boolean {
+  return isOpenWorkArea(walkAreaForPoint(pointValue));
+}
+
+function isOpenWorkArea(area: WalkArea | null): boolean {
+  return area ? OPEN_WORK_AREA_IDS.has(area.id) : false;
 }
 
 function obstacleAwarePath(start: THREE.Vector3, waypoints: THREE.Vector3[]): THREE.Vector3[] {

@@ -57,8 +57,6 @@ export function addFloorZones(group: THREE.Group, materials: FloorMaterials): vo
 }
 
 export function addSurroundingRooms(group: THREE.Group, materials: FloorMaterials): void {
-  addMainWorkroomPerimeter(group, materials);
-
   addRoomShell(group, materials, [-14.25, -3.3], [4.75, 14.55], "east");
   addEntertainmentRoomFurniture(group, materials, [-14.25, -3.3]);
   addRoomShell(group, materials, [14.25, -3.3], [4.75, 14.55], "west");
@@ -74,13 +72,6 @@ export function addSurroundingRooms(group: THREE.Group, materials: FloorMaterial
 
   addRoomShell(group, materials, [-8.25, 8.55], [15.2, 6.5], "south");
   addRoomShell(group, materials, [8.25, 8.55], [15.2, 6.5], "south");
-}
-
-function addMainWorkroomPerimeter(group: THREE.Group, materials: FloorMaterials): void {
-  addGlassWallX(group, materials, MAIN_ROOM_FRONT_Z, MAIN_ROOM_LEFT_X, MAIN_ROOM_RIGHT_X, 0, 3.2);
-  addGlassWallX(group, materials, MAIN_ROOM_BACK_Z, MAIN_ROOM_LEFT_X, MAIN_ROOM_RIGHT_X, 0, 2.8);
-  addGlassWallZ(group, materials, MAIN_ROOM_LEFT_X, MAIN_ROOM_BACK_Z, MAIN_ROOM_FRONT_Z, -0.5, 2.4);
-  addGlassWallZ(group, materials, MAIN_ROOM_RIGHT_X, MAIN_ROOM_BACK_Z, MAIN_ROOM_FRONT_Z, -0.5, 2.4);
 }
 
 function addRoomShell(

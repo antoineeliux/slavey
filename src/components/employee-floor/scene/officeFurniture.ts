@@ -241,18 +241,11 @@ function simpleChair(materials: FloorMaterials): THREE.Group {
 }
 
 export function addDeskNeighborhood(group: THREE.Group, materials: FloorMaterials): void {
-  group.add(box([20.1, 0.12, 0.22], [0, 0.11, -4.75], materials.wallTrim, true, true));
-  group.add(box([20.1, 0.12, 0.22], [0, 0.11, 2.72], materials.wallTrim, true, true));
-
   for (const x of [-4.9, 0, 4.9]) {
     group.add(box([0.15, 1.1, 4.1], [x, 0.58, -1.2], materials.column, true, true));
     if (SHOW_INTERIOR_GLASS_PARTITIONS) {
       group.add(box([0.026, 0.68, 3.72], [x, 1.08, -1.2], interiorGlassMaterials(materials).glass, false, false));
     }
-  }
-
-  for (const x of [-7.25, -2.5, 2.25, 7.0]) {
-    group.add(box([2.9, 0.05, 0.5], [x, 0.05, -4.78], materials.lightPanel, false, false));
   }
 }
 

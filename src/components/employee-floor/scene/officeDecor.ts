@@ -30,24 +30,6 @@ export function addPlants(group: THREE.Group, materials: FloorMaterials): void {
 }
 
 export function addDecorDetails(group: THREE.Group, materials: FloorMaterials): void {
-  for (const [x, z, rotation, width] of [
-    [-8.25, 6.62, 0, 3.4],
-    [8.25, 6.62, 0, 3.4],
-    [-14.25, -9.72, Math.PI * 0.5, 2.2],
-    [14.25, -9.72, -Math.PI * 0.5, 2.2],
-  ] as const) {
-    const shelf = new THREE.Group();
-    shelf.position.set(x, 0, z);
-    shelf.rotation.y = rotation;
-    shelf.add(box([width, 0.16, 0.28], [0, 0.82, 0], materials.deskEdge, true, true));
-    shelf.add(box([width, 0.08, 0.32], [0, 1.22, 0], materials.deskEdge, true, true));
-    for (let index = 0; index < 7; index += 1) {
-      const material = index % 3 === 0 ? materials.marker.desk_review : index % 3 === 1 ? materials.marker.desk_terminal : materials.cup;
-      shelf.add(box([0.14, 0.34 + (index % 2) * 0.12, 0.18], [-width / 2 + 0.42 + index * 0.34, 1.02, 0.03], material, true, true));
-    }
-    group.add(shelf);
-  }
-
   for (const [x, z, rotation, color] of [
     [-15.62, -6.9, Math.PI * 0.5, 0x75bdff],
     [-15.62, 0.2, Math.PI * 0.5, 0xc798ff],

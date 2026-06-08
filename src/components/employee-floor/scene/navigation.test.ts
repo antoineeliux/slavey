@@ -32,7 +32,7 @@ describe("navigation", () => {
     expect(path.at(-1)?.distanceTo(desk)).toBeLessThan(0.01);
   });
 
-  it("routes between side rooms through hallway areas instead of crossing the center walls", () => {
+  it("routes between side rooms across the open center work area", () => {
     const start = new THREE.Vector3(-14.25, 0, -3.3);
     const destination = new THREE.Vector3(14.25, 0, -3.3);
     const path = createNavigationPath(start, destination);
@@ -41,6 +41,7 @@ describe("navigation", () => {
     expect(areaIds.every(Boolean)).toBe(true);
     expect(areaIds).toContain("left_hall");
     expect(areaIds).toContain("right_hall");
+    expect(areaIds).not.toContain("front_hall");
     expect(path.at(-1)?.distanceTo(destination)).toBeLessThan(0.01);
   });
 
