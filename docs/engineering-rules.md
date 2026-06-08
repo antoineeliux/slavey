@@ -50,6 +50,9 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Handoff apply and abort must require explicit user confirmation, and conflicts must be surfaced rather than auto-resolved.
 - Remote status is read-only until a dedicated push/PR phase; do not auto-push or call hosting APIs from review code.
 - Employee and game UI must use backend employee activity state as the source of truth.
+- `EmployeeActivity.contract` is the canonical employee activity contract. Frontend presentation, floor routing, and actor behavior must consume the contract when an activity record exists.
+- Legacy employee activity fields such as `status`, `behavior`, `terminalState`, `agent`, `label`, and `details` are compatibility and diagnostics data only; they must not override contract-backed visual routing or display state.
+- The no-activity fallback path exists only for first-load safety before an `EmployeeActivity` record arrives.
 - Terminal output must not be parsed for status unless a future explicit structured protocol is added.
 - Frontend raw Tauri `invoke` calls should live in the typed command layer, not directly in panels or store actions.
 - Split large frontend panels before adding new behavior, and avoid mixing visual redesign with infrastructure refactors.
