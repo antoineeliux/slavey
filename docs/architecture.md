@@ -147,6 +147,8 @@ PTY sessions use terminal output only as fallback evidence. The parser recognize
 
 Codex app-server sessions prefer structured JSON-RPC notifications and preserve structured source/confidence through activity contracts.
 
+See [Terminal Evidence Flow](terminal-evidence-flow.md) for the current terminal/Codex evidence audit, state mapping table, event refresh flow, and known risk areas.
+
 ## Workspaces, Files, And Editor
 
 The workspace root is selected in the backend and can be overridden locally with `SLAVEY_WORKSPACE_ROOT`.

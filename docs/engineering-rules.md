@@ -76,6 +76,7 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Keep `README.md` as the short entry point for product scope, setup, validation, safety, docs links, and limitations.
 - Keep `docs/architecture.md` current when backend modules, frontend slices, command boundaries, event flows, persistence, diagnostics, or major runtime flows change.
 - Keep `docs/activity-contract.md` current when `EmployeeActivity`, terminal runtime evidence, contract rules, floor routing, or actor behavior changes.
+- Keep `docs/terminal-evidence-flow.md` current when terminal parsing, Codex app-server evidence, runtime snapshots, terminal events, or activity refresh semantics change.
 - Keep `CONTRIBUTING.md` current when setup, checks, workflow, contribution expectations, or safety boundaries change.
 - Update documentation in the same phase as the behavior change when a change alters contributor expectations or user-visible system behavior.
 - Do not document aspirational behavior as current behavior. Clearly label limitations and future work.
