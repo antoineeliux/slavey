@@ -28,6 +28,7 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 
 ## Backend Safety Principles
 
+- `EmployeeActivity.contract` is the canonical backend-owned activity contract. Changes to employee visual routing or attention state should start in `activity.rs` and `activity_contract.rs`.
 - Do not persist credentials or tokens in JSON state, logs, action records, terminal session metadata, or process logs.
 - Filesystem operations must go through backend validation.
 - Employee worktrees are the preferred execution boundary.
@@ -95,7 +96,7 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 ## Testing Expectations
 
 - Rust tests should cover path safety, process lifecycle, action transitions, git parsing, persistence restore behavior, approval gates, and terminal ownership/session behavior.
-- Terminal parser changes should add or update sanitized cases in the PTY fixture corpus in `src-tauri/src/terminal/session_fixture_tests.rs`.
+- Terminal parser changes should add or update sanitized cases in the PTY fixture corpus and deterministic stress matrix in `src-tauri/src/terminal/session_fixture_tests.rs`.
 - Frontend helper, store, and component tests should cover UI infrastructure before adding visual or game work.
 - Frontend tests should mock Tauri APIs through the typed command boundary and shared test setup, not through scattered ad hoc mocks.
 - Avoid brittle visual snapshot tests for now; prefer state-driven render and smoke tests.

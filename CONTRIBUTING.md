@@ -77,6 +77,7 @@ The pre-commit hook runs Rust formatting checks and TypeScript typecheck. The pr
 - Put state updates in the relevant Zustand slice in `src/store/slices`.
 - Keep E2E mocks behind `src/lib/e2eTauriMock.ts`.
 - Keep UI decisions driven by backend data and explicit disabled reasons.
+- Do not parse raw terminal output in frontend code to infer Codex turn state, prompt readiness, approval waits, active work, stale redraws, or effective profile.
 
 ### Employee Activity
 
@@ -112,6 +113,7 @@ The primary docs are:
 - `README.md`
 - `docs/architecture.md`
 - `docs/activity-contract.md`
+- `docs/terminal-evidence-flow.md`
 - `docs/engineering-rules.md`
 
 ## Security And Safety

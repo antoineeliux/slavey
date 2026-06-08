@@ -147,7 +147,7 @@ PTY sessions use terminal output only as fallback evidence. The parser recognize
 
 Codex app-server sessions prefer structured JSON-RPC notifications and preserve structured source/confidence through activity contracts.
 
-See [Terminal Evidence Flow](terminal-evidence-flow.md) for the current terminal/Codex evidence audit, state mapping table, event refresh flow, and known risk areas.
+See [Terminal Evidence Flow](terminal-evidence-flow.md) for the current terminal/Codex evidence audit, state mapping table, event refresh flow, diagnostics trace, fixture/stress coverage, and known risk areas.
 
 ## Workspaces, Files, And Editor
 
@@ -190,6 +190,8 @@ Diagnostics include:
 - employee activity contract traces.
 - terminal runtime/turn evidence.
 - redacted labels, paths, and messages.
+
+See the diagnostics trace section in [Terminal Evidence Flow](terminal-evidence-flow.md#diagnostics-trace) for how terminal/session evidence, runtime source/confidence, activity state, and the canonical contract are exported together.
 
 ## Persistence
 

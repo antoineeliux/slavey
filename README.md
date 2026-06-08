@@ -113,7 +113,7 @@ Backend filesystem operations validate paths, reject workspace escapes, block se
 
 - [Architecture](docs/architecture.md): module map, data flow, runtime state, persistence, events, diagnostics, and testing strategy.
 - [Employee Activity Contract](docs/activity-contract.md): canonical employee activity semantics and routing rules.
-- [Terminal Evidence Flow](docs/terminal-evidence-flow.md): current terminal, Codex, runtime, and activity evidence flow plus risk areas.
+- [Terminal Evidence Flow](docs/terminal-evidence-flow.md): current terminal, Codex, runtime, activity refresh, diagnostics trace, fixture/stress coverage, and risk areas.
 - [Engineering Rules](docs/engineering-rules.md): standards for safety, validation, module boundaries, and Git workflow.
 - [Contributing](CONTRIBUTING.md): setup, branch workflow, validation, and contribution expectations.
 

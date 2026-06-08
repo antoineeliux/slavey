@@ -272,20 +272,13 @@ Diagnostics continue to exclude raw terminal output, raw process logs, environme
 - Structured app-server evidence is preferred, but shell-launched Codex still relies on PTY fallback and wrapper markers.
 - CWD markers are currently shell-integration dependent. Unsupported shells or failed shell integration can leave `current_cwd` at the start directory even when terminal output and activity continue normally.
 
-The items above are hardening risks to carry into later phases. This document records current behavior and does not imply runtime changes.
+The items above are remaining production risks. This document records current behavior and does not imply runtime changes.
 
-## Next Hardening Phases
+## Remaining Hardening Work
 
-These phases are listed for planning context only. This document does not implement them.
+The terminal/Codex hardening phases described in this document are complete and reflected in the flow, mapping, diagnostics, refresh, fixture, and stress-matrix sections above. Remaining follow-up work should be scoped as new changes rather than presented as incomplete phase work:
 
-Phase 5 structured Codex app-server state sync is reflected in the current app-server flow and state table above. Remaining planned phases:
-
-- Phase 2: Build a terminal transcript fixture corpus and replay harness for PTY parser regressions.
-- Phase 3: Consolidate parser ownership and add backend/frontend parity coverage where local display still mirrors backend logic.
-- Phase 4: Harden event ordering, session update freshness, and activity refresh behavior under rapid terminal output.
-- Phase 6: Activity refresh guarantees and frontend stale-response protection are reflected above.
-- Phase 7: Diagnostics for terminal evidence decisions, runtime source/confidence, and activity contract traces are reflected above.
-- Phase 8: PTY parser stress matrix coverage is reflected above.
-- Later frontend coverage: Add state-driven frontend and browser smoke coverage for critical terminal/activity/floor transitions.
-- Later structured-source hardening: Reduce reliance on PTY fallback for shell-launched Codex where a structured source can be used.
-- Later release validation: Final cleanup and release-readiness pass for terminal/Codex hardening.
+- Add broader sanitized transcript replay cases when new PTY edge cases are found in production.
+- Add state-driven browser smoke coverage for terminal/activity/floor transitions once it can stay stable and cheap.
+- Reduce reliance on PTY fallback for shell-launched Codex where a stronger structured source or wrapper protocol can be used.
+- Split large frontend chunks in a separate performance pass instead of hiding build warnings.
