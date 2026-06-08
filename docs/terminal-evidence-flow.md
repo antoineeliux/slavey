@@ -10,7 +10,7 @@ The preferred path is the Codex app-server path. It uses structured JSON-RPC res
 
 The fallback path is PTY parsing. Shell sessions and direct Codex terminal sessions stream terminal bytes through a PTY reader. Slavey strips its own control markers, stores bounded terminal metadata, and parses bounded output tails for strong Codex signals such as prompt-ready output, approval prompts, and active working output. PTY parsing is fallback evidence because terminal output is not a stable protocol.
 
-`EmployeeActivity.contract` remains the canonical employee state for the frontend. The floor, employee labels, attention state, and routing should consume the backend activity contract, not terminal text. Legacy activity fields and frontend terminal prompt parsing exist for compatibility, diagnostics, and local terminal display.
+`EmployeeActivity.contract` remains the canonical employee state for the frontend. The floor, employee labels, attention state, and routing should consume the backend activity contract, not terminal text. Legacy activity fields exist for compatibility and diagnostics. The frontend keeps bounded terminal buffers fresh and interprets backend session records for presentation fallback, but it does not parse raw terminal output to infer Codex turn state.
 
 ## Backend Evidence Sources
 
@@ -202,9 +202,9 @@ For app-server sessions, activity state is driven by structured `AgentRuntimeSto
 
 The backend emits three important event families for terminal evidence.
 
-`terminal:data` carries visible terminal output. The frontend appends it to bounded terminal buffers. `terminalSlice` also mirrors some prompt parsing locally so terminal session display can react before the next session list reload. This frontend parsing is not the source of truth for employee activity.
+`terminal:data` carries visible terminal output. The frontend appends it to bounded terminal buffers and may refresh display-only output freshness metadata. It does not parse raw terminal output for Codex prompt readiness, submitted prompts, active work, approval prompts, stale redraws, or effective Codex profile.
 
-`terminal:session-updated` carries a full `TerminalSessionRecord`. The frontend upserts it into `terminalSessions`. On the backend, emitting this event also emits `employee:activity-updated` for the same employee.
+`terminal:session-updated` carries a full `TerminalSessionRecord`. The frontend upserts it into `terminalSessions`; this backend record is authoritative for terminal turn state, prompt timestamps, approval timestamps, runtime, and effective profile. On the backend, emitting this event also emits `employee:activity-updated` for the same employee.
 
 `employee:activity-updated` tells the frontend to refresh canonical activity. In `bootstrapSlice.ts`, the frontend calls `employee_activity_get` for the affected employee, or reloads all activities when no employee id is provided.
 
@@ -220,7 +220,7 @@ The floor must not infer employee state directly from terminal text because term
 
 - PTY output is not a stable protocol. Codex UI text, prompt glyphs, progress wording, and redraw behavior can change outside Slavey's control.
 - Redraws, ANSI/control sequences, carriage returns, and split chunks can create edge cases. The parser handles known stale redraws and split Slavey control markers, but the corpus is not complete.
-- Frontend terminal state still mirrors some Codex prompt parsing for local terminal display. Backend activity refresh remains canonical, but frontend display can briefly disagree with backend state if event timing differs.
+- Frontend terminal buffers may update before the matching `terminal:session-updated` record arrives. During that gap, terminal text can be fresher than terminal session turn metadata, but backend session records remain authoritative for Codex state.
 - The fixture corpus is not complete yet. Existing tests cover important prompt-ready, approval, active-work, owner-draft, app-server, and stale-redraw cases, but they are not a broad transcript replay suite.
 - Structured app-server evidence is preferred, but shell-launched Codex still relies on PTY fallback and wrapper markers.
 - App-server notifications update `AgentRuntimeStore` and activity directly, but most notifications do not rewrite `TerminalSessionRecord.turnState`. Activity can still be correct through the structured runtime snapshot, while terminal-session display may lag or show the submission state until another session update arrives.

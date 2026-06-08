@@ -53,6 +53,7 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - `EmployeeActivity.contract` is the canonical employee activity contract. Frontend presentation, floor routing, and actor behavior must consume the contract when an activity record exists.
 - Legacy employee activity fields such as `status`, `behavior`, `terminalState`, `agent`, `label`, and `details` are compatibility and diagnostics data only; they must not override contract-backed visual routing or display state.
 - The no-activity fallback path exists only for first-load safety before an `EmployeeActivity` record arrives.
+- Frontend code must not parse raw terminal output to infer Codex turn state, prompt readiness, approval waits, active work, stale redraws, or effective profile. Use backend `TerminalSessionRecord` updates and `EmployeeActivity.contract`.
 - Terminal output parsing is allowed only as bounded PTY fallback evidence in the terminal session/runtime modules. Prefer structured Codex app-server evidence whenever available, and cover parser changes with regression tests.
 - Frontend raw Tauri `invoke` calls should live in the typed command layer, not directly in panels or store actions.
 - Split large frontend panels before adding new behavior, and avoid mixing visual redesign with infrastructure refactors.

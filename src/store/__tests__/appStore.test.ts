@@ -111,89 +111,10 @@ describe("app store smoke behavior", () => {
     expect(buffers["session-2"]).toBeUndefined();
   });
 
-  it("keeps Codex prompt-waiting sessions queued through control-only terminal redraw output", async () => {
+  it("appends raw terminal output without deriving Codex turn state or prompt timestamps", async () => {
     const staleOutputAt = Date.now() - 20_000;
-    act(() => {
-      useAppStore.setState({
-        employees: [employee({ terminalSessionId: "codex-session" })],
-        terminalSessions: [
-          terminalSession({
-            lastOutputAt: staleOutputAt,
-            lastPromptReadyAt: staleOutputAt + 1,
-          }),
-        ],
-        settings: { ...DEFAULT_SETTINGS, maxTerminalBufferChars: 50 },
-      });
-      useAppStore.getState().appendTerminalData({
-        employeeId: "employee-1",
-        sessionId: "codex-session",
-        data: "\x1b[?25l\x1b[2K\r",
-      });
-    });
-    await flushTerminalDataBatch();
-
-    expect(useAppStore.getState().terminalSessions[0]?.lastOutputAt).toBe(staleOutputAt);
-
-    act(() => {
-      useAppStore.setState({
-        terminalSessions: [
-          terminalSession({
-            lastOutputAt: staleOutputAt,
-            lastPromptSubmittedAt: staleOutputAt + 1,
-          }),
-        ],
-      });
-      useAppStore.getState().appendTerminalData({
-        employeeId: "employee-1",
-        sessionId: "codex-session",
-        data: "agent output",
-      });
-    });
-    await flushTerminalDataBatch();
-
-    expect(useAppStore.getState().terminalSessions[0]?.lastOutputAt).toBeGreaterThan(staleOutputAt);
-  });
-
-  it("keeps Codex prompt-waiting state while owner draft input is echoed", async () => {
-    const staleOutputAt = Date.now() - 20_000;
-    act(() => {
-      useAppStore.setState({
-        employees: [employee({ terminalSessionId: "codex-session" })],
-        terminalSessions: [
-          terminalSession({
-            lastOutputAt: staleOutputAt,
-            lastPromptReadyAt: staleOutputAt + 1,
-            turnState: "owner_prompt_ready",
-          }),
-        ],
-        settings: { ...DEFAULT_SETTINGS, maxTerminalBufferChars: 250 },
-      });
-    });
-
-    await act(async () => {
-      await useAppStore
-        .getState()
-        .writeTerminal("employee-1", "codex-session", "Improve documentation");
-    });
-
-    expect(useAppStore.getState().terminalSessions[0]?.turnState).toBe("owner_composing");
-
-    act(() => {
-      useAppStore.getState().appendTerminalData({
-        employeeId: "employee-1",
-        sessionId: "codex-session",
-        data: "Improve documentation",
-      });
-    });
-    await flushTerminalDataBatch();
-
-    expect(useAppStore.getState().terminalSessions[0]?.lastOutputAt).toBe(staleOutputAt);
-    expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBe(staleOutputAt + 1);
-    expect(useAppStore.getState().terminalSessions[0]?.turnState).toBe("owner_composing");
-  });
-
-  it("recovers shell-launched Codex owner prompt state when working output arrives", async () => {
-    const staleOutputAt = Date.now() - 20_000;
+    const rawCodexSignals =
+      "\r\n› Implement feature\r\nAllow command to run?\n› Yes / No\r\n• Working (2s • esc to interrupt)";
     act(() => {
       useAppStore.setState({
         employees: [employee({ terminalSessionId: "shell-session" })],
@@ -201,12 +122,12 @@ describe("app store smoke behavior", () => {
           terminalSession({
             sessionId: "shell-session",
             profile: "shell",
-            activeProfile: "codex",
+            activeProfile: "shell",
             lastOutputAt: staleOutputAt,
-            lastPromptReadyAt: staleOutputAt + 1,
             lastPromptSubmittedAt: null,
+            lastPromptReadyAt: null,
             lastApprovalPromptAt: null,
-            turnState: "owner_composing",
+            turnState: "shell",
           }),
         ],
         settings: { ...DEFAULT_SETTINGS, maxTerminalBufferChars: 250 },
@@ -214,266 +135,144 @@ describe("app store smoke behavior", () => {
       useAppStore.getState().appendTerminalData({
         employeeId: "employee-1",
         sessionId: "shell-session",
-        data: "\r\n› Implement feature\r\n\r\n• Working (2s • esc to interrupt)",
+        data: rawCodexSignals,
       });
     });
     await flushTerminalDataBatch();
 
+    expect(useAppStore.getState().terminalBuffers["shell-session"]).toContain(rawCodexSignals);
     expect(useAppStore.getState().terminalSessions[0]).toMatchObject({
       profile: "shell",
+      activeProfile: "shell",
+      lastPromptSubmittedAt: null,
+      lastPromptReadyAt: null,
+      lastApprovalPromptAt: null,
+      turnState: "shell",
+    });
+    expect(useAppStore.getState().terminalSessions[0]?.lastOutputAt).toBeGreaterThan(staleOutputAt);
+  });
+
+  it("uses backend terminal session updates for Codex turn state and prompt timestamps", async () => {
+    const backendSession = terminalSession({
       activeProfile: "codex",
+      lastPromptSubmittedAt: 1_000,
+      lastPromptReadyAt: null,
+      lastApprovalPromptAt: 2_000,
+      turnState: "waiting_approval",
+    });
+    const handlers: Record<string, CapturedTauriEventHandler> = {};
+    (mockTauriListen as unknown as ListenMock).mockImplementation(async (eventName, handler) => {
+      handlers[eventName] = handler;
+      return () => undefined;
+    });
+
+    await useAppStore.getState().connectEvents();
+
+    act(() => {
+      handlers["terminal:session-updated"]?.({
+        payload: { session: backendSession },
+      });
+    });
+
+    expect(useAppStore.getState().terminalSessions[0]).toMatchObject({
+      sessionId: "codex-session",
+      activeProfile: "codex",
+      lastPromptSubmittedAt: 1_000,
+      lastPromptReadyAt: null,
+      lastApprovalPromptAt: 2_000,
+      turnState: "waiting_approval",
+    });
+  });
+
+  it("loads backend terminal sessions without preserving stale local prompt fields", async () => {
+    const staleSession = terminalSession({
+      lastPromptSubmittedAt: 100,
+      lastPromptReadyAt: 200,
+      lastApprovalPromptAt: 300,
+      turnState: "owner_prompt_ready",
+    });
+    const backendSession = terminalSession({
+      lastPromptSubmittedAt: 1_000,
       lastPromptReadyAt: null,
       lastApprovalPromptAt: null,
       turnState: "agent_working",
     });
-    expect(useAppStore.getState().terminalSessions[0]?.lastOutputAt).toBeGreaterThan(staleOutputAt);
-    expect(useAppStore.getState().terminalSessions[0]?.lastPromptSubmittedAt).toBeGreaterThan(staleOutputAt);
-  });
+    (mockTauriInvoke as InvokeMock).mockImplementation(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command === "terminal_session_list") {
+          expect(args).toEqual({ employeeId: "employee-1" });
+          return [backendSession];
+        }
+        return null;
+      },
+    );
 
-  it("marks Codex agent-working state when generation output arrives after submission", async () => {
-    const staleOutputAt = Date.now() - 20_000;
     act(() => {
       useAppStore.setState({
-        employees: [employee({ terminalSessionId: "codex-session" })],
-        terminalSessions: [
-          terminalSession({
-            lastOutputAt: staleOutputAt,
-            lastPromptSubmittedAt: staleOutputAt + 1,
-            turnState: "prompt_submitted",
-          }),
-        ],
-        settings: { ...DEFAULT_SETTINGS, maxTerminalBufferChars: 250 },
-      });
-      useAppStore.getState().appendTerminalData({
-        employeeId: "employee-1",
-        sessionId: "codex-session",
-        data: "I will inspect the project now.",
+        terminalSessions: [staleSession],
       });
     });
-    await flushTerminalDataBatch();
 
-    expect(useAppStore.getState().terminalSessions[0]?.lastOutputAt).toBeGreaterThan(staleOutputAt);
-    expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBeNull();
-    expect(useAppStore.getState().terminalSessions[0]?.turnState).toBe("agent_working");
+    await act(async () => {
+      await useAppStore.getState().loadTerminalSessions("employee-1");
+    });
+
+    expect(useAppStore.getState().terminalSessions).toEqual([backendSession]);
   });
 
-  it("recovers Codex agent-working state from active status output after startup", async () => {
-    const staleOutputAt = Date.now() - 20_000;
-    act(() => {
-      useAppStore.setState({
-        employees: [employee({ terminalSessionId: "codex-session" })],
-        terminalSessions: [
-          terminalSession({
-            lastOutputAt: staleOutputAt,
-            lastPromptSubmittedAt: null,
-            turnState: "codex_starting",
-          }),
-        ],
-        settings: { ...DEFAULT_SETTINGS, maxTerminalBufferChars: 250 },
-      });
-      useAppStore.getState().appendTerminalData({
-        employeeId: "employee-1",
-        sessionId: "codex-session",
-        data: "\r\n• Working (10s • esc to interrupt)",
-      });
-    });
-    await flushTerminalDataBatch();
-
-    expect(useAppStore.getState().terminalSessions[0]?.lastOutputAt).toBeGreaterThan(staleOutputAt);
-    expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBeNull();
-    expect(useAppStore.getState().terminalSessions[0]?.turnState).toBe("agent_working");
-  });
-
-  it("marks Codex sessions prompt-ready when the prompt returns", async () => {
-    act(() => {
-      useAppStore.setState({
-        employees: [employee({ terminalSessionId: "codex-session" })],
-        terminalSessions: [
-          terminalSession({
-            lastOutputAt: Date.now(),
-            lastPromptSubmittedAt: Date.now() - 1_000,
-          }),
-        ],
-        settings: { ...DEFAULT_SETTINGS, maxTerminalBufferChars: 250 },
-      });
-      useAppStore.getState().appendTerminalData({
-        employeeId: "employee-1",
-        sessionId: "codex-session",
-        data: "\r\n› ",
-      });
-    });
-    await flushTerminalDataBatch();
-
-    expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBeGreaterThan(0);
-  });
-
-  it("marks Codex sessions prompt-ready when a final redraw contains stale working text", async () => {
-    act(() => {
-      useAppStore.setState({
-        employees: [employee({ terminalSessionId: "codex-session" })],
-        terminalSessions: [
-          terminalSession({
-            activeProfile: "codex",
-            lastOutputAt: Date.now(),
-            lastPromptSubmittedAt: Date.now() - 1_000,
-            lastPromptReadyAt: null,
-            lastApprovalPromptAt: null,
-            turnState: "agent_working",
-          }),
-        ],
-        settings: { ...DEFAULT_SETTINGS, maxTerminalBufferChars: 250 },
-      });
-      useAppStore.getState().appendTerminalData({
-        employeeId: "employee-1",
-        sessionId: "codex-session",
-        data: "\x1b[2K\r• Working (10s • esc to interrupt)\r\nDone.\r\n› ",
-      });
-    });
-    await flushTerminalDataBatch();
-
-    expect(useAppStore.getState().terminalSessions[0]).toMatchObject({
+  it("does not optimistically parse terminal writes into Codex turn state", async () => {
+    const initialSession = terminalSession({
       activeProfile: "codex",
+      lastOutputAt: 1_000,
+      lastPromptSubmittedAt: null,
+      lastPromptReadyAt: 1_500,
       lastApprovalPromptAt: null,
       turnState: "owner_prompt_ready",
     });
-    expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBeGreaterThan(0);
-  });
+    (mockTauriInvoke as InvokeMock).mockImplementation(
+      async (command: string) => (command === "terminal_write" ? null : null),
+    );
+    const handlers: Record<string, CapturedTauriEventHandler> = {};
+    (mockTauriListen as unknown as ListenMock).mockImplementation(async (eventName, handler) => {
+      handlers[eventName] = handler;
+      return () => undefined;
+    });
 
-  it("detects Codex prompts inside shell-launched sessions", async () => {
     act(() => {
       useAppStore.setState({
-        employees: [employee({ terminalSessionId: "shell-session" })],
-        terminalSessions: [
-          terminalSession({
-            sessionId: "shell-session",
-            profile: "shell",
-            activeProfile: "shell",
-            lastOutputAt: Date.now(),
-          }),
-        ],
-        settings: { ...DEFAULT_SETTINGS, maxTerminalBufferChars: 250 },
-      });
-      useAppStore.getState().appendTerminalData({
-        employeeId: "employee-1",
-        sessionId: "shell-session",
-        data: "\r\n› ",
+        terminalSessions: [initialSession],
       });
     });
-    await flushTerminalDataBatch();
-
-    expect(useAppStore.getState().terminalSessions[0]?.profile).toBe("shell");
-    expect(useAppStore.getState().terminalSessions[0]?.activeProfile).toBe("codex");
-    expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBeGreaterThan(0);
-  });
-
-  it("marks Codex sessions approval-ready when terminal approval prompts appear", async () => {
-    act(() => {
-      useAppStore.setState({
-        employees: [employee({ terminalSessionId: "codex-session" })],
-        terminalSessions: [
-          terminalSession({
-            lastOutputAt: Date.now(),
-            lastPromptSubmittedAt: Date.now() - 1_000,
-          }),
-        ],
-        settings: { ...DEFAULT_SETTINGS, maxTerminalBufferChars: 250 },
-      });
-      useAppStore.getState().appendTerminalData({
-        employeeId: "employee-1",
-        sessionId: "codex-session",
-        data: "Allow command to run?\n› Yes / No",
-      });
-    });
-    await flushTerminalDataBatch();
-
-    expect(useAppStore.getState().terminalSessions[0]?.lastApprovalPromptAt).toBeGreaterThan(0);
-    expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBeNull();
-  });
-
-  it("detects terminal approval prompts split across terminal data batches", async () => {
-    act(() => {
-      useAppStore.setState({
-        employees: [employee({ terminalSessionId: "codex-session" })],
-        terminalSessions: [
-          terminalSession({
-            lastOutputAt: Date.now(),
-            lastPromptSubmittedAt: Date.now() - 1_000,
-          }),
-        ],
-        settings: { ...DEFAULT_SETTINGS, maxTerminalBufferChars: 250 },
-      });
-      useAppStore.getState().appendTerminalData({
-        employeeId: "employee-1",
-        sessionId: "codex-session",
-        data: "Allow ",
-      });
-    });
-    await flushTerminalDataBatch();
-
-    expect(useAppStore.getState().terminalSessions[0]?.lastApprovalPromptAt).toBeNull();
-
-    act(() => {
-      useAppStore.getState().appendTerminalData({
-        employeeId: "employee-1",
-        sessionId: "codex-session",
-        data: "command to run?\n› Yes / No",
-      });
-    });
-    await flushTerminalDataBatch();
-
-    expect(useAppStore.getState().terminalSessions[0]?.lastApprovalPromptAt).toBeGreaterThan(0);
-    expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBeNull();
-  });
-
-  it("tracks submitted Codex prompts without treating every terminal write as output", async () => {
-    act(() => {
-      useAppStore.setState({
-        terminalSessions: [terminalSession({ lastOutputAt: 1_000 })],
-      });
-    });
+    await useAppStore.getState().connectEvents();
 
     await act(async () => {
-      await useAppStore.getState().writeTerminal("employee-1", "codex-session", "draft text");
+      await useAppStore
+        .getState()
+        .writeTerminal("employee-1", "codex-session", "Improve documentation\r");
     });
 
-    expect(useAppStore.getState().terminalSessions[0]?.lastOutputAt).toBe(1_000);
-    expect(useAppStore.getState().terminalSessions[0]?.lastPromptSubmittedAt).toBeUndefined();
-
-    await act(async () => {
-      await useAppStore.getState().writeTerminal("employee-1", "codex-session", "\r");
+    expect(mockTauriInvoke).toHaveBeenCalledWith("terminal_write", {
+      employeeId: "employee-1",
+      sessionId: "codex-session",
+      input: "Improve documentation\r",
     });
+    expect(useAppStore.getState().terminalSessions[0]).toEqual(initialSession);
 
-    expect(useAppStore.getState().terminalSessions[0]?.lastOutputAt).toBe(1_000);
-    expect(useAppStore.getState().terminalSessions[0]?.lastPromptSubmittedAt).toBeGreaterThan(1_000);
-    expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBeNull();
-    expect(useAppStore.getState().terminalSessions[0]?.lastApprovalPromptAt).toBeNull();
-  });
-
-  it("tracks submitted Codex prompts when a shell session is visibly at a Codex prompt", async () => {
+    const backendSession = terminalSession({
+      activeProfile: "codex",
+      lastOutputAt: 1_000,
+      lastPromptSubmittedAt: 2_000,
+      lastPromptReadyAt: null,
+      lastApprovalPromptAt: null,
+      turnState: "prompt_submitted",
+    });
     act(() => {
-      useAppStore.setState({
-        terminalBuffers: {
-          "shell-session": "shell output\n› Explain this codebase",
-        },
-        terminalSessions: [
-          terminalSession({
-            sessionId: "shell-session",
-            profile: "shell",
-            activeProfile: "shell",
-            lastOutputAt: 1_000,
-          }),
-        ],
+      handlers["terminal:session-updated"]?.({
+        payload: { session: backendSession },
       });
     });
 
-    await act(async () => {
-      await useAppStore.getState().writeTerminal("employee-1", "shell-session", "\r");
-    });
-
-    expect(useAppStore.getState().terminalSessions[0]?.profile).toBe("shell");
-    expect(useAppStore.getState().terminalSessions[0]?.activeProfile).toBe("codex");
-    expect(useAppStore.getState().terminalSessions[0]?.lastPromptSubmittedAt).toBeGreaterThan(1_000);
-    expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBeNull();
+    expect(useAppStore.getState().terminalSessions[0]).toEqual(backendSession);
   });
 
   it("uploads terminal images and writes a quoted path into the PTY", async () => {
@@ -578,30 +377,6 @@ describe("app store smoke behavior", () => {
       sessionId: "shell-session",
       input: "'/workspace/.slavey/terminal-images/dropped-screen.png' ",
     });
-  });
-
-  it("tracks prompt submission for sessions already marked prompt-ready", async () => {
-    act(() => {
-      useAppStore.setState({
-        terminalSessions: [
-          terminalSession({
-            sessionId: "shell-session",
-            profile: "shell",
-            activeProfile: "shell",
-            lastOutputAt: 1_000,
-            lastPromptReadyAt: 1_500,
-          }),
-        ],
-      });
-    });
-
-    await act(async () => {
-      await useAppStore.getState().writeTerminal("employee-1", "shell-session", "\r");
-    });
-
-    expect(useAppStore.getState().terminalSessions[0]?.activeProfile).toBe("codex");
-    expect(useAppStore.getState().terminalSessions[0]?.lastPromptSubmittedAt).toBeGreaterThan(1_500);
-    expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBeNull();
   });
 
   it("returns the selected employee from store state", () => {
