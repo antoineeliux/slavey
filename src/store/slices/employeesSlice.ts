@@ -23,6 +23,10 @@ type EmployeesSlice = Pick<
   | "upsertEmployee"
 >;
 
+let activityRefreshSequence = 0;
+let latestActivityListRequest = 0;
+const latestEmployeeActivityRequest = new Map<string, number>();
+
 export const createEmployeesSlice: AppStoreSlice<EmployeesSlice> = (set, get) => ({
   employees: [],
   employeeActivities: {},
@@ -34,17 +38,42 @@ export const createEmployeesSlice: AppStoreSlice<EmployeesSlice> = (set, get) =>
   },
 
   loadEmployeeActivities: async () => {
+    const requestId = ++activityRefreshSequence;
+    latestActivityListRequest = requestId;
     try {
       const activities = await commands.employeeActivityList();
-      set({ employeeActivities: activitiesByEmployee(activities) });
+      if (latestActivityListRequest !== requestId) {
+        return;
+      }
+      const nextActivities = activitiesByEmployee(activities);
+      set((state) => {
+        const employeeActivities = { ...nextActivities };
+        for (const [employeeId, activity] of Object.entries(state.employeeActivities)) {
+          if ((latestEmployeeActivityRequest.get(employeeId) ?? 0) > requestId) {
+            employeeActivities[employeeId] = activity;
+          }
+        }
+        return { employeeActivities };
+      });
     } catch (error) {
+      if (latestActivityListRequest !== requestId) {
+        return;
+      }
       get().addLog(localLog("warn", `employee activity failed: ${formatError(error)}`));
     }
   },
 
   refreshEmployeeActivity: async (employeeId) => {
+    const requestId = ++activityRefreshSequence;
+    latestEmployeeActivityRequest.set(employeeId, requestId);
     try {
       const activity = await commands.employeeActivityGet(employeeId);
+      if (
+        latestEmployeeActivityRequest.get(employeeId) !== requestId ||
+        latestActivityListRequest > requestId
+      ) {
+        return;
+      }
       set((state) => ({
         employeeActivities: {
           ...state.employeeActivities,
@@ -52,6 +81,12 @@ export const createEmployeesSlice: AppStoreSlice<EmployeesSlice> = (set, get) =>
         },
       }));
     } catch {
+      if (
+        latestEmployeeActivityRequest.get(employeeId) !== requestId ||
+        latestActivityListRequest > requestId
+      ) {
+        return;
+      }
       set((state) => {
         const { [employeeId]: _removed, ...employeeActivities } = state.employeeActivities;
         return { employeeActivities };

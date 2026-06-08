@@ -521,6 +521,274 @@ describe("app store smoke behavior", () => {
     expect(model.worksAtDesk).toBe(true);
   });
 
+  it("only lets the latest rapid employee activity event update the store", async () => {
+    const staleActivity = deferred<EmployeeActivity>();
+    const freshActivity = deferred<EmployeeActivity>();
+    const handlers: Record<string, CapturedTauriEventHandler> = {};
+    let getCalls = 0;
+    (mockTauriListen as unknown as ListenMock).mockImplementation(async (eventName, handler) => {
+      handlers[eventName] = handler;
+      return () => undefined;
+    });
+    (mockTauriInvoke as InvokeMock).mockImplementation(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command === "employee_activity_get") {
+          expect(args).toEqual({ employeeId: "employee-1" });
+          getCalls += 1;
+          return getCalls === 1 ? staleActivity.promise : freshActivity.promise;
+        }
+        return null;
+      },
+    );
+
+    act(() => {
+      useAppStore.setState({
+        employees: [employee()],
+        selectedEmployeeId: "employee-1",
+      });
+    });
+    await useAppStore.getState().connectEvents();
+
+    act(() => {
+      handlers["employee:activity-updated"]?.({
+        payload: { employeeId: "employee-1" },
+      });
+      handlers["employee:activity-updated"]?.({
+        payload: { employeeId: "employee-1" },
+      });
+    });
+    expect(getCalls).toBe(2);
+
+    await act(async () => {
+      freshActivity.resolve(codexWaitingInstructionActivity("employee-1"));
+      await freshActivity.promise;
+    });
+    await waitFor(() => {
+      expect(useAppStore.getState().employeeActivities["employee-1"]?.status).toBe(
+        "codex_waiting_instruction",
+      );
+    });
+
+    await act(async () => {
+      staleActivity.resolve(codexDeskWorkingActivity("employee-1"));
+      await staleActivity.promise;
+    });
+
+    expect(useAppStore.getState().employeeActivities["employee-1"]?.status).toBe(
+      "codex_waiting_instruction",
+    );
+  });
+
+  it("prevents a slower stale employee activity response from overwriting a newer one", async () => {
+    const staleActivity = deferred<EmployeeActivity>();
+    const freshActivity = deferred<EmployeeActivity>();
+    let getCalls = 0;
+    (mockTauriInvoke as InvokeMock).mockImplementation(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command === "employee_activity_get") {
+          expect(args).toEqual({ employeeId: "employee-1" });
+          getCalls += 1;
+          return getCalls === 1 ? staleActivity.promise : freshActivity.promise;
+        }
+        return null;
+      },
+    );
+
+    await act(async () => {
+      void useAppStore.getState().refreshEmployeeActivity("employee-1");
+      void useAppStore.getState().refreshEmployeeActivity("employee-1");
+    });
+    expect(getCalls).toBe(2);
+
+    await act(async () => {
+      freshActivity.resolve(codexDeskWorkingActivity("employee-1", { lastActivityAt: 2_000 }));
+      await freshActivity.promise;
+    });
+    await waitFor(() => {
+      expect(useAppStore.getState().employeeActivities["employee-1"]?.lastActivityAt).toBe(2_000);
+    });
+
+    await act(async () => {
+      staleActivity.resolve(codexWaitingInstructionActivity("employee-1", { lastActivityAt: 1_000 }));
+      await staleActivity.promise;
+    });
+
+    expect(useAppStore.getState().employeeActivities["employee-1"]?.lastActivityAt).toBe(2_000);
+    expect(useAppStore.getState().employeeActivities["employee-1"]?.status).toBe("codex_running");
+  });
+
+  it("reloads all employee activities from a global activity update", async () => {
+    const handlers: Record<string, CapturedTauriEventHandler> = {};
+    (mockTauriListen as unknown as ListenMock).mockImplementation(async (eventName, handler) => {
+      handlers[eventName] = handler;
+      return () => undefined;
+    });
+    (mockTauriInvoke as InvokeMock).mockImplementation(
+      async (command: string) => {
+        if (command === "employee_activity_list") {
+          return [
+            codexDeskWorkingActivity("employee-1"),
+            codexWaitingInstructionActivity("employee-2"),
+          ];
+        }
+        return null;
+      },
+    );
+
+    await useAppStore.getState().connectEvents();
+
+    act(() => {
+      handlers["employee:activity-updated"]?.({
+        payload: { employeeId: null },
+      });
+    });
+
+    await waitFor(() => {
+      expect(Object.keys(useAppStore.getState().employeeActivities)).toEqual([
+        "employee-1",
+        "employee-2",
+      ]);
+    });
+    expect(useAppStore.getState().employeeActivities["employee-2"]?.status).toBe(
+      "codex_waiting_instruction",
+    );
+  });
+
+  it("applies terminal session updates before refreshing floor activity from backend contract", async () => {
+    const workingSession = codexAppServerWorkingSession({
+      sessionId: "ordered-session",
+      turnState: "agent_working",
+    });
+    const activity = deferred<EmployeeActivity>();
+    const handlers: Record<string, CapturedTauriEventHandler> = {};
+    (mockTauriListen as unknown as ListenMock).mockImplementation(async (eventName, handler) => {
+      handlers[eventName] = handler;
+      return () => undefined;
+    });
+    (mockTauriInvoke as InvokeMock).mockImplementation(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command === "employee_activity_get") {
+          expect(args).toEqual({ employeeId: "employee-1" });
+          return activity.promise;
+        }
+        return null;
+      },
+    );
+    act(() => {
+      useAppStore.setState({
+        employees: [employee({ terminalSessionId: workingSession.sessionId })],
+        selectedEmployeeId: "employee-1",
+      });
+    });
+    await useAppStore.getState().connectEvents();
+
+    act(() => {
+      handlers["terminal:session-updated"]?.({
+        payload: { session: workingSession },
+      });
+    });
+
+    expect(useAppStore.getState().terminalSessions[0]).toMatchObject({
+      sessionId: "ordered-session",
+      turnState: "agent_working",
+    });
+    expect(useAppStore.getState().employeeActivities["employee-1"]).toBeUndefined();
+
+    act(() => {
+      handlers["employee:activity-updated"]?.({
+        payload: { employeeId: "employee-1" },
+      });
+    });
+    await act(async () => {
+      activity.resolve(codexDeskWorkingActivity("employee-1"));
+      await activity.promise;
+    });
+
+    const { presentation, model } = floorModelFromStore("employee-1");
+    expect(presentation.state).toBe("codex_running");
+    expect(model.zone).toBe("desk");
+    expect(model.worksAtDesk).toBe(true);
+  });
+
+  it("keeps app-server-shaped terminal text non-authoritative until backend session and activity arrive", async () => {
+    const session = codexAppServerWorkingSession({
+      sessionId: "codex-output-session",
+      turnState: "agent_working",
+    });
+    const readySession = codexAppServerWorkingSession({
+      sessionId: "codex-output-session",
+      turnState: "owner_prompt_ready",
+      lastPromptReadyAt: 2_000,
+      lastPromptSubmittedAt: 1_000,
+    });
+    const handlers: Record<string, CapturedTauriEventHandler> = {};
+    (mockTauriListen as unknown as ListenMock).mockImplementation(async (eventName, handler) => {
+      handlers[eventName] = handler;
+      return () => undefined;
+    });
+    (mockTauriInvoke as InvokeMock).mockImplementation(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command === "employee_activity_get") {
+          expect(args).toEqual({ employeeId: "employee-1" });
+          return codexWaitingInstructionActivity("employee-1", {
+            activeTerminalSessionId: "codex-output-session",
+          });
+        }
+        return null;
+      },
+    );
+
+    act(() => {
+      useAppStore.setState({
+        employees: [employee({ terminalSessionId: session.sessionId })],
+        terminalSessions: [session],
+        selectedEmployeeId: "employee-1",
+        settings: { ...DEFAULT_SETTINGS, maxTerminalBufferChars: 250 },
+      });
+    });
+    await useAppStore.getState().connectEvents();
+
+    act(() => {
+      handlers["terminal:data"]?.({
+        payload: {
+          employeeId: "employee-1",
+          sessionId: session.sessionId,
+          data: "\r\n[Codex] Waiting for next instruction.\r\n› ",
+        },
+      });
+    });
+    await flushTerminalDataBatch();
+
+    expect(useAppStore.getState().terminalSessions[0]).toMatchObject({
+      runtime: "codex_app_server",
+      turnState: "agent_working",
+    });
+    expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBeUndefined();
+
+    act(() => {
+      handlers["terminal:session-updated"]?.({
+        payload: { session: readySession },
+      });
+      handlers["employee:activity-updated"]?.({
+        payload: { employeeId: "employee-1" },
+      });
+    });
+
+    await waitFor(() => {
+      expect(useAppStore.getState().employeeActivities["employee-1"]?.status).toBe(
+        "codex_waiting_instruction",
+      );
+    });
+    expect(useAppStore.getState().terminalSessions[0]).toMatchObject({
+      turnState: "owner_prompt_ready",
+      lastPromptReadyAt: 2_000,
+    });
+    expect(
+      useAppStore.getState().employeeActivities["employee-1"]?.contract.render.placement,
+    ).toBe("owner_office");
+    expect(floorModelFromStore("employee-1").model.zone).toBe("executive_office");
+  });
+
   it("bootstrap starts on office when the user has not changed tabs", async () => {
     mockBootstrapCommands({ activeTab: "editor" });
 
@@ -656,6 +924,51 @@ function codexDeskWorkingActivity(
     label: "Codex running",
     details: "Working on task",
     lastActivityAt: 1_000,
+    activeTerminalSessionId: null,
+    activeActionId: null,
+    activeProcessIds: [],
+    reviewCounts: {
+      changedFiles: 0,
+      stagedFiles: 0,
+      untrackedFiles: 0,
+    },
+    blockers: [],
+    ...overrides,
+  };
+}
+
+function codexWaitingInstructionActivity(
+  employeeId: string,
+  overrides: Partial<EmployeeActivity> = {},
+): EmployeeActivity {
+  return {
+    employeeId,
+    status: "codex_waiting_instruction",
+    contract: {
+      lifecycle: "active",
+      work: {
+        kind: "codex",
+        phase: "waiting_owner",
+        turnOwner: "owner",
+      },
+      render: {
+        placement: "owner_office",
+        posture: "standing",
+        activity: "waiting_instruction",
+      },
+      attention: {
+        required: true,
+        reason: "needs_instruction",
+        priority: "normal",
+      },
+      source: {
+        runtime: "codex_app_server",
+        confidence: "structured",
+      },
+    },
+    label: "Awaiting prompt",
+    details: "Waiting for owner instruction",
+    lastActivityAt: 2_000,
     activeTerminalSessionId: null,
     activeActionId: null,
     activeProcessIds: [],

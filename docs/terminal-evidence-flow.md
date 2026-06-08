@@ -222,11 +222,26 @@ The floor must not infer employee state directly from terminal text because term
 4. `employeeActivityContractView.ts` maps the contract to presentation state, detail, attention, and floor intent.
 5. `employeeFloorViewModel.ts` maps floor intent into desk, owner office, done room, standby, or offline zones.
 
+### Activity Refresh Guarantees
+
+Backend mutation paths that can affect `EmployeeActivity.contract` should emit `employee:activity-updated` directly or through a state-specific helper:
+
+- `emit_terminal_session_updated` emits `terminal:session-updated` and then `employee:activity-updated` for the session owner.
+- `emit_employee_updated` emits `employee:updated` and then `employee:activity-updated` for that employee.
+- `emit_action_updated`, `emit_approval_updated`, and `emit_process_updated` emit their domain update event and then refresh activity for the affected employee.
+- Git review and handoff mutations that change review counts, handoff readiness, or blockers call `emit_employee_activity_updated` for the employee.
+- Workspace switching clears workspace-bound state and emits a global `employee:activity-updated` with no employee id so the frontend reloads all activities.
+
+The Phase 6 audit covered terminal output/input, active-profile changes, CWD changes, terminal stop/finish/fail, Codex app-server structured events and errors, employee lifecycle changes, actions, approvals, managed processes, review and handoff mutations, and workspace switch cleanup. Direct backend event mocking was not added because Tauri event assertions require an `AppHandle`; the contract is instead centralized in the helper functions above and covered through command/store behavior.
+
+On the frontend, activity refreshes are protected against out-of-order async responses. Each per-employee `employee_activity_get` request receives a monotonic sequence id, and only the latest request for that employee can write to `employeeActivities`. A global `employee_activity_list` reload also receives a sequence id; stale global responses are ignored, and a global reload does not overwrite newer per-employee refresh results. This keeps rapid `terminal:session-updated` and `employee:activity-updated` delivery from leaving the floor stuck on stale activity when a slower earlier refresh resolves after a newer one.
+
 ## Current Risk Areas
 
 - PTY output is not a stable protocol. Codex UI text, prompt glyphs, progress wording, and redraw behavior can change outside Slavey's control.
 - Redraws, ANSI/control sequences, carriage returns, and split chunks can create edge cases. The parser handles known stale redraws and split Slavey control markers, but the corpus is not complete.
 - Frontend terminal buffers may update before the matching `terminal:session-updated` record arrives. During that gap, terminal text can be fresher than terminal session turn metadata, but backend session records remain authoritative for Codex state.
+- Activity refresh responses can still be delayed by IPC or command latency, but stale responses are ignored so a slower old refresh should not overwrite a newer backend activity contract.
 - The fixture corpus is not complete yet. Existing tests cover important prompt-ready, approval, active-work, owner-draft, app-server, and stale-redraw cases, but they are not a broad transcript replay suite.
 - Structured app-server evidence is preferred, but shell-launched Codex still relies on PTY fallback and wrapper markers.
 - Backend PTY transition reasons are currently internal and testable only. They are not exposed through diagnostics, so debugging production edge cases still requires looking at session state and logs rather than a transition trace.
@@ -243,7 +258,8 @@ Phase 5 structured Codex app-server state sync is reflected in the current app-s
 - Phase 2: Build a terminal transcript fixture corpus and replay harness for PTY parser regressions.
 - Phase 3: Consolidate parser ownership and add backend/frontend parity coverage where local display still mirrors backend logic.
 - Phase 4: Harden event ordering, session update freshness, and activity refresh behavior under rapid terminal output.
-- Phase 6: Expand diagnostics for terminal evidence decisions, runtime source/confidence, and activity contract traces.
+- Phase 6: Activity refresh guarantees and frontend stale-response protection are reflected above.
+- Later diagnostics: Expand diagnostics for terminal evidence decisions, runtime source/confidence, and activity contract traces.
 - Phase 7: Add state-driven frontend and browser smoke coverage for critical terminal/activity/floor transitions.
 - Phase 8: Reduce reliance on PTY fallback for shell-launched Codex where a structured source can be used.
 - Phase 9: Final validation, cleanup, and release-readiness pass for terminal/Codex hardening.
