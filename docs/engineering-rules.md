@@ -6,7 +6,7 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 
 - Run `npm run check` before pushing.
 - Run `npm run build` before release-like changes.
-- Run `npm run test:e2e:run` when touching app-shell, tab loading, Tauri command plumbing, or future animated employee UI.
+- Run `npm run test:e2e:run` when touching app-shell, tab loading, Tauri command plumbing, or browser-critical employee floor UI.
 - `npm run check` runs the production bundle guard after Vite build to catch E2E fixture leakage into `dist/`.
 - The existing Vite large chunk warning is acceptable until frontend splitting is handled separately.
 
@@ -49,27 +49,36 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Worktree review state must be backend-owned and structured; frontend review UI should not infer git safety from raw text.
 - Handoff apply and abort must require explicit user confirmation, and conflicts must be surfaced rather than auto-resolved.
 - Remote status is read-only until a dedicated push/PR phase; do not auto-push or call hosting APIs from review code.
-- Employee and game UI must use backend employee activity state as the source of truth.
+- Employee floor UI must use backend employee activity state as the source of truth.
 - `EmployeeActivity.contract` is the canonical employee activity contract. Frontend presentation, floor routing, and actor behavior must consume the contract when an activity record exists.
 - Legacy employee activity fields such as `status`, `behavior`, `terminalState`, `agent`, `label`, and `details` are compatibility and diagnostics data only; they must not override contract-backed visual routing or display state.
 - The no-activity fallback path exists only for first-load safety before an `EmployeeActivity` record arrives.
-- Terminal output must not be parsed for status unless a future explicit structured protocol is added.
+- Terminal output parsing is allowed only as bounded PTY fallback evidence in the terminal session/runtime modules. Prefer structured Codex app-server evidence whenever available, and cover parser changes with regression tests.
 - Frontend raw Tauri `invoke` calls should live in the typed command layer, not directly in panels or store actions.
 - Split large frontend panels before adding new behavior, and avoid mixing visual redesign with infrastructure refactors.
 - Store growth should move into domain slices before adding new workflows; preserve the public `useAppStore` API unless a dedicated migration is planned.
 - CSS should be split by UI domain before adding new visual systems or animated surfaces.
-- Heavy editor, terminal, and future game UI dependencies should be lazy-loaded behind component boundaries.
+- Heavy editor, terminal, and employee floor dependencies should be lazy-loaded or isolated behind component/runtime boundaries.
 - Do not add large visual/runtime dependencies to the initial shell bundle without review.
 - Bundle chunk warnings should be fixed by splitting lazy paths or vendor chunks, not hidden by only raising warning limits.
-- Future animated employee UI must stay a presentation layer over backend activity/status state.
-- Future animated/game UI should live behind component boundaries and consume backend activity state.
+- Employee floor rendering must stay a presentation layer over backend activity contract state.
+- Employee floor and other heavy visual UI should live behind component/runtime boundaries and consume backend-owned state.
 - Terminal metadata may be persisted, but raw terminal output must not be persisted unless explicitly bounded and sanitized.
 - Terminal operations must validate employeeId and sessionId ownership at the backend boundary.
 - Diagnostics and support bundles are opt-in, local-only, and redacted by default.
 - Diagnostics must never include terminal output, environment variables, credentials, tokens, raw process logs, or file-write contents.
 - Tauri capabilities should remain minimal; do not add shell, filesystem, HTTP, clipboard, or broader plugin permissions without a dedicated security review.
 - The Tauri CSP should stay explicit. The current inline-style exception is for the existing webview UI/runtime style injection and should be revisited before adding a new visual system.
-- Future employee and game UI should be a presentation layer over backend state, not a second source of truth.
+- Employee floor UI should be a presentation layer over backend state, not a second source of truth.
+
+## Documentation Standards
+
+- Keep `README.md` as the short entry point for product scope, setup, validation, safety, docs links, and limitations.
+- Keep `docs/architecture.md` current when backend modules, frontend slices, command boundaries, event flows, persistence, diagnostics, or major runtime flows change.
+- Keep `docs/activity-contract.md` current when `EmployeeActivity`, terminal runtime evidence, contract rules, floor routing, or actor behavior changes.
+- Keep `CONTRIBUTING.md` current when setup, checks, workflow, contribution expectations, or safety boundaries change.
+- Update documentation in the same phase as the behavior change when a change alters contributor expectations or user-visible system behavior.
+- Do not document aspirational behavior as current behavior. Clearly label limitations and future work.
 
 ## Module-Size Rules
 
@@ -87,9 +96,9 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Frontend helper, store, and component tests should cover UI infrastructure before adding visual or game work.
 - Frontend tests should mock Tauri APIs through the typed command boundary and shared test setup, not through scattered ad hoc mocks.
 - Avoid brittle visual snapshot tests for now; prefer state-driven render and smoke tests.
-- Future animated employee UI should include render tests driven by backend `EmployeeActivity` state.
+- Employee floor UI should include render tests driven by backend `EmployeeActivity` state.
 - Browser-level smoke/E2E coverage should be added in a dedicated phase once the web app can be tested without increasing local validation cost too much.
 - Browser smoke/E2E runs with explicit browser-only `VITE_SLAVEY_E2E=true` mock Tauri data at the typed command boundary.
 - Browser smoke/E2E is for blank screens, broken tab/lazy-loading paths, employee activity rendering, diagnostics actions, and app-shell regressions, not backend behavior validation.
 - Production bundles must not include E2E fixture data; keep E2E mock imports guarded and centralized around `src/lib/tauriCommands.ts` and `src/lib/e2eTauriMock.ts`.
-- Future animated employee UI should add state-driven browser smoke coverage here, using backend-shaped `EmployeeActivity` mock data rather than animation timing or pixel-perfect assertions.
+- Employee floor UI should add state-driven browser smoke coverage here, using backend-shaped `EmployeeActivity` mock data rather than animation timing or pixel-perfect assertions.
