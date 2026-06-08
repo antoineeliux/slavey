@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use super::{
     AgentRuntimeConfidence, AgentRuntimeSnapshot, AgentRuntimeSource, AgentRuntimeState,
     AgentRuntimeStore, TerminalLaunchProfile, TerminalSessionStatus, TerminalSessionStore,
@@ -42,64 +44,108 @@ struct ExpectedState {
 fn pty_terminal_evidence_fixture_corpus_matches_current_parser_behavior() {
     for fixture in fixtures() {
         let (session, runtime) = replay_fixture(&fixture);
-        assert_eq!(
-            session.status, fixture.expected.status,
-            "{}: status",
-            fixture.name
-        );
-        assert_eq!(
-            session.profile, fixture.expected.profile,
-            "{}: launch profile",
-            fixture.name
-        );
-        assert_eq!(
-            session.active_profile,
-            Some(fixture.expected.active_profile),
-            "{}: active profile",
-            fixture.name
-        );
-        assert_eq!(
-            session.turn_state, fixture.expected.turn_state,
-            "{}: turn state",
-            fixture.name
-        );
-        assert_eq!(
-            session.last_prompt_submitted_at.is_some(),
-            fixture.expected.has_prompt_submitted_at,
-            "{}: prompt submitted timestamp",
-            fixture.name
-        );
-        assert_eq!(
-            session.last_prompt_ready_at.is_some(),
-            fixture.expected.has_prompt_ready_at,
-            "{}: prompt ready timestamp",
-            fixture.name
-        );
-        assert_eq!(
-            session.last_approval_prompt_at.is_some(),
-            fixture.expected.has_approval_prompt_at,
-            "{}: approval prompt timestamp",
-            fixture.name
-        );
-        assert_eq!(
-            runtime.state, fixture.expected.runtime_state,
-            "{}: runtime state",
-            fixture.name
-        );
-        assert_eq!(
-            runtime.source, fixture.expected.runtime_source,
-            "{}: runtime source",
-            fixture.name
-        );
-        assert_eq!(
-            runtime.confidence, fixture.expected.runtime_confidence,
-            "{}: runtime confidence",
-            fixture.name
+        assert_fixture_result(&fixture, &session, &runtime, "canonical replay");
+    }
+}
+
+#[test]
+fn pty_terminal_fixture_outputs_are_chunk_boundary_invariant() {
+    for fixture in fixtures() {
+        for (event_index, output) in fixture_output_events(&fixture) {
+            for split_at in representative_split_points(output) {
+                let context = format!(
+                    "split output event {event_index} at byte {split_at} in {:?}",
+                    output
+                );
+                let (session, runtime) =
+                    replay_fixture_with_output_split(&fixture, event_index, split_at);
+                assert_fixture_result(&fixture, &session, &runtime, &context);
+            }
+        }
+    }
+}
+
+#[test]
+fn pty_terminal_key_flows_tolerate_single_character_streaming() {
+    let fixture_names = [
+        "Codex prompt ready moves to owner prompt ready",
+        "prompt echo followed by Working remains agent working",
+        "final answer followed by returned prompt becomes owner prompt ready",
+        "stale Working redraw plus returned prompt becomes owner prompt ready",
+        "approval prompt split across chunks is detected",
+        "shell-launched Codex working output routes to agent working",
+    ];
+    let fixtures = fixtures();
+
+    for fixture_name in fixture_names {
+        let fixture = fixtures
+            .iter()
+            .find(|fixture| fixture.name == fixture_name)
+            .expect("single-character streaming fixture should exist");
+        let (session, runtime) = replay_fixture_with_char_streamed_outputs(fixture);
+        assert_fixture_result(
+            fixture,
+            &session,
+            &runtime,
+            "single-character output streaming",
         );
     }
 }
 
+#[test]
+fn pty_terminal_redraw_control_sequence_boundaries_preserve_prompt_ready() {
+    let fixtures = fixtures();
+    let fixture = fixtures
+        .iter()
+        .find(|fixture| {
+            fixture.name == "stale Working redraw plus returned prompt becomes owner prompt ready"
+        })
+        .expect("redraw fixture should exist");
+    let (event_index, output) = fixture_output_events(fixture)
+        .into_iter()
+        .find(|(_, output)| output.contains("\x1b[2K\r"))
+        .expect("redraw fixture should include a clear-line carriage-return sequence");
+
+    for split_at in control_sequence_split_points(output) {
+        let context = format!("redraw/control split output event {event_index} at byte {split_at}");
+        let (session, runtime) = replay_fixture_with_output_split(fixture, event_index, split_at);
+        assert_fixture_result(fixture, &session, &runtime, &context);
+    }
+}
+
 fn replay_fixture(fixture: &Fixture) -> (super::TerminalSessionRecord, AgentRuntimeSnapshot) {
+    replay_fixture_with_output_chunks(fixture, |_, output| vec![output.to_string()])
+}
+
+fn replay_fixture_with_output_split(
+    fixture: &Fixture,
+    split_event_index: usize,
+    split_at: usize,
+) -> (super::TerminalSessionRecord, AgentRuntimeSnapshot) {
+    replay_fixture_with_output_chunks(fixture, |event_index, output| {
+        if event_index == split_event_index {
+            split_output_at(output, split_at)
+        } else {
+            vec![output.to_string()]
+        }
+    })
+}
+
+fn replay_fixture_with_char_streamed_outputs(
+    fixture: &Fixture,
+) -> (super::TerminalSessionRecord, AgentRuntimeSnapshot) {
+    replay_fixture_with_output_chunks(fixture, |_, output| {
+        output
+            .chars()
+            .map(|character| character.to_string())
+            .collect()
+    })
+}
+
+fn replay_fixture_with_output_chunks(
+    fixture: &Fixture,
+    output_chunks: impl Fn(usize, &str) -> Vec<String>,
+) -> (super::TerminalSessionRecord, AgentRuntimeSnapshot) {
     let store = TerminalSessionStore::default();
     let runtime = AgentRuntimeStore::default();
     let created = store.create(
@@ -110,11 +156,16 @@ fn replay_fixture(fixture: &Fixture) -> (super::TerminalSessionRecord, AgentRunt
     );
     runtime.sync_from_terminal_session(&created);
 
-    for event in &fixture.events {
+    for (event_index, event) in fixture.events.iter().enumerate() {
         match event {
             FixtureEvent::Output(output) => {
-                if let Some(record) = store.record_output(SESSION_ID, output) {
-                    runtime.sync_from_terminal_session(&record);
+                for chunk in output_chunks(event_index, output) {
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    if let Some(record) = store.record_output(SESSION_ID, &chunk) {
+                        runtime.sync_from_terminal_session(&record);
+                    }
                 }
             }
             FixtureEvent::Input(input) => {
@@ -142,6 +193,166 @@ fn replay_fixture(fixture: &Fixture) -> (super::TerminalSessionRecord, AgentRunt
         .snapshot(SESSION_ID)
         .unwrap_or_else(AgentRuntimeSnapshot::none);
     (session, snapshot)
+}
+
+fn assert_fixture_result(
+    fixture: &Fixture,
+    session: &super::TerminalSessionRecord,
+    runtime: &AgentRuntimeSnapshot,
+    context: &str,
+) {
+    assert_eq!(
+        session.status, fixture.expected.status,
+        "{}: {context}: status",
+        fixture.name
+    );
+    assert_eq!(
+        session.profile, fixture.expected.profile,
+        "{}: {context}: launch profile",
+        fixture.name
+    );
+    assert_eq!(
+        session.active_profile,
+        Some(fixture.expected.active_profile),
+        "{}: {context}: active profile",
+        fixture.name
+    );
+    assert_eq!(
+        session.turn_state, fixture.expected.turn_state,
+        "{}: {context}: turn state",
+        fixture.name
+    );
+    assert_eq!(
+        session.last_prompt_submitted_at.is_some(),
+        fixture.expected.has_prompt_submitted_at,
+        "{}: {context}: prompt submitted timestamp",
+        fixture.name
+    );
+    assert_eq!(
+        session.last_prompt_ready_at.is_some(),
+        fixture.expected.has_prompt_ready_at,
+        "{}: {context}: prompt ready timestamp",
+        fixture.name
+    );
+    assert_eq!(
+        session.last_approval_prompt_at.is_some(),
+        fixture.expected.has_approval_prompt_at,
+        "{}: {context}: approval prompt timestamp",
+        fixture.name
+    );
+    assert_eq!(
+        runtime.state, fixture.expected.runtime_state,
+        "{}: {context}: runtime state",
+        fixture.name
+    );
+    assert_eq!(
+        runtime.source, fixture.expected.runtime_source,
+        "{}: {context}: runtime source",
+        fixture.name
+    );
+    assert_eq!(
+        runtime.confidence, fixture.expected.runtime_confidence,
+        "{}: {context}: runtime confidence",
+        fixture.name
+    );
+}
+
+fn fixture_output_events(fixture: &Fixture) -> Vec<(usize, &'static str)> {
+    fixture
+        .events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            FixtureEvent::Output(output) => Some((index, *output)),
+            FixtureEvent::Input(_) | FixtureEvent::ActiveProfile(_) | FixtureEvent::Finish(_) => {
+                None
+            }
+        })
+        .collect()
+}
+
+fn split_output_at(output: &str, split_at: usize) -> Vec<String> {
+    assert!(
+        output.is_char_boundary(split_at),
+        "split index should be on a char boundary"
+    );
+    let (left, right) = output.split_at(split_at);
+    vec![left.to_string(), right.to_string()]
+}
+
+fn representative_split_points(output: &str) -> Vec<usize> {
+    let char_boundaries = char_boundaries(output);
+    if output.chars().count() <= 32 {
+        return char_boundaries;
+    }
+
+    let mut split_points = BTreeSet::new();
+    insert_if_boundary(output, 0, &mut split_points);
+    insert_if_boundary(output, output.len(), &mut split_points);
+    if let Some(index) = byte_index_after_chars(output, 1) {
+        insert_if_boundary(output, index, &mut split_points);
+    }
+    if let Some(index) = byte_index_after_chars(output, output.chars().count() / 2) {
+        insert_if_boundary(output, index, &mut split_points);
+    }
+    if let Some(index) = byte_index_after_chars(output, output.chars().count().saturating_sub(1)) {
+        insert_if_boundary(output, index, &mut split_points);
+    }
+    insert_marker_boundaries(output, "\x1b[2K", &mut split_points);
+    insert_marker_boundaries(output, "\x1b[2K\r", &mut split_points);
+    insert_marker_boundaries(output, "\r", &mut split_points);
+    insert_marker_boundaries(output, "›", &mut split_points);
+    insert_marker_boundaries(output, "Working", &mut split_points);
+    insert_marker_boundaries(output, "Allow", &mut split_points);
+    insert_marker_boundaries(output, "Yes", &mut split_points);
+    insert_marker_boundaries(output, "No", &mut split_points);
+    insert_marker_boundaries(output, "Yes / No", &mut split_points);
+
+    split_points.into_iter().collect()
+}
+
+fn control_sequence_split_points(output: &str) -> Vec<usize> {
+    let mut split_points = BTreeSet::new();
+    insert_marker_boundaries(output, "\x1b[2K", &mut split_points);
+    insert_marker_boundaries(output, "\x1b[2K\r", &mut split_points);
+    insert_marker_boundaries(output, "\r", &mut split_points);
+    insert_marker_boundaries(output, "›", &mut split_points);
+    split_points.into_iter().collect()
+}
+
+fn char_boundaries(output: &str) -> Vec<usize> {
+    let mut boundaries = output
+        .char_indices()
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    boundaries.push(output.len());
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    boundaries
+}
+
+fn byte_index_after_chars(output: &str, char_count: usize) -> Option<usize> {
+    if char_count == 0 {
+        return Some(0);
+    }
+    output
+        .char_indices()
+        .nth(char_count)
+        .map(|(index, _)| index)
+        .or_else(|| (char_count == output.chars().count()).then_some(output.len()))
+}
+
+fn insert_marker_boundaries(output: &str, marker: &str, split_points: &mut BTreeSet<usize>) {
+    for (index, _) in output.match_indices(marker) {
+        insert_if_boundary(output, index, split_points);
+        insert_if_boundary(output, index + marker.len(), split_points);
+    }
+}
+
+fn insert_if_boundary(output: &str, index: usize, split_points: &mut BTreeSet<usize>) {
+    if index <= output.len() && output.is_char_boundary(index) {
+        split_points.insert(index);
+    }
 }
 
 fn fixtures() -> Vec<Fixture> {
@@ -256,6 +467,19 @@ fn fixtures() -> Vec<Fixture> {
                 FixtureEvent::Output("\r\n› "),
                 FixtureEvent::Input("write fixture docs\r"),
                 FixtureEvent::Output("\r\n• Working (2s • esc to interrupt)"),
+                FixtureEvent::Output("\x1b[2K\r• Working (2s • esc to interrupt)\r\nDone.\r\n› "),
+            ],
+            expected: expected_codex_waiting_prompt(true),
+        },
+        Fixture {
+            name: "duplicate Working redraw plus returned prompt stays owner prompt ready",
+            launch_profile: TerminalLaunchProfile::Codex,
+            events: vec![
+                FixtureEvent::Output("\r\n› "),
+                FixtureEvent::Input("write fixture docs\r"),
+                FixtureEvent::Output("\r\n• Working (2s • esc to interrupt)"),
+                FixtureEvent::Output("\x1b[2K\r• Working (2s • esc to interrupt)"),
+                FixtureEvent::Output("\x1b[2K\r• Working (2s • esc to interrupt)"),
                 FixtureEvent::Output("\x1b[2K\r• Working (2s • esc to interrupt)\r\nDone.\r\n› "),
             ],
             expected: expected_codex_waiting_prompt(true),

@@ -1223,6 +1223,67 @@ mod tests {
         state.agent_runtime.sync_from_terminal_session(&session);
     }
 
+    enum PtyActivityEvent {
+        Output(&'static str),
+        Input(&'static str),
+    }
+
+    fn activity_for_pty_events(
+        name: &str,
+        events: &[PtyActivityEvent],
+        stream_output_chars: bool,
+    ) -> EmployeeActivity {
+        let root = test_root(name);
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Codex,
+            root.to_string_lossy().to_string(),
+        );
+
+        for event in events {
+            match event {
+                PtyActivityEvent::Output(output) => {
+                    if stream_output_chars {
+                        for character in output.chars() {
+                            let chunk = character.to_string();
+                            if let Some(record) = state
+                                .terminal_sessions
+                                .record_output(&session.session_id, &chunk)
+                            {
+                                state.agent_runtime.sync_from_terminal_session(&record);
+                            }
+                        }
+                    } else if let Some(record) = state
+                        .terminal_sessions
+                        .record_output(&session.session_id, output)
+                    {
+                        state.agent_runtime.sync_from_terminal_session(&record);
+                    }
+                }
+                PtyActivityEvent::Input(input) => {
+                    if let Some(record) = state
+                        .terminal_sessions
+                        .record_input(&session.session_id, input)
+                    {
+                        state.agent_runtime.sync_from_terminal_session(&record);
+                    }
+                }
+            }
+        }
+
+        sync_agent_runtime(&state, &session.session_id);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Running;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+
+        activity(&state, &employee.id)
+    }
+
     #[derive(Debug, Clone, Copy)]
     struct ExpectedContractSummary {
         work_kind: EmployeeActivityContractWorkKind,
@@ -1256,6 +1317,83 @@ mod tests {
         }
         if let Some(source_confidence) = expected.source_confidence {
             assert_eq!(activity.contract.source.confidence, source_confidence);
+        }
+    }
+
+    #[test]
+    fn split_pty_flows_preserve_activity_contracts() {
+        struct Case {
+            name: &'static str,
+            events: Vec<PtyActivityEvent>,
+            expected: ExpectedContractSummary,
+        }
+
+        let cases = [
+            Case {
+                name: "split-working-contract",
+                events: vec![
+                    PtyActivityEvent::Input("write fixture docs\r"),
+                    PtyActivityEvent::Output("\r\n• Working (2s • esc to interrupt)"),
+                ],
+                expected: ExpectedContractSummary {
+                    work_kind: EmployeeActivityContractWorkKind::Codex,
+                    work_phase: EmployeeActivityContractWorkPhase::Working,
+                    turn_owner: EmployeeTurnOwner::Agent,
+                    placement: EmployeeActivityContractRenderPlacement::Desk,
+                    posture: EmployeeActivityContractRenderPosture::Sitting,
+                    render_activity: EmployeeActivityContractRenderActivity::Working,
+                    attention_reason: None,
+                    source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                    source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+                },
+            },
+            Case {
+                name: "split-final-prompt-return-contract",
+                events: vec![
+                    PtyActivityEvent::Output("\r\n› "),
+                    PtyActivityEvent::Input("write fixture docs\r"),
+                    PtyActivityEvent::Output("\r\n• Working (2s • esc to interrupt)"),
+                    PtyActivityEvent::Output("\r\nDone.\r\n› "),
+                ],
+                expected: ExpectedContractSummary {
+                    work_kind: EmployeeActivityContractWorkKind::Codex,
+                    work_phase: EmployeeActivityContractWorkPhase::WaitingOwner,
+                    turn_owner: EmployeeTurnOwner::Owner,
+                    placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                    posture: EmployeeActivityContractRenderPosture::Standing,
+                    render_activity: EmployeeActivityContractRenderActivity::WaitingInstruction,
+                    attention_reason: Some(EmployeeAttentionReason::NeedsInstruction),
+                    source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                    source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+                },
+            },
+            Case {
+                name: "split-approval-prompt-contract",
+                events: vec![
+                    PtyActivityEvent::Input("write fixture docs\r"),
+                    PtyActivityEvent::Output("Allow command to run?\n› Yes / No"),
+                ],
+                expected: ExpectedContractSummary {
+                    work_kind: EmployeeActivityContractWorkKind::Codex,
+                    work_phase: EmployeeActivityContractWorkPhase::WaitingApproval,
+                    turn_owner: EmployeeTurnOwner::Owner,
+                    placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                    posture: EmployeeActivityContractRenderPosture::Standing,
+                    render_activity: EmployeeActivityContractRenderActivity::Approval,
+                    attention_reason: Some(EmployeeAttentionReason::NeedsTerminalApproval),
+                    source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                    source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+                },
+            },
+        ];
+
+        for case in cases {
+            let unsplit = activity_for_pty_events(case.name, &case.events, false);
+            let streamed =
+                activity_for_pty_events(&format!("{}-streamed", case.name), &case.events, true);
+
+            assert_eq!(streamed.contract, unsplit.contract, "{}", case.name);
+            assert_contract_summary(&streamed, case.expected);
         }
     }
 

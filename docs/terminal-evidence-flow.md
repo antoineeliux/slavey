@@ -158,6 +158,17 @@ The corpus replays sanitized in-code fixtures through `TerminalSessionStore` and
 
 To add a regression fixture, add a sanitized `Fixture` entry with ordered `Output`, `Input`, `ActiveProfile`, or `Finish` events. Avoid local usernames, machine paths, real private prompts, secrets, or raw logs. Assert the final launch profile, effective profile, turn state, prompt/approval timestamp presence, runtime state, source, and confidence so the fixture documents current behavior precisely.
 
+### Stress Matrix
+
+The fixture corpus also runs through a deterministic PTY stress matrix:
+
+- chunk-boundary invariance replays every fixture with each output event split at char-boundary positions. Short output strings test every possible single split; longer strings test representative boundaries around the start, first character, middle, final character, ANSI/control sequences, `›`, `Working`, and approval-choice text.
+- single-character streaming replays critical flows one output character at a time: prompt-ready output, prompt echo plus `Working`, final answer prompt return, stale `Working` redraw prompt return, split approval prompts, and shell-launched Codex working output.
+- redraw/control coverage splits fixtures around `\x1b[2K`, carriage returns, and returned prompts so clear-line redraws continue to resolve to the expected turn state.
+- duplicate/redraw-like coverage includes repeated `Working ... esc to interrupt` redraw text followed by a final prompt, ensuring the final prompt remains authoritative.
+
+Activity-level tests also replay stressed PTY flows through `EmployeeActivity.contract` for working, final prompt return, and approval prompt states. This verifies the parser output still resolves to the expected desk/owner-office placement and render activity.
+
 ## Codex App-Server Flow
 
 The structured Codex app-server path starts at `codex_task_submit`.
@@ -257,7 +268,7 @@ Diagnostics continue to exclude raw terminal output, raw process logs, environme
 - Frontend terminal buffers may update before the matching `terminal:session-updated` record arrives. During that gap, terminal text can be fresher than terminal session turn metadata, but backend session records remain authoritative for Codex state.
 - Activity refresh responses can still be delayed by IPC or command latency, but stale responses are ignored so a slower old refresh should not overwrite a newer backend activity contract.
 - Diagnostics now expose the terminal/session evidence, runtime source/confidence, activity reason, and activity contract chain. They make wrong-state bugs easier to explain, but they do not make PTY fallback signals less heuristic.
-- The fixture corpus is not complete yet. Existing tests cover important prompt-ready, approval, active-work, owner-draft, app-server, and stale-redraw cases, but they are not a broad transcript replay suite.
+- The fixture corpus and stress matrix cover important prompt-ready, approval, active-work, owner-draft, app-server, stale-redraw, duplicate-redraw, chunk-boundary, and single-character streaming cases. They are broader than targeted unit tests, but still not a full transcript replay suite.
 - Structured app-server evidence is preferred, but shell-launched Codex still relies on PTY fallback and wrapper markers.
 - CWD markers are currently shell-integration dependent. Unsupported shells or failed shell integration can leave `current_cwd` at the start directory even when terminal output and activity continue normally.
 
@@ -274,6 +285,7 @@ Phase 5 structured Codex app-server state sync is reflected in the current app-s
 - Phase 4: Harden event ordering, session update freshness, and activity refresh behavior under rapid terminal output.
 - Phase 6: Activity refresh guarantees and frontend stale-response protection are reflected above.
 - Phase 7: Diagnostics for terminal evidence decisions, runtime source/confidence, and activity contract traces are reflected above.
+- Phase 8: PTY parser stress matrix coverage is reflected above.
 - Later frontend coverage: Add state-driven frontend and browser smoke coverage for critical terminal/activity/floor transitions.
 - Later structured-source hardening: Reduce reliance on PTY fallback for shell-launched Codex where a structured source can be used.
 - Later release validation: Final cleanup and release-readiness pass for terminal/Codex hardening.

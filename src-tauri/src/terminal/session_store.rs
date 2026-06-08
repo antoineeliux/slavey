@@ -547,12 +547,13 @@ fn terminal_output_evidence(
         || codex_session_is_waiting_for_approval(record);
     let codex_prompt_ready = codex_output_suggests_prompt_ready(output)
         || (!owner_waiting && codex_output_suggests_prompt_ready(detection_output));
-    let codex_prompt_ready_at_end = codex_output_ends_at_prompt(output)
-        || (!owner_waiting && codex_output_ends_at_prompt(detection_output));
+    let detection_output_ends_at_prompt = codex_output_ends_at_prompt(detection_output);
+    let codex_prompt_ready_at_end =
+        codex_output_ends_at_prompt(output) || (!owner_waiting && detection_output_ends_at_prompt);
     let codex_active_work = !codex_prompt_ready_at_end
         && (codex_output_suggests_active_work(output)
-            || (!codex_prompt_ready
-                && !codex_approval_prompt
+            || (!codex_approval_prompt
+                && !detection_output_ends_at_prompt
                 && codex_output_suggests_active_work(detection_output)));
 
     TerminalOutputEvidence {
