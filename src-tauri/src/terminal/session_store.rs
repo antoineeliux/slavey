@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     agent_runtime::{
-        codex_output_has_visible_text, codex_output_suggests_active_work,
-        codex_output_suggests_approval_choice, codex_output_suggests_approval_prompt,
-        codex_output_suggests_prompt_ready, codex_session_is_active,
-        codex_session_is_waiting_for_approval, codex_session_is_waiting_for_instruction,
-        codex_session_should_track_prompt, terminal_input_submits_prompt,
-        terminal_input_updates_owner_prompt,
+        codex_output_ends_at_prompt, codex_output_has_visible_text,
+        codex_output_suggests_active_work, codex_output_suggests_approval_choice,
+        codex_output_suggests_approval_prompt, codex_output_suggests_prompt_ready,
+        codex_session_is_active, codex_session_is_waiting_for_approval,
+        codex_session_is_waiting_for_instruction, codex_session_should_track_prompt,
+        terminal_input_submits_prompt, terminal_input_updates_owner_prompt,
     },
     TerminalLaunchProfile, TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE, TERMINAL_LABEL_MAX_CHARS,
 };
@@ -286,11 +286,17 @@ impl TerminalSessionStore {
         let codex_approval_prompt = codex_output_suggests_approval_prompt(output)
             || (codex_output_suggests_approval_choice(output)
                 && codex_output_suggests_approval_prompt(&detection_output));
-        let codex_prompt_ready = codex_output_suggests_prompt_ready(output);
-        let codex_active_work = codex_output_suggests_active_work(output)
-            || (!codex_prompt_ready
-                && !codex_approval_prompt
-                && codex_output_suggests_active_work(&detection_output));
+        let owner_waiting = codex_session_is_waiting_for_instruction(record)
+            || codex_session_is_waiting_for_approval(record);
+        let codex_prompt_ready = codex_output_suggests_prompt_ready(output)
+            || (!owner_waiting && codex_output_suggests_prompt_ready(&detection_output));
+        let codex_prompt_ready_at_end = codex_output_ends_at_prompt(output)
+            || (!owner_waiting && codex_output_ends_at_prompt(&detection_output));
+        let codex_active_work = !codex_prompt_ready_at_end
+            && (codex_output_suggests_active_work(output)
+                || (!codex_prompt_ready
+                    && !codex_approval_prompt
+                    && codex_output_suggests_active_work(&detection_output)));
 
         if record.status == TerminalSessionStatus::Running
             && codex_approval_prompt
@@ -328,9 +334,7 @@ impl TerminalSessionStore {
             record.last_prompt_ready_at = Some(now);
             record.last_approval_prompt_at = None;
             record.turn_state = TerminalTurnState::OwnerPromptReady;
-        } else if codex_session_is_waiting_for_instruction(record)
-            || codex_session_is_waiting_for_approval(record)
-        {
+        } else if owner_waiting {
             // Codex redraws the prompt and the PTY can echo draft input while it is
             // still the owner's turn. Neither proves that the agent resumed work.
         } else {
@@ -833,6 +837,35 @@ mod tests {
         assert_eq!(working.active_profile, Some(TerminalLaunchProfile::Codex));
         assert_eq!(working.last_prompt_ready_at, None);
         assert_eq!(working.turn_state, TerminalTurnState::AgentWorking);
+    }
+
+    #[test]
+    fn shell_codex_prompt_at_end_beats_stale_work_redraw() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Shell,
+            "/tmp".to_string(),
+        );
+        store.record_output("term-1", "\r\n› ").unwrap();
+        store.record_input("term-1", "Implement feature\r").unwrap();
+        store
+            .record_output("term-1", "\r\n• Working (2s • esc to interrupt)")
+            .unwrap();
+
+        let ready = store
+            .record_output(
+                "term-1",
+                "\x1b[2K\r• Working (2s • esc to interrupt)\r\nDone.\r\n› ",
+            )
+            .unwrap();
+
+        assert_eq!(ready.profile, TerminalLaunchProfile::Shell);
+        assert_eq!(ready.active_profile, Some(TerminalLaunchProfile::Codex));
+        assert!(ready.last_prompt_ready_at.is_some());
+        assert_eq!(ready.last_approval_prompt_at, None);
+        assert_eq!(ready.turn_state, TerminalTurnState::OwnerPromptReady);
     }
 
     #[test]

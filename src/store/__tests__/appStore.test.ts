@@ -307,6 +307,38 @@ describe("app store smoke behavior", () => {
     expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBeGreaterThan(0);
   });
 
+  it("marks Codex sessions prompt-ready when a final redraw contains stale working text", async () => {
+    act(() => {
+      useAppStore.setState({
+        employees: [employee({ terminalSessionId: "codex-session" })],
+        terminalSessions: [
+          terminalSession({
+            activeProfile: "codex",
+            lastOutputAt: Date.now(),
+            lastPromptSubmittedAt: Date.now() - 1_000,
+            lastPromptReadyAt: null,
+            lastApprovalPromptAt: null,
+            turnState: "agent_working",
+          }),
+        ],
+        settings: { ...DEFAULT_SETTINGS, maxTerminalBufferChars: 250 },
+      });
+      useAppStore.getState().appendTerminalData({
+        employeeId: "employee-1",
+        sessionId: "codex-session",
+        data: "\x1b[2K\r• Working (10s • esc to interrupt)\r\nDone.\r\n› ",
+      });
+    });
+    await flushTerminalDataBatch();
+
+    expect(useAppStore.getState().terminalSessions[0]).toMatchObject({
+      activeProfile: "codex",
+      lastApprovalPromptAt: null,
+      turnState: "owner_prompt_ready",
+    });
+    expect(useAppStore.getState().terminalSessions[0]?.lastPromptReadyAt).toBeGreaterThan(0);
+  });
+
   it("detects Codex prompts inside shell-launched sessions", async () => {
     act(() => {
       useAppStore.setState({

@@ -1737,6 +1737,72 @@ mod tests {
     }
 
     #[test]
+    fn shell_launched_codex_prompt_after_stale_work_redraw_routes_to_owner() {
+        let root = test_root("shell-codex-stale-work-redraw-owner");
+        let state = test_state(root.clone());
+        let employee = create_employee(&state);
+        let session = state.terminal_sessions.create(
+            "session-1".to_string(),
+            employee.id.clone(),
+            TerminalLaunchProfile::Shell,
+            root.to_string_lossy().to_string(),
+        );
+        state
+            .terminal_sessions
+            .record_output(&session.session_id, "\r\n› ");
+        state
+            .terminal_sessions
+            .record_input(&session.session_id, "Implement feature\r");
+        state.terminal_sessions.record_output(
+            &session.session_id,
+            "\r\n› Implement feature\r\n\r\n• Working (2s • esc to interrupt)",
+        );
+        state.terminal_sessions.record_output(
+            &session.session_id,
+            "\x1b[2K\r• Working (2s • esc to interrupt)\r\nDone.\r\n› ",
+        );
+        sync_agent_runtime(&state, &session.session_id);
+        state.employees.update(&employee.id, |employee| {
+            employee.status = EmployeeStatus::Running;
+            employee.current_command = Some("codex".to_string());
+            employee.terminal_session_id = Some(session.session_id.clone());
+        });
+
+        let activity = activity(&state, &employee.id);
+
+        assert_eq!(
+            activity.status,
+            EmployeeActivityStatus::CodexWaitingInstruction
+        );
+        assert_eq!(activity.behavior, EmployeeBehaviorState::WaitingAtOwner);
+        assert_eq!(
+            activity.terminal_state,
+            EmployeeTerminalActivityState::CodexWaitingInstruction
+        );
+        assert_eq!(activity.agent.state, AgentRuntimeState::WaitingPrompt);
+        assert_eq!(activity.work.phase, EmployeeWorkPhase::WaitingForOwner);
+        assert_eq!(activity.work.turn_owner, EmployeeTurnOwner::Owner);
+        assert_eq!(
+            activity.attention.reason,
+            Some(EmployeeAttentionReason::NeedsInstruction)
+        );
+        assert_contract_summary(
+            &activity,
+            ExpectedContractSummary {
+                work_kind: EmployeeActivityContractWorkKind::Codex,
+                work_phase: EmployeeActivityContractWorkPhase::WaitingOwner,
+                turn_owner: EmployeeTurnOwner::Owner,
+                placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                posture: EmployeeActivityContractRenderPosture::Standing,
+                render_activity: EmployeeActivityContractRenderActivity::WaitingInstruction,
+                attention_reason: Some(EmployeeAttentionReason::NeedsInstruction),
+                source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+            },
+        );
+    }
+
+    #[test]
     fn codex_app_server_activity_contract_maps_structured_events_to_behavior() {
         struct Case {
             name: &'static str,

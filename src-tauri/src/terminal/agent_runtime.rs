@@ -548,6 +548,16 @@ pub fn codex_output_suggests_prompt_ready(output: &str) -> bool {
         .any(|line| line.trim_start().starts_with('›'))
 }
 
+pub fn codex_output_ends_at_prompt(output: &str) -> bool {
+    strip_ansi(output)
+        .replace('\r', "\n")
+        .lines()
+        .map(str::trim_start)
+        .rfind(|line| !line.trim().is_empty())
+        .map(|line| line.starts_with('›'))
+        .unwrap_or(false)
+}
+
 pub fn codex_output_suggests_approval_prompt(output: &str) -> bool {
     let clean = strip_ansi(output).replace('\r', "\n").to_ascii_lowercase();
     let has_direct_request =
@@ -1082,6 +1092,12 @@ mod tests {
     #[test]
     fn prompt_detection_ignores_ansi_control_sequences() {
         assert!(codex_output_suggests_prompt_ready("\x1b[?25l\r\n› "));
+        assert!(codex_output_ends_at_prompt(
+            "\x1b[2K\r• Working (10s • esc to interrupt)\r\nDone.\r\n› "
+        ));
+        assert!(!codex_output_ends_at_prompt(
+            "\r\n› Implement feature\r\n\r\n• Working (10s • esc to interrupt)"
+        ));
         assert!(!codex_output_has_visible_text("\x1b[?25l\x1b[2K\r"));
         assert!(codex_output_suggests_active_work(
             "\r\n• Working (10s • esc to interrupt)"

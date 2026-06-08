@@ -408,12 +408,21 @@ function mergeTerminalOutputTimestamp(
     terminalOutputSuggestsCodexApprovalPrompt(data) ||
     (terminalOutputSuggestsCodexApprovalChoice(data) &&
       terminalOutputSuggestsCodexApprovalPrompt(promptDetectionData));
-  const codexPromptReady = terminalOutputSuggestsCodexPromptReady(data);
+  const ownerWaiting =
+    codexSessionIsWaitingForInstruction(session) ||
+    codexSessionIsWaitingForApproval(session);
+  const codexPromptReady =
+    terminalOutputSuggestsCodexPromptReady(data) ||
+    (!ownerWaiting && terminalOutputSuggestsCodexPromptReady(promptDetectionData));
+  const codexPromptReadyAtEnd =
+    terminalOutputEndsAtCodexPrompt(data) ||
+    (!ownerWaiting && terminalOutputEndsAtCodexPrompt(promptDetectionData));
   const codexActiveWork =
-    terminalOutputSuggestsCodexActiveWork(data) ||
-    (!codexPromptReady &&
+    !codexPromptReadyAtEnd &&
+    (terminalOutputSuggestsCodexActiveWork(data) ||
+      (!codexPromptReady &&
       !codexApprovalPrompt &&
-      terminalOutputSuggestsCodexActiveWork(promptDetectionData));
+        terminalOutputSuggestsCodexActiveWork(promptDetectionData)));
   if (
     session.status === "running" &&
     codexApprovalPrompt &&
@@ -464,8 +473,7 @@ function mergeTerminalOutputTimestamp(
     };
   }
   if (
-    (codexSessionIsWaitingForInstruction(session) ||
-      codexSessionIsWaitingForApproval(session))
+    ownerWaiting
   ) {
     return session;
   }
