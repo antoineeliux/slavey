@@ -5,7 +5,8 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 ## Required Checks
 
 - Run `npm run check` before pushing.
-- GitHub Actions CI runs on pull requests and pushes to `main`, and mirrors the local non-browser validation gate with `npm ci`, `npm run check:web`, and `npm run check:rust`.
+- GitHub Actions CI runs on pull requests and pushes to `main`, and mirrors the local non-browser validation gate with `npm ci`, `npm run check:web`, `npm run check:coverage`, and `npm run check:rust`.
+- Run `npm run check:coverage` when touching employee activity presentation, employee floor routing, or frontend employee/terminal store behavior.
 - Run `npm run build` before release-like changes.
 - Run `npm run test:e2e:run` when touching app-shell, tab loading, Tauri command plumbing, or browser-critical employee floor UI.
 - `npm run check` runs the production bundle guard after Vite build to catch E2E fixture leakage into `dist/`.
@@ -100,6 +101,7 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Terminal parser changes should add or update sanitized cases in the PTY fixture corpus and deterministic stress matrix in `src-tauri/src/terminal/session_fixture_tests.rs`.
 - Frontend helper, store, and component tests should cover UI infrastructure before adding visual or game work.
 - Frontend tests should mock Tauri APIs through the typed command boundary and shared test setup, not through scattered ad hoc mocks.
+- Critical employee activity/frontend routing changes must include focused coverage through `npm run check:coverage`, or document why a thresholded module is not practical to cover in the same change.
 - Avoid brittle visual snapshot tests for now; prefer state-driven render and smoke tests.
 - Employee floor UI should include render tests driven by backend `EmployeeActivity` state.
 - Browser-level smoke/E2E coverage should be added in a dedicated phase once the web app can be tested without increasing local validation cost too much.

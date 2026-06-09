@@ -47,10 +47,13 @@ Use targeted checks while developing:
 ```sh
 npm run typecheck
 npm run test:web:run
+npm run check:coverage
 cd src-tauri && cargo test
 ```
 
 The pre-commit hook runs Rust formatting checks and TypeScript typecheck. The pre-push hook runs `npm run check`.
+
+Run `npm run check:coverage` when changing employee activity presentation, employee floor routing, or frontend employee/terminal store behavior. The coverage gate is intentionally focused on those critical frontend modules, not the entire app.
 
 ## CI Gate
 
@@ -59,6 +62,7 @@ GitHub Actions runs the same non-browser validation gate on pull requests and pu
 CI installs dependencies with `npm ci`, uses Node.js 22 LTS and stable Rust, then runs:
 
 - `npm run check:web`
+- `npm run check:coverage`
 - `npm run check:rust`
 
 Browser smoke tests remain a separate local check for now and are not part of the CI gate.
