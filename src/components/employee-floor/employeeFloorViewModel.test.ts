@@ -12,6 +12,7 @@ import {
   createEmployeeFloorViewModels,
   floorVisualStateForPresentationState,
   type EmployeeOfficeState,
+  type EmployeeFloorPetVariant,
   type EmployeeFloorVisualState,
   type EmployeeFloorZone,
 } from "./employeeFloorViewModel";
@@ -539,9 +540,73 @@ describe("employeeFloorViewModel", () => {
       worksAtDesk: false,
     });
   });
+
+  it("assigns desks and standby filler from person employees only", () => {
+    const models = createEmployeeFloorViewModels(
+      [
+        {
+          employee: employee({ id: "owner-1", name: "Mira", role: "frontend" }),
+          presentation: presentation("codex_running"),
+        },
+        {
+          employee: employee({
+            id: "pet-1",
+            name: "Pixel",
+            visualKind: "pet",
+            companionOfEmployeeId: "owner-1",
+            petVariant: "cat",
+          }),
+          presentation: presentation("codex_running"),
+        },
+        {
+          employee: employee({ id: "owner-2", name: "Noah", role: "reviewer" }),
+          presentation: presentation("idle"),
+        },
+      ],
+      "pet-1",
+      { includeStandby: true },
+    );
+
+    const owner = models.find((model) => model.id === "owner-1");
+    const pet = models.find((model) => model.id === "pet-1");
+    const secondOwner = models.find((model) => model.id === "owner-2");
+
+    expect(owner).toMatchObject({
+      visualKind: "person",
+      occupiesDesk: true,
+      deskIndex: 0,
+      followTargetEmployeeId: null,
+    });
+    expect(pet).toMatchObject({
+      kind: "employee",
+      visualKind: "pet",
+      companionOfEmployeeId: "owner-1",
+      followTargetEmployeeId: "owner-1",
+      petVariant: "cat",
+      occupiesDesk: false,
+      selected: true,
+      deskIndex: 0,
+      zone: "open_floor",
+      worksAtDesk: false,
+    });
+    expect(secondOwner).toMatchObject({
+      visualKind: "person",
+      occupiesDesk: true,
+      deskIndex: 1,
+    });
+    expect(models.filter((model) => model.visualKind === "pet")).toHaveLength(1);
+    expect(models.filter((model) => model.kind === "standby")).toHaveLength(8);
+    expect(models).toHaveLength(11);
+  });
 });
 
-function employee(overrides: Partial<Employee> = {}): Employee {
+function employee(
+  overrides: Partial<Employee> & {
+    visualKind?: "person" | "pet" | null;
+    companionOfEmployeeId?: string | null;
+    petVariant?: EmployeeFloorPetVariant | null;
+  } = {},
+): Employee {
   return {
     id: "emp-1",
     name: "Ada",
@@ -555,7 +620,7 @@ function employee(overrides: Partial<Employee> = {}): Employee {
     createdAt: 1,
     updatedAt: 1,
     ...overrides,
-  };
+  } as Employee;
 }
 
 function backendActivity(

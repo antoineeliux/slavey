@@ -1,4 +1,7 @@
-import type { EmployeeFloorViewModel } from "../../employeeFloorViewModel";
+import {
+  isPetFloorViewModel,
+  type EmployeeFloorViewModel,
+} from "../../employeeFloorViewModel";
 import { pointAllowedForViewModel } from "../actorAccessRules";
 import { behaviorForViewModel } from "../characterBehavior";
 import type { ActorMap } from "../actorTypes";
@@ -60,6 +63,9 @@ export function assignCharacterActions(
 }
 
 export function isEligibleForAmbientAction(viewModel: EmployeeFloorViewModel): boolean {
+  if (isPetFloorViewModel(viewModel)) {
+    return false;
+  }
   const behavior = behaviorForViewModel(viewModel);
   return behavior.social && viewModel.officeState !== "offline";
 }

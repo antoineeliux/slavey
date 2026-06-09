@@ -1,6 +1,9 @@
 import * as THREE from "three";
 
-import type { EmployeeFloorViewModel } from "../employeeFloorViewModel";
+import type {
+  EmployeeFloorPetVariant,
+  EmployeeFloorViewModel,
+} from "../employeeFloorViewModel";
 import { hashUnit } from "./layout";
 import type { FloorMaterials } from "./materials";
 import { applyCharacterView } from "./characterAppearance";
@@ -18,6 +21,10 @@ export function createCharacter(
   viewModel: EmployeeFloorViewModel,
   materials: FloorMaterials,
 ): EmployeeActor {
+  if (viewModel.visualKind === "pet") {
+    return createPetCharacter(viewModel, materials);
+  }
+
   const root = new THREE.Group();
   root.name = `employee-${viewModel.id}`;
   root.userData.employeeId = viewModel.id;
@@ -114,38 +121,407 @@ export function createCharacter(
     height,
     width,
     homeRotationY: Math.PI,
-    visual: {
-      posture: "standing",
-      location: "desk",
-      activity: "none",
-      desk: new THREE.Vector3(),
-      cafeteria: new THREE.Vector3(),
-      standby: new THREE.Vector3(),
-      executive: new THREE.Vector3(),
-      doneRoom: new THREE.Vector3(),
-      officeA: new THREE.Vector3(),
-      officeB: new THREE.Vector3(),
-      officeTarget: new THREE.Vector3(),
-      cafeteriaTarget: new THREE.Vector3(),
-      standbyTarget: new THREE.Vector3(),
-      doneRoomTarget: new THREE.Vector3(),
-      roamIndex: 0,
-      talkUntil: 0,
-      socialIntent: "roaming",
-      socialLookAt: null,
-      action: null,
-      heldProp: "none",
-      path: [],
-      pathDestinationKey: null,
-      lastPosition: new THREE.Vector3(),
-      lastMovedAt: 0,
-      repathAt: 0,
-      stuckCount: 0,
-    },
+    visual: initialActorVisual(),
   };
   applyCharacterView(actor, viewModel, materials);
   updatePose(actor, 0, 0);
   return actor;
+}
+
+function createPetCharacter(
+  viewModel: EmployeeFloorViewModel,
+  materials: FloorMaterials,
+): EmployeeActor {
+  const root = new THREE.Group();
+  root.name = `pet-${viewModel.id}`;
+  root.userData.employeeId = viewModel.id;
+
+  const variant = viewModel.petVariant ?? "dog";
+  const profile = petProfile(variant, viewModel.id);
+  const shape = petShape(variant);
+  const accent = new THREE.Color(viewModel.markerColor).getHex();
+  const height = shape.height;
+  const width = shape.width;
+  const bodyMat = mat(profile.body, 0.7, profile.emissive ?? 0x000000);
+  const secondaryMat = mat(profile.secondary, 0.74);
+  const darkMat = mat(profile.dark, 0.76);
+  const accentMat = mat(accent, 0.46, accent);
+  const eyeMat = new THREE.MeshBasicMaterial({ color: profile.eye });
+  accentMat.emissiveIntensity = 0.16;
+
+  const parts: CharacterParts = {
+    body: block("pet-body", shape.bodySize, bodyMat, shape.bodyPosition),
+    head: block("pet-head", shape.headSize, bodyMat, shape.headPosition),
+    neck: block("pet-neck", shape.neckSize, bodyMat, shape.neckPosition),
+    leftArm: petLeg("front-left-leg", secondaryMat, -1, shape.frontLegZ, shape),
+    rightArm: petLeg("front-right-leg", secondaryMat, 1, shape.frontLegZ, shape),
+    leftLeg: petLeg("back-left-leg", secondaryMat, -1, shape.backLegZ, shape),
+    rightLeg: petLeg("back-right-leg", secondaryMat, 1, shape.backLegZ, shape),
+    phone: block("pet-phone-placeholder", [0.01, 0.01, 0.01], darkMat, [0, 0, 0]),
+    cup: block("pet-cup-placeholder", [0.01, 0.01, 0.01], darkMat, [0, 0, 0]),
+  };
+  parts.phone.visible = false;
+  parts.cup.visible = false;
+
+  root.add(parts.body, parts.head, parts.neck, parts.leftArm, parts.rightArm, parts.leftLeg, parts.rightLeg);
+  addPetFace(root, variant, eyeMat, darkMat);
+  addPetVariantDetails(root, parts, variant, { body: bodyMat, secondary: secondaryMat, dark: darkMat, accent: accentMat });
+
+  const statusRing = new THREE.Mesh(new THREE.TorusGeometry(shape.statusRingRadius, 0.018, 8, 40), accentMat);
+  statusRing.name = "status-ring";
+  statusRing.rotation.x = Math.PI * 0.5;
+  statusRing.position.y = 0.025;
+  root.add(statusRing);
+
+  const marker = createMarker(accent, height);
+  const nameplate = createNameplate(viewModel.name);
+  marker.add(nameplate);
+  root.add(marker);
+
+  const selectionRing = new THREE.Mesh(new THREE.TorusGeometry(shape.selectionRingRadius, 0.026, 8, 48), materials.selectionRing.clone());
+  selectionRing.rotation.x = Math.PI * 0.5;
+  selectionRing.position.y = 0.045;
+  root.add(selectionRing);
+
+  const target = new THREE.Mesh(
+    new THREE.BoxGeometry(...shape.targetSize),
+    new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }),
+  );
+  target.userData.employeeId = viewModel.id;
+
+  root.traverse((object) => {
+    object.userData.employeeId = viewModel.id;
+    if ((object as THREE.Mesh).isMesh) {
+      (object as THREE.Mesh).castShadow = true;
+      (object as THREE.Mesh).receiveShadow = true;
+    }
+  });
+
+  const actor: EmployeeActor = {
+    id: viewModel.id,
+    root,
+    target,
+    parts,
+    marker,
+    nameplate,
+    statusRing,
+    selectionRing,
+    viewModel,
+    skin: profile.body,
+    hair: profile.secondary,
+    shirt: profile.body,
+    pants: profile.secondary,
+    accent,
+    hairStyle: "buzz",
+    height,
+    width,
+    homeRotationY: Math.PI,
+    visual: initialActorVisual(),
+  };
+  applyCharacterView(actor, viewModel, materials);
+  updatePose(actor, 0, 0);
+  return actor;
+}
+
+function initialActorVisual(): EmployeeActor["visual"] {
+  return {
+    posture: "standing",
+    location: "desk",
+    activity: "none",
+    desk: new THREE.Vector3(),
+    cafeteria: new THREE.Vector3(),
+    standby: new THREE.Vector3(),
+    executive: new THREE.Vector3(),
+    doneRoom: new THREE.Vector3(),
+    officeA: new THREE.Vector3(),
+    officeB: new THREE.Vector3(),
+    officeTarget: new THREE.Vector3(),
+    cafeteriaTarget: new THREE.Vector3(),
+    standbyTarget: new THREE.Vector3(),
+    doneRoomTarget: new THREE.Vector3(),
+    roamIndex: 0,
+    talkUntil: 0,
+    socialIntent: "roaming",
+    socialLookAt: null,
+    action: null,
+    heldProp: "none",
+    path: [],
+    pathDestinationKey: null,
+    lastPosition: new THREE.Vector3(),
+    lastMovedAt: 0,
+    repathAt: 0,
+    stuckCount: 0,
+  };
+}
+
+function petProfile(
+  variant: EmployeeFloorPetVariant,
+  id: string,
+): { body: number; secondary: number; dark: number; eye: number; emissive?: number } {
+  if (variant === "robot") {
+    return {
+      body: 0xb8c3cc,
+      secondary: 0x687586,
+      dark: 0x27313a,
+      eye: 0x75d7ff,
+      emissive: 0x1b5b7c,
+    };
+  }
+
+  if (variant === "cat") {
+    const gray = hashUnit(id, 101) > 0.5;
+    return {
+      body: gray ? 0x8f9aa3 : 0xc6a177,
+      secondary: gray ? 0x5b646b : 0x7a5235,
+      dark: 0x1c2428,
+      eye: 0x202820,
+    };
+  }
+
+  const warm = hashUnit(id, 103) > 0.5;
+  return {
+    body: warm ? 0xa86f45 : 0xd2b07a,
+    secondary: warm ? 0x6f432c : 0x8b6840,
+    dark: 0x211813,
+    eye: 0x171412,
+  };
+}
+
+type PetShape = {
+  height: number;
+  width: number;
+  bodySize: [number, number, number];
+  bodyPosition: [number, number, number];
+  headSize: [number, number, number];
+  headPosition: [number, number, number];
+  neckSize: [number, number, number];
+  neckPosition: [number, number, number];
+  legSize: [number, number, number];
+  legX: number;
+  legY: number;
+  frontLegZ: number;
+  backLegZ: number;
+  statusRingRadius: number;
+  selectionRingRadius: number;
+  targetSize: [number, number, number];
+};
+
+function petShape(variant: EmployeeFloorPetVariant): PetShape {
+  if (variant === "robot") {
+    return {
+      height: 0.58,
+      width: 0.7,
+      bodySize: [0.5, 0.4, 0.48],
+      bodyPosition: [0, 0.39, 0.04],
+      headSize: [0.44, 0.34, 0.36],
+      headPosition: [0, 0.69, -0.34],
+      neckSize: [0.18, 0.14, 0.14],
+      neckPosition: [0, 0.54, -0.18],
+      legSize: [0.12, 0.22, 0.14],
+      legX: 0.2,
+      legY: 0.24,
+      frontLegZ: -0.14,
+      backLegZ: 0.26,
+      statusRingRadius: 0.44,
+      selectionRingRadius: 0.56,
+      targetSize: [0.84, 1.02, 0.86],
+    };
+  }
+
+  if (variant === "cat") {
+    return {
+      height: 0.48,
+      width: 0.56,
+      bodySize: [0.4, 0.24, 0.56],
+      bodyPosition: [0, 0.34, 0.06],
+      headSize: [0.34, 0.3, 0.3],
+      headPosition: [0, 0.52, -0.35],
+      neckSize: [0.12, 0.12, 0.12],
+      neckPosition: [0, 0.43, -0.2],
+      legSize: [0.09, 0.26, 0.09],
+      legX: 0.15,
+      legY: 0.23,
+      frontLegZ: -0.18,
+      backLegZ: 0.3,
+      statusRingRadius: 0.36,
+      selectionRingRadius: 0.5,
+      targetSize: [0.72, 0.86, 0.78],
+    };
+  }
+
+  return {
+    height: 0.54,
+    width: 0.7,
+    bodySize: [0.5, 0.3, 0.78],
+    bodyPosition: [0, 0.34, 0.08],
+    headSize: [0.36, 0.32, 0.34],
+    headPosition: [0, 0.53, -0.46],
+    neckSize: [0.16, 0.15, 0.16],
+    neckPosition: [0, 0.43, -0.25],
+    legSize: [0.12, 0.28, 0.12],
+    legX: 0.18,
+    legY: 0.24,
+    frontLegZ: -0.25,
+    backLegZ: 0.36,
+    statusRingRadius: 0.44,
+    selectionRingRadius: 0.58,
+    targetSize: [0.9, 0.94, 1.02],
+  };
+}
+
+function petLeg(
+  name: string,
+  material: THREE.Material,
+  side: number,
+  z: number,
+  shape: PetShape,
+): THREE.Group {
+  const group = new THREE.Group();
+  group.name = name;
+  group.position.set(side * shape.legX, shape.legY, z);
+  group.add(block(`${name}-paw`, shape.legSize, material, [0, -shape.legSize[1] * 0.42, 0]));
+  return group;
+}
+
+function addPetFace(
+  root: THREE.Group,
+  variant: EmployeeFloorPetVariant,
+  eyeMat: THREE.Material,
+  darkMat: THREE.Material,
+): void {
+  const face = petFacePlacement(variant);
+  for (const side of [-1, 1]) {
+    root.add(block("pet-eye", face.eyeSize, eyeMat, [side * face.eyeX, face.eyeY, face.faceZ]));
+  }
+  root.add(block("pet-nose", face.noseSize, darkMat, [0, face.noseY, face.faceZ - 0.008]));
+}
+
+function petFacePlacement(variant: EmployeeFloorPetVariant): {
+  eyeX: number;
+  eyeY: number;
+  faceZ: number;
+  eyeSize: [number, number, number];
+  noseY: number;
+  noseSize: [number, number, number];
+} {
+  if (variant === "robot") {
+    return {
+      eyeX: 0.11,
+      eyeY: 0.72,
+      faceZ: -0.555,
+      eyeSize: [0.07, 0.055, 0.014],
+      noseY: 0.65,
+      noseSize: [0.2, 0.028, 0.018],
+    };
+  }
+  if (variant === "cat") {
+    return {
+      eyeX: 0.08,
+      eyeY: 0.56,
+      faceZ: -0.506,
+      eyeSize: [0.048, 0.06, 0.014],
+      noseY: 0.49,
+      noseSize: [0.05, 0.035, 0.018],
+    };
+  }
+  return {
+    eyeX: 0.08,
+    eyeY: 0.57,
+    faceZ: -0.636,
+    eyeSize: [0.052, 0.052, 0.014],
+    noseY: 0.49,
+    noseSize: [0.07, 0.04, 0.018],
+  };
+}
+
+function addPetVariantDetails(
+  root: THREE.Group,
+  parts: CharacterParts,
+  variant: EmployeeFloorPetVariant,
+  mats: {
+    body: THREE.Material;
+    secondary: THREE.Material;
+    dark: THREE.Material;
+    accent: THREE.Material;
+  },
+): void {
+  if (variant === "robot") {
+    root.add(block("robot-faceplate", [0.3, 0.13, 0.018], mats.dark, [0, 0.7, -0.534]));
+    root.add(block("robot-chest-panel", [0.28, 0.18, 0.018], mats.dark, [0, 0.42, -0.208]));
+    root.add(block("robot-status-light", [0.08, 0.08, 0.022], mats.accent, [0.16, 0.45, -0.22]));
+    root.add(block("robot-left-bolt", [0.06, 0.06, 0.024], mats.secondary, [-0.26, 0.68, -0.5]));
+    root.add(block("robot-right-bolt", [0.06, 0.06, 0.024], mats.secondary, [0.26, 0.68, -0.5]));
+    root.add(block("robot-left-foot", [0.2, 0.08, 0.22], mats.dark, [-0.2, 0.065, -0.12]));
+    root.add(block("robot-right-foot", [0.2, 0.08, 0.22], mats.dark, [0.2, 0.065, -0.12]));
+    root.add(block("robot-rear-left-foot", [0.18, 0.08, 0.2], mats.dark, [-0.2, 0.065, 0.28]));
+    root.add(block("robot-rear-right-foot", [0.18, 0.08, 0.2], mats.dark, [0.2, 0.065, 0.28]));
+    const antenna = new THREE.Group();
+    antenna.name = "robot-antenna";
+    antenna.add(block("robot-antenna-stem", [0.035, 0.16, 0.035], mats.secondary, [0, 0.08, 0]));
+    antenna.add(new THREE.Mesh(new THREE.SphereGeometry(0.065, 14, 8), mats.accent));
+    antenna.children[1].position.y = 0.19;
+    antenna.position.set(0, 0.9, -0.34);
+    parts.antenna = antenna;
+    root.add(antenna);
+    return;
+  }
+
+  if (variant === "cat") {
+    root.add(block("cat-muzzle", [0.14, 0.075, 0.05], mats.body, [0, 0.49, -0.53]));
+    for (const side of [-1, 1]) {
+      const ear = new THREE.Mesh(new THREE.ConeGeometry(0.085, 0.18, 4), mats.secondary);
+      ear.name = "cat-ear";
+      ear.position.set(side * 0.14, 0.72, -0.35);
+      ear.rotation.z = side * -0.24;
+      ear.rotation.y = Math.PI * 0.25;
+      root.add(ear);
+    }
+    addCatWhiskers(root, mats.dark);
+    root.add(block("cat-left-paw-tip", [0.11, 0.04, 0.08], mats.dark, [-0.15, 0.08, -0.19]));
+    root.add(block("cat-right-paw-tip", [0.11, 0.04, 0.08], mats.dark, [0.15, 0.08, -0.19]));
+    parts.tail = petTail("cat-tail", mats.secondary, 0.62, 0.56, [0.18, 0.48, 0.36]);
+    root.add(parts.tail);
+    return;
+  }
+
+  root.add(block("dog-snout", [0.2, 0.12, 0.22], mats.body, [0, 0.49, -0.69]));
+  root.add(block("dog-nose-tip", [0.08, 0.05, 0.025], mats.dark, [0, 0.5, -0.815]));
+  root.add(block("dog-left-ear", [0.1, 0.3, 0.08], mats.secondary, [-0.22, 0.53, -0.43]));
+  root.add(block("dog-right-ear", [0.1, 0.3, 0.08], mats.secondary, [0.22, 0.53, -0.43]));
+  root.add(block("dog-collar", [0.42, 0.055, 0.08], mats.accent, [0, 0.42, -0.31]));
+  root.add(block("dog-chest-patch", [0.22, 0.16, 0.026], mats.secondary, [0, 0.34, -0.325]));
+  parts.tail = petTail("dog-tail", mats.secondary, 0.38, 1.16, [0, 0.48, 0.53]);
+  root.add(parts.tail);
+}
+
+function petTail(
+  name: string,
+  material: THREE.Material,
+  length: number,
+  rotationX: number,
+  position: [number, number, number],
+): THREE.Mesh {
+  const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.045, length, 10), material);
+  tail.name = name;
+  tail.position.set(...position);
+  tail.rotation.x = rotationX;
+  return tail;
+}
+
+function addCatWhiskers(root: THREE.Group, material: THREE.Material): void {
+  for (const side of [-1, 1]) {
+    root.add(catWhisker(side, 0.505, 0.16));
+    root.add(catWhisker(side, 0.47, 0));
+    root.add(catWhisker(side, 0.435, -0.16));
+  }
+
+  function catWhisker(side: number, y: number, tilt: number): THREE.Mesh {
+    const whisker = new THREE.Mesh(new THREE.CylinderGeometry(0.006, 0.006, 0.24, 6), material);
+    whisker.name = "cat-whisker";
+    whisker.position.set(side * 0.16, y, -0.53);
+    whisker.rotation.z = Math.PI * 0.5 + side * tilt;
+    return whisker;
+  }
 }
 
 function handCup(material: THREE.Material, h: number, w: number): THREE.Mesh {

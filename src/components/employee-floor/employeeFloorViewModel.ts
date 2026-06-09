@@ -28,6 +28,9 @@ export type EmployeeFloorZone =
   | "standby"
   | "offline";
 
+export type EmployeeFloorVisualKind = "person" | "pet";
+export type EmployeeFloorPetVariant = "dog" | "cat" | "robot";
+
 export type EmployeeOfficeState =
   | "idle_available"
   | "on_standby"
@@ -45,6 +48,11 @@ export type EmployeeOfficeState =
 export type EmployeeFloorViewModel = {
   id: string;
   kind: "employee" | "standby";
+  visualKind?: EmployeeFloorVisualKind;
+  companionOfEmployeeId?: string | null;
+  petVariant?: EmployeeFloorPetVariant | null;
+  occupiesDesk?: boolean;
+  followTargetEmployeeId?: string | null;
   name: string;
   role: Employee["role"];
   employeeStatus: Employee["status"];
@@ -96,6 +104,12 @@ type FloorStateConfig = {
   markerColor: string;
   muted?: boolean;
   worksAtDesk?: boolean;
+};
+
+type EmployeeCompanionFields = {
+  visualKind?: EmployeeFloorVisualKind | null;
+  companionOfEmployeeId?: string | null;
+  petVariant?: EmployeeFloorPetVariant | null;
 };
 
 const floorStateByPresentationState: Record<EmployeeVisualState, FloorStateConfig> = {
@@ -209,10 +223,20 @@ export function createEmployeeFloorViewModel({
   deskIndex,
 }: EmployeeFloorViewModelInput): EmployeeFloorViewModel {
   const config = floorStateConfigForPresentation(presentation);
+  const visualKind = visualKindForEmployee(employee);
+  const companionOfEmployeeId = companionOfEmployeeIdForEmployee(employee);
+  const petVariant = visualKind === "pet" ? petVariantForEmployee(employee) : null;
+  const occupiesDesk = visualKind === "person";
+  const worksAtDesk = occupiesDesk && (config.worksAtDesk ?? false);
 
   return {
     id: employee.id,
     kind: "employee",
+    visualKind,
+    companionOfEmployeeId,
+    petVariant,
+    occupiesDesk,
+    followTargetEmployeeId: visualKind === "pet" ? companionOfEmployeeId : null,
     name: employee.name,
     role: employee.role,
     employeeStatus: employee.status,
@@ -223,7 +247,7 @@ export function createEmployeeFloorViewModel({
     sourceState: presentation.state,
     officeState: config.officeState,
     visualState: config.visualState,
-    zone: config.zone,
+    zone: visualKind === "pet" ? "open_floor" : config.zone,
     label: presentation.label,
     detail: presentation.detail,
     stationTitle: presentation.stationTitle,
@@ -234,7 +258,7 @@ export function createEmployeeFloorViewModel({
     terminalSessionId: employee.terminalSessionId ?? null,
     markerColor: config.markerColor,
     muted: config.muted ?? false,
-    worksAtDesk: config.worksAtDesk ?? false,
+    worksAtDesk,
     pendingApprovals: presentation.pendingApprovals,
     runningActions: presentation.runningActions,
     runningProcesses: presentation.runningProcesses,
@@ -249,6 +273,22 @@ export function createEmployeeFloorViewModel({
     activityReason: presentation.activityReason,
     blockers: presentation.blockers,
   };
+}
+
+export function isPetFloorViewModel(
+  viewModel: EmployeeFloorViewModel,
+): boolean {
+  return viewModel.kind === "employee" && viewModel.visualKind === "pet";
+}
+
+export function isDeskOccupantFloorViewModel(
+  viewModel: EmployeeFloorViewModel,
+): boolean {
+  return (
+    viewModel.kind === "employee" &&
+    !isPetFloorViewModel(viewModel) &&
+    viewModel.occupiesDesk !== false
+  );
 }
 
 function floorStateConfigForPresentation(
@@ -452,20 +492,35 @@ export function createEmployeeFloorViewModels(
   selectedEmployeeId: string | null,
   options: { includeStandby?: boolean } = {},
 ): EmployeeFloorViewModel[] {
-  const employeeModels = inputs.map(({ employee, presentation }, index) =>
-    createEmployeeFloorViewModel({
+  const deskIndexByEmployeeId = new Map<string, number>();
+  for (const { employee } of inputs) {
+    if (visualKindForEmployee(employee) !== "person") {
+      continue;
+    }
+    deskIndexByEmployeeId.set(employee.id, deskIndexByEmployeeId.size);
+  }
+
+  const employeeModels = inputs.map(({ employee, presentation }, index) => {
+    const companionOfEmployeeId = companionOfEmployeeIdForEmployee(employee);
+    const deskIndex =
+      deskIndexByEmployeeId.get(employee.id) ??
+      (companionOfEmployeeId ? deskIndexByEmployeeId.get(companionOfEmployeeId) : undefined) ??
+      deskIndexByEmployeeId.size + index;
+
+    return createEmployeeFloorViewModel({
       employee,
       presentation,
       selected: employee.id === selectedEmployeeId,
-      deskIndex: index,
-    }),
-  );
+      deskIndex,
+    });
+  });
 
   if (!options.includeStandby) {
     return employeeModels;
   }
 
-  const standbyCount = Math.max(0, OFFICE_VISUAL_CAPACITY - employeeModels.length);
+  const personCount = employeeModels.filter(isDeskOccupantFloorViewModel).length;
+  const standbyCount = Math.max(0, OFFICE_VISUAL_CAPACITY - personCount);
   const standbyModels = OFFICE_ROOM_OCCUPANT_SLOTS.slice(0, standbyCount).map((slot, index) =>
     createStandbyFloorViewModel(slot, index),
   );
@@ -479,6 +534,11 @@ export function createStandbyFloorViewModel(
   return {
     id: `standby:${slot.id}`,
     kind: "standby",
+    visualKind: "person",
+    companionOfEmployeeId: null,
+    petVariant: null,
+    occupiesDesk: false,
+    followTargetEmployeeId: null,
     name: "",
     role: "general",
     employeeStatus: "idle",
@@ -515,4 +575,33 @@ export function createStandbyFloorViewModel(
     activityReason: "standby_slot",
     blockers: [],
   };
+}
+
+function visualKindForEmployee(employee: Employee): EmployeeFloorVisualKind {
+  const companionFields = employee as Employee & EmployeeCompanionFields;
+  if (
+    companionFields.visualKind === "pet" ||
+    Boolean(companionFields.companionOfEmployeeId) ||
+    Boolean(companionFields.petVariant)
+  ) {
+    return "pet";
+  }
+  return "person";
+}
+
+function companionOfEmployeeIdForEmployee(employee: Employee): string | null {
+  const companionFields = employee as Employee & EmployeeCompanionFields;
+  return companionFields.companionOfEmployeeId ?? null;
+}
+
+function petVariantForEmployee(employee: Employee): EmployeeFloorPetVariant {
+  const companionFields = employee as Employee & EmployeeCompanionFields;
+  switch (companionFields.petVariant) {
+    case "cat":
+    case "robot":
+    case "dog":
+      return companionFields.petVariant;
+    default:
+      return "dog";
+  }
 }
