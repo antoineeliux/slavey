@@ -60,6 +60,22 @@ The pre-commit hook runs Rust formatting checks and TypeScript typecheck. The pr
 - Do not mix broad refactors with feature behavior.
 - Finish with a clean `git status --short --branch`.
 
+## Issues And Pull Requests
+
+- Use the GitHub issue templates for bugs and feature requests.
+- Keep pull requests focused on one behavior, fix, or documentation change.
+- Open an issue before large architecture, workflow, Tauri permission, persistence, diagnostics, or release-process changes.
+- Include validation results in the pull request description.
+- Do not include secrets, credentials, private prompts, raw terminal output, environment variables, raw process logs, file-write contents, or private repository contents in public issues or pull requests.
+
+## Contribution License
+
+Slavey is licensed under the Apache License, Version 2.0.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this repository is submitted under Apache-2.0 without additional terms.
+
+No contributor license agreement is required at this time.
+
 ## Code Boundaries
 
 ### Backend
@@ -115,6 +131,9 @@ The primary docs are:
 - `docs/activity-contract.md`
 - `docs/terminal-evidence-flow.md`
 - `docs/engineering-rules.md`
+- `SECURITY.md`
+- `PRIVACY.md`
+- `docs/release.md`
 
 ## Security And Safety
 
@@ -125,6 +144,8 @@ Slavey runs local commands and edits local files. Treat safety regressions as hi
 - Keep Tauri permissions minimal.
 - Keep file operations workspace-scoped.
 - Do not add network, shell, filesystem, clipboard, or broader plugin permissions without a dedicated security review.
+
+Report vulnerabilities through `SECURITY.md`; do not publish exploit details in an issue.
 
 ## Pull Request Checklist
 
