@@ -71,5 +71,8 @@ jobs:
       - name: Run web validation
         run: npm run check:web
 
+      - name: Run focused coverage gate
+        run: npm run check:coverage
+
       - name: Run Rust validation
         run: npm run check:rust
