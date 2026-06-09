@@ -52,6 +52,17 @@ cd src-tauri && cargo test
 
 The pre-commit hook runs Rust formatting checks and TypeScript typecheck. The pre-push hook runs `npm run check`.
 
+## CI Gate
+
+GitHub Actions runs the same non-browser validation gate on pull requests and pushes to `main`.
+
+CI installs dependencies with `npm ci`, uses Node.js 22 LTS and stable Rust, then runs:
+
+- `npm run check:web`
+- `npm run check:rust`
+
+Browser smoke tests remain a separate local check for now and are not part of the CI gate.
+
 ## Git Workflow
 
 - Start with `git status --short --branch`.

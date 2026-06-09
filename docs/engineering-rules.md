@@ -5,6 +5,7 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 ## Required Checks
 
 - Run `npm run check` before pushing.
+- GitHub Actions CI runs on pull requests and pushes to `main`, and mirrors the local non-browser validation gate with `npm ci`, `npm run check:web`, and `npm run check:rust`.
 - Run `npm run build` before release-like changes.
 - Run `npm run test:e2e:run` when touching app-shell, tab loading, Tauri command plumbing, or browser-critical employee floor UI.
 - `npm run check` runs the production bundle guard after Vite build to catch E2E fixture leakage into `dist/`.
@@ -15,7 +16,7 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Install hooks with `npm run install-hooks`.
 - The pre-commit hook is intentionally fast and runs formatting plus TypeScript validation.
 - The pre-push hook runs full local validation with `npm run check`.
-- Browser E2E smoke tests are not part of pre-push yet; add them only after they are proven extremely stable and fast.
+- Browser E2E smoke tests are not part of pre-push or CI yet; add them only after they are proven extremely stable and fast.
 - Playwright artifact folders (`test-results/`, `playwright-report/`, and `blob-report/`) are ignored and should not be committed.
 - Use `--no-verify` only for clearly documented exceptions, such as an external outage or a deliberately staged infrastructure step.
 
