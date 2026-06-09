@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 
 import { useAppStore } from "../store/appStore";
-import type { Employee, EmployeeActivity, TerminalSessionRecord } from "../types";
+import type { Employee, EmployeeActivity, PetVariant, TerminalSessionRecord } from "../types";
 import { resolveEmployeeActivityContractView } from "../lib/employeeActivityContractView";
 import { ActionPanel, ApprovalPanel } from "./ActionApprovalPanel";
 import { EmployeeDashboard } from "./EmployeeDashboard";
@@ -29,6 +29,7 @@ export function EmployeeDetailsPanel() {
   const backendReady = useAppStore((state) => state.backendReady);
   const activeTab = useAppStore((state) => state.activeTab);
   const selectedEmployee = useAppStore((state) => state.selectedEmployee());
+  const employees = useAppStore((state) => state.employees);
   const employeeActivities = useAppStore((state) => state.employeeActivities);
   const approvals = useAppStore((state) => state.approvals);
   const actions = useAppStore((state) => state.actions);
@@ -56,6 +57,7 @@ export function EmployeeDetailsPanel() {
   const loadWorktreeChangedFiles = useAppStore((state) => state.loadWorktreeChangedFiles);
   const loadCodexCliStatus = useAppStore((state) => state.loadCodexCliStatus);
   const startTerminal = useAppStore((state) => state.startTerminal);
+  const createEmployeeCompanion = useAppStore((state) => state.createEmployeeCompanion);
   const setEmployeeStandby = useAppStore((state) => state.setEmployeeStandby);
   const resumeEmployeeFromStandby = useAppStore((state) => state.resumeEmployeeFromStandby);
   const stopTerminalSession = useAppStore((state) => state.stopTerminalSession);
@@ -124,6 +126,14 @@ export function EmployeeDetailsPanel() {
   const handoff = worktreeHandoffs[selectedEmployee.id];
   const handoffResult = worktreeHandoffResults[selectedEmployee.id];
   const employeeActions = actions.filter((action) => action.employeeId === selectedEmployee.id);
+  const selectedCompanions = employees.filter(
+    (employee) =>
+      isPetEmployee(employee) && employee.companionOfEmployeeId === selectedEmployee.id,
+  );
+  const companionOwner = selectedEmployee.companionOfEmployeeId
+    ? employees.find((employee) => employee.id === selectedEmployee.companionOfEmployeeId) ?? null
+    : null;
+  const selectedIsPet = isPetEmployee(selectedEmployee);
   const employeeProcesses = processes.filter(
     (process) => !process.employeeId || process.employeeId === selectedEmployee.id,
   );
@@ -172,6 +182,22 @@ export function EmployeeDetailsPanel() {
             <dt>Execution</dt>
             <dd>{selectedEmployee.worktreePath ? "isolated worktree" : "root workspace"}</dd>
           </div>
+          <div>
+            <dt>Type</dt>
+            <dd>
+              {selectedIsPet
+                ? `${petVariantLabel(selectedEmployee.petVariant)} companion`
+                : selectedCompanions.length > 0
+                  ? `${selectedCompanions.length} pet${selectedCompanions.length === 1 ? "" : "s"} attached`
+                  : "person"}
+            </dd>
+          </div>
+          {companionOwner ? (
+            <div>
+              <dt>Follows</dt>
+              <dd>{companionOwner.name}</dd>
+            </div>
+          ) : null}
           <div>
             <dt>CWD</dt>
             <dd title={selectedEmployee.cwd}>{selectedEmployee.cwd}</dd>
@@ -277,6 +303,22 @@ export function EmployeeDetailsPanel() {
               Standby
             </button>
           )}
+          {!selectedIsPet
+            ? PET_VARIANTS.map((petVariant) => (
+                <button
+                  key={petVariant}
+                  className="command-button"
+                  onClick={() =>
+                    void createEmployeeCompanion({
+                      parentEmployeeId: selectedEmployee.id,
+                      petVariant,
+                    })
+                  }
+                >
+                  {petVariantLabel(petVariant)}
+                </button>
+              ))
+            : null}
           <button
             className="command-button"
             disabled={Boolean(worktreeDisabledReason)}
@@ -296,11 +338,13 @@ export function EmployeeDetailsPanel() {
           </button>
           <button
             className="command-button danger"
-            disabled={Boolean(selectedEmployee.worktreePath)}
+            disabled={Boolean(selectedEmployee.worktreePath) || selectedCompanions.length > 0}
             onClick={() => void removeEmployee(selectedEmployee.id)}
             title={
               selectedEmployee.worktreePath
                 ? "Remove or archive the worktree before deleting employee"
+                : selectedCompanions.length > 0
+                  ? "Release attached pets before deleting employee"
                 : "Remove employee"
             }
           >
@@ -312,6 +356,9 @@ export function EmployeeDetailsPanel() {
         ) : null}
         {activeSessionReason ? (
           <div className="inline-note">{activeSessionReason}.</div>
+        ) : null}
+        {selectedCompanions.length > 0 ? (
+          <div className="inline-note">Release attached pets before releasing this employee.</div>
         ) : null}
         {worktreeDisabledReason && !selectedEmployee.worktreePath ? (
           <div className="inline-warning">{worktreeDisabledReason}</div>
@@ -451,6 +498,24 @@ function CodexTaskPanel({
       {blockedByTerminal ? <div className="inline-note">{blockedByTerminal}.</div> : null}
     </section>
   );
+}
+
+const PET_VARIANTS: PetVariant[] = ["dog", "cat", "robot"];
+
+function isPetEmployee(employee: Employee): boolean {
+  return employee.visualKind === "pet" || Boolean(employee.companionOfEmployeeId);
+}
+
+function petVariantLabel(variant: PetVariant | null | undefined): string {
+  switch (variant) {
+    case "cat":
+      return "Cat";
+    case "robot":
+      return "Robot";
+    case "dog":
+    default:
+      return "Dog";
+  }
 }
 
 function displayStatusFor(

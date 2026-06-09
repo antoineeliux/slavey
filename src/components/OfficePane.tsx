@@ -47,12 +47,14 @@ export function OfficePane() {
         handoff={office.reviewHandoff}
         handoffDisabledReason={office.handoffDisabledReason}
         changedFiles={office.selectedChangedFiles}
+        companionCount={office.selectedCompanionCount}
         onOpenTerminal={office.openTerminalContext}
         onOpenEditor={office.openEditorContext}
         onOpenApprovals={office.openDetailsContext}
         onOpenReview={office.openReviewContext}
         onResolvePendingApproval={office.resolvePendingApproval}
         onApplyHandoff={office.runApplyHandoff}
+        onCreateCompanion={office.createCompanionForEmployee}
         onReleaseEmployee={office.releaseEmployee}
         onSetStandby={office.setEmployeeStandby}
         onResumeStandby={office.resumeEmployeeFromStandby}
