@@ -173,6 +173,8 @@ Employees are local records with:
 
 Worktrees are the preferred execution boundary for employee work. Git review and handoff commands operate through backend commands. Handoff apply and abort require explicit confirmation and surface conflicts instead of auto-resolving them.
 
+Pet companions are normal backend employees with dependent office-floor movement. Their own backend activity drives status and indicators, while floor routing follows a parent employee. See [Pet Companion System](pet-companion-system.md).
+
 ## Actions, Approvals, And Processes
 
 Actions are structured operations with explicit transitions. Risky action flows use approvals. Approvals are the audit layer and can be linked to actions.
