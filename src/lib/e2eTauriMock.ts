@@ -32,6 +32,7 @@ import type {
 import type {
   CreateActionInput,
   CreateApprovalInput,
+  CreateEmployeeCompanionInput,
   CreateEmployeeInput,
   SetEmployeeWorkingFolderInput,
 } from "./tauriCommands";
@@ -524,6 +525,8 @@ export async function invokeE2eTauriCommand<T>(
       );
     case "employee_create":
       return clone(createMockEmployee(payload<CreateEmployeeInput>(args)));
+    case "employee_companion_create":
+      return clone(createMockCompanion(payload<CreateEmployeeCompanionInput>(args)));
     case "employee_set_working_folder":
       return clone(withWorkingFolder(payload<SetEmployeeWorkingFolderInput>(args)));
     case "employee_remove":
@@ -804,6 +807,28 @@ function createMockEmployee(input: CreateEmployeeInput | null): Employee {
     branchName: null,
     terminalSessionId: null,
     currentCommand: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function createMockCompanion(input: CreateEmployeeCompanionInput | null): Employee {
+  const parent = employeeById(input?.parentEmployeeId ?? "emp-frontend");
+  const petVariant = input?.petVariant ?? "dog";
+  const label = petVariant.charAt(0).toUpperCase() + petVariant.slice(1);
+  return {
+    id: `pet-${parent.id}-${petVariant}`,
+    name: input?.name ?? `${parent.name} ${label}`,
+    role: input?.role ?? "general",
+    status: "idle",
+    cwd: parent.cwd,
+    worktreePath: null,
+    branchName: null,
+    terminalSessionId: null,
+    currentCommand: null,
+    visualKind: "pet",
+    companionOfEmployeeId: parent.id,
+    petVariant,
     createdAt: now,
     updatedAt: now,
   };

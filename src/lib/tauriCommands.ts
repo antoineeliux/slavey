@@ -15,6 +15,7 @@ import type {
   Employee,
   EmployeeActivity,
   EmployeeRole,
+  PetVariant,
   FileMetadata,
   FilePayload,
   FsEntry,
@@ -59,6 +60,13 @@ export type CreateEmployeeInput = {
 export type SetEmployeeWorkingFolderInput = {
   employeeId: string;
   path: string;
+};
+
+export type CreateEmployeeCompanionInput = {
+  parentEmployeeId: string;
+  name?: string;
+  role?: EmployeeRole;
+  petVariant?: PetVariant;
 };
 
 export type CreateApprovalInput = {
@@ -123,6 +131,12 @@ export function settingsUpdate(payload: AppSettingsUpdate): Promise<AppSettings>
 
 export function employeeCreate(payload: CreateEmployeeInput): Promise<Employee> {
   return invokeCommand("employee_create", { payload });
+}
+
+export function employeeCompanionCreate(
+  payload: CreateEmployeeCompanionInput,
+): Promise<Employee> {
+  return invokeCommand("employee_companion_create", { payload });
 }
 
 export function employeeSetWorkingFolder(

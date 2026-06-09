@@ -15,6 +15,7 @@ type EmployeesSlice = Pick<
   | "loadEmployeeActivities"
   | "refreshEmployeeActivity"
   | "createEmployee"
+  | "createEmployeeCompanion"
   | "removeEmployee"
   | "selectEmployee"
   | "setEmployeeWorkingFolder"
@@ -103,6 +104,17 @@ export const createEmployeesSlice: AppStoreSlice<EmployeesSlice> = (set, get) =>
       await get().persistUiState();
     } catch (error) {
       get().addLog(localLog("error", `create employee failed: ${formatError(error)}`));
+    }
+  },
+
+  createEmployeeCompanion: async (input) => {
+    try {
+      const employee = await commands.employeeCompanionCreate(input);
+      get().upsertEmployee(employee);
+      void get().refreshEmployeeActivity(employee.id);
+      await get().persistUiState();
+    } catch (error) {
+      get().addLog(localLog("error", `create pet failed: ${formatError(error)}`));
     }
   },
 

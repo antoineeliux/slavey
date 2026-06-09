@@ -166,6 +166,7 @@ pub fn run() {
             persistence::app_state_load,
             persistence::app_state_save,
             employees::employee_create,
+            employees::employee_companion_create,
             employees::employee_list,
             employees::employee_role_policies,
             employees::employee_remove,

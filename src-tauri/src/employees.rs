@@ -51,6 +51,21 @@ pub enum EmployeeRole {
     General,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmployeeVisualKind {
+    Person,
+    Pet,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PetVariant {
+    Dog,
+    Cat,
+    Robot,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RolePolicy {
@@ -73,6 +88,12 @@ pub struct Employee {
     pub branch_name: Option<String>,
     pub terminal_session_id: Option<String>,
     pub current_command: Option<String>,
+    #[serde(default = "default_employee_visual_kind")]
+    pub visual_kind: EmployeeVisualKind,
+    #[serde(default)]
+    pub companion_of_employee_id: Option<String>,
+    #[serde(default)]
+    pub pet_variant: Option<PetVariant>,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -83,6 +104,15 @@ pub struct EmployeeCreateRequest {
     pub name: String,
     pub role: EmployeeRole,
     pub cwd: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmployeeCompanionCreateRequest {
+    pub parent_employee_id: String,
+    pub name: Option<String>,
+    pub role: Option<EmployeeRole>,
+    pub pet_variant: Option<PetVariant>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +151,40 @@ impl EmployeeManager {
             branch_name: None,
             terminal_session_id: None,
             current_command: None,
+            visual_kind: EmployeeVisualKind::Person,
+            companion_of_employee_id: None,
+            pet_variant: None,
+            created_at: now,
+            updated_at: now,
+        };
+        self.employees
+            .lock()
+            .insert(employee.id.clone(), employee.clone());
+        employee
+    }
+
+    fn create_companion(
+        &self,
+        name: String,
+        role: EmployeeRole,
+        cwd: PathBuf,
+        parent_employee_id: String,
+        pet_variant: PetVariant,
+    ) -> Employee {
+        let now = now_ms();
+        let employee = Employee {
+            id: Uuid::new_v4().to_string(),
+            name,
+            role,
+            status: EmployeeStatus::Idle,
+            cwd: cwd.to_string_lossy().to_string(),
+            worktree_path: None,
+            branch_name: None,
+            terminal_session_id: None,
+            current_command: None,
+            visual_kind: EmployeeVisualKind::Pet,
+            companion_of_employee_id: Some(parent_employee_id),
+            pet_variant: Some(pet_variant),
             created_at: now,
             updated_at: now,
         };
@@ -167,6 +231,17 @@ impl EmployeeManager {
     pub fn remove(&self, id: &str) -> Option<Employee> {
         self.employees.lock().remove(id)
     }
+
+    fn attached_companions(&self, parent_employee_id: &str) -> Vec<Employee> {
+        self.employees
+            .lock()
+            .values()
+            .filter(|employee| {
+                employee.companion_of_employee_id.as_deref() == Some(parent_employee_id)
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 #[tauri::command]
@@ -198,6 +273,25 @@ pub fn employee_create(
 }
 
 #[tauri::command]
+pub fn employee_companion_create(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    payload: EmployeeCompanionCreateRequest,
+) -> Result<Employee, String> {
+    let workspace_root = state.workspace_root();
+    let employee = create_companion_employee(&state.employees, &workspace_root, payload)?;
+
+    emit_log(
+        &app,
+        LogLevel::Info,
+        format!("created companion {} for employee", employee.name),
+    );
+    emit_employee_updated(&app, employee.clone());
+    persist_or_log(&app, &state);
+    Ok(employee)
+}
+
+#[tauri::command]
 pub fn employee_list(state: State<'_, AppState>) -> Vec<Employee> {
     state.employees.list()
 }
@@ -217,6 +311,7 @@ pub fn employee_remove(
         return Ok(());
     };
     ensure_employee_can_remove(&employee)?;
+    ensure_employee_has_no_attached_companions(&employee, &state.employees)?;
 
     if let Some(removed) = state.employees.remove(&employee_id) {
         if let Some(session_id) = removed.terminal_session_id {
@@ -601,6 +696,32 @@ fn persist_terminal_snapshot(context: &TerminalPersistContext) -> Result<(), Str
     })
 }
 
+fn create_companion_employee(
+    employees: &EmployeeManager,
+    workspace_root: &Path,
+    payload: EmployeeCompanionCreateRequest,
+) -> Result<Employee, String> {
+    let parent = employees
+        .get(&payload.parent_employee_id)
+        .ok_or_else(|| "parent employee not found".to_string())?;
+    if is_companion_employee(&parent) {
+        return Err("nested companions are not supported in v1".to_string());
+    }
+
+    let pet_variant = payload.pet_variant.unwrap_or(PetVariant::Dog);
+    let role = payload.role.unwrap_or(EmployeeRole::General);
+    let name = payload
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| default_companion_name(&parent, pet_variant));
+    let cwd = resolve_employee_execution_dir(workspace_root, &parent, None)?;
+
+    Ok(employees.create_companion(name, role, cwd, parent.id, pet_variant))
+}
+
 fn ensure_employee_can_remove(employee: &Employee) -> Result<(), String> {
     if employee.worktree_path.is_some() {
         Err(
@@ -610,6 +731,38 @@ fn ensure_employee_can_remove(employee: &Employee) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+fn ensure_employee_has_no_attached_companions(
+    employee: &Employee,
+    employees: &EmployeeManager,
+) -> Result<(), String> {
+    let companions = employees.attached_companions(&employee.id);
+    if companions.is_empty() {
+        return Ok(());
+    }
+
+    Err(format!(
+        "employee has {} attached companion(s); release or remove companions before deleting employee",
+        companions.len()
+    ))
+}
+
+fn is_companion_employee(employee: &Employee) -> bool {
+    employee.visual_kind == EmployeeVisualKind::Pet || employee.companion_of_employee_id.is_some()
+}
+
+fn default_companion_name(parent: &Employee, pet_variant: PetVariant) -> String {
+    let variant = match pet_variant {
+        PetVariant::Dog => "Dog",
+        PetVariant::Cat => "Cat",
+        PetVariant::Robot => "Robot",
+    };
+    format!("{} {}", parent.name, variant)
+}
+
+fn default_employee_visual_kind() -> EmployeeVisualKind {
+    EmployeeVisualKind::Person
 }
 
 fn mark_terminal_starting(employee: &mut Employee, profile: TerminalLaunchProfile) {
@@ -751,6 +904,9 @@ mod tests {
             branch_name: None,
             terminal_session_id: None,
             current_command: None,
+            visual_kind: EmployeeVisualKind::Person,
+            companion_of_employee_id: None,
+            pet_variant: None,
             created_at: 1,
             updated_at: 1,
         }
@@ -783,6 +939,180 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("employee has a worktree"));
+    }
+
+    #[test]
+    fn employee_with_attached_companion_cannot_be_removed() {
+        let manager = EmployeeManager::default();
+        let parent = manager.create(
+            "Ada".to_string(),
+            EmployeeRole::General,
+            PathBuf::from("/tmp/workspace"),
+        );
+        manager.create_companion(
+            "Ada Dog".to_string(),
+            EmployeeRole::General,
+            PathBuf::from("/tmp/workspace"),
+            parent.id.clone(),
+            PetVariant::Dog,
+        );
+
+        let error = ensure_employee_has_no_attached_companions(&parent, &manager).unwrap_err();
+
+        assert!(error.contains("attached companion"));
+    }
+
+    #[test]
+    fn old_employee_snapshot_defaults_to_person_visual_kind() {
+        let json = r#"{
+            "id": "employee-1",
+            "name": "Employee 1",
+            "role": "general",
+            "status": "idle",
+            "cwd": "/tmp/workspace",
+            "worktreePath": null,
+            "branchName": null,
+            "terminalSessionId": null,
+            "currentCommand": null,
+            "createdAt": 1,
+            "updatedAt": 1
+        }"#;
+
+        let employee: Employee = serde_json::from_str(json).unwrap();
+
+        assert_eq!(employee.visual_kind, EmployeeVisualKind::Person);
+        assert_eq!(employee.companion_of_employee_id, None);
+        assert_eq!(employee.pet_variant, None);
+    }
+
+    #[test]
+    fn companion_create_defaults_to_general_dog_without_starting_terminal() {
+        let root = test_root("companion-defaults");
+        let manager = EmployeeManager::default();
+        let parent = manager.create("Ada".to_string(), EmployeeRole::Backend, root.clone());
+
+        let companion = create_companion_employee(
+            &manager,
+            &root,
+            EmployeeCompanionCreateRequest {
+                parent_employee_id: parent.id.clone(),
+                name: None,
+                role: None,
+                pet_variant: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(companion.name, "Ada Dog");
+        assert_eq!(companion.role, EmployeeRole::General);
+        assert_eq!(companion.status, EmployeeStatus::Idle);
+        assert_eq!(companion.cwd, root.to_string_lossy().to_string());
+        assert_eq!(companion.worktree_path, None);
+        assert_eq!(companion.branch_name, None);
+        assert_eq!(companion.terminal_session_id, None);
+        assert_eq!(companion.current_command, None);
+        assert_eq!(companion.visual_kind, EmployeeVisualKind::Pet);
+        assert_eq!(
+            companion.companion_of_employee_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+        assert_eq!(companion.pet_variant, Some(PetVariant::Dog));
+    }
+
+    #[test]
+    fn companion_create_uses_parent_resolved_execution_dir() {
+        let root = test_root("companion-execution-dir");
+        let worktree = root.join(".slavey").join("worktrees").join("employee-1");
+        let nested = worktree.join("packages").join("app");
+        std_fs::create_dir_all(&nested).unwrap();
+        let manager = EmployeeManager::default();
+        let parent = manager.create("Ada".to_string(), EmployeeRole::Backend, root.clone());
+        manager.update(&parent.id, |employee| {
+            employee.cwd = nested.to_string_lossy().to_string();
+            employee.worktree_path = Some(worktree.to_string_lossy().to_string());
+        });
+
+        let companion = create_companion_employee(
+            &manager,
+            &root,
+            EmployeeCompanionCreateRequest {
+                parent_employee_id: parent.id.clone(),
+                name: Some("Build Bot".to_string()),
+                role: Some(EmployeeRole::Tester),
+                pet_variant: Some(PetVariant::Robot),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(companion.name, "Build Bot");
+        assert_eq!(companion.role, EmployeeRole::Tester);
+        assert_eq!(companion.cwd, nested.to_string_lossy().to_string());
+        assert_eq!(companion.worktree_path, None);
+        assert_eq!(companion.pet_variant, Some(PetVariant::Robot));
+    }
+
+    #[test]
+    fn companion_create_rejects_nested_companion_parent() {
+        let root = test_root("companion-nested");
+        let manager = EmployeeManager::default();
+        let parent = manager.create("Ada".to_string(), EmployeeRole::Backend, root.clone());
+        let companion = create_companion_employee(
+            &manager,
+            &root,
+            EmployeeCompanionCreateRequest {
+                parent_employee_id: parent.id,
+                name: None,
+                role: None,
+                pet_variant: Some(PetVariant::Cat),
+            },
+        )
+        .unwrap();
+
+        let error = create_companion_employee(
+            &manager,
+            &root,
+            EmployeeCompanionCreateRequest {
+                parent_employee_id: companion.id,
+                name: None,
+                role: None,
+                pet_variant: Some(PetVariant::Robot),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("nested companions"));
+    }
+
+    #[test]
+    fn companion_create_allows_multiple_companions_for_one_parent() {
+        let root = test_root("companion-multiple");
+        let manager = EmployeeManager::default();
+        let parent = manager.create("Ada".to_string(), EmployeeRole::Backend, root.clone());
+
+        create_companion_employee(
+            &manager,
+            &root,
+            EmployeeCompanionCreateRequest {
+                parent_employee_id: parent.id.clone(),
+                name: None,
+                role: None,
+                pet_variant: Some(PetVariant::Dog),
+            },
+        )
+        .unwrap();
+        create_companion_employee(
+            &manager,
+            &root,
+            EmployeeCompanionCreateRequest {
+                parent_employee_id: parent.id.clone(),
+                name: None,
+                role: None,
+                pet_variant: Some(PetVariant::Cat),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(manager.attached_companions(&parent.id).len(), 2);
     }
 
     #[test]
