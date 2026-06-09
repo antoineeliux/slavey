@@ -390,6 +390,117 @@ describe("app store smoke behavior", () => {
     expect(useAppStore.getState().selectedEmployee()?.name).toBe("Grace");
   });
 
+  it("creates and removes employees while keeping selection and activity state in sync", async () => {
+    const createdEmployee = employee({
+      id: "employee-2",
+      name: "Grace",
+      role: "frontend",
+      cwd: "/workspace/frontend",
+      createdAt: 2,
+      updatedAt: 2,
+    });
+    (mockTauriInvoke as InvokeMock).mockImplementation(
+      async (command: string, args?: Record<string, unknown>) => {
+        switch (command) {
+          case "employee_create":
+            expect(args).toEqual({
+              payload: { name: "Grace", role: "frontend", cwd: "/workspace/frontend" },
+            });
+            return createdEmployee;
+          case "employee_remove":
+            expect(args).toEqual({ employeeId: "employee-2" });
+            return null;
+          case "fs_list_dir":
+            return [];
+          case "app_state_save":
+            return null;
+          default:
+            return null;
+        }
+      },
+    );
+    act(() => {
+      useAppStore.setState({
+        workspaceRoot: "/workspace",
+        employees: [employee()],
+      });
+    });
+
+    await act(async () => {
+      await useAppStore.getState().createEmployee({
+        name: "Grace",
+        role: "frontend",
+        cwd: "/workspace/frontend",
+      });
+    });
+
+    expect(useAppStore.getState().selectedEmployee()).toMatchObject({
+      id: "employee-2",
+      name: "Grace",
+    });
+
+    act(() => {
+      useAppStore.setState({
+        employeeActivities: {
+          "employee-2": codexDeskWorkingActivity("employee-2"),
+        },
+      });
+    });
+
+    await act(async () => {
+      await useAppStore.getState().removeEmployee("employee-2");
+    });
+
+    expect(useAppStore.getState().employees.map((item) => item.id)).toEqual(["employee-1"]);
+    expect(useAppStore.getState().selectedEmployeeId).toBeNull();
+    expect(useAppStore.getState().employeeActivities["employee-2"]).toBeUndefined();
+  });
+
+  it("refreshes employee activity after standby and resume transitions", async () => {
+    let activityCalls = 0;
+    (mockTauriInvoke as InvokeMock).mockImplementation(
+      async (command: string, args?: Record<string, unknown>) => {
+        switch (command) {
+          case "employee_set_standby":
+            expect(args).toEqual({ employeeId: "employee-1" });
+            return employee({ status: "standby", updatedAt: 2 });
+          case "employee_resume_from_standby":
+            expect(args).toEqual({ employeeId: "employee-1" });
+            return employee({ status: "running", updatedAt: 3 });
+          case "employee_activity_get":
+            expect(args).toEqual({ employeeId: "employee-1" });
+            activityCalls += 1;
+            return activityCalls === 1
+              ? codexWaitingInstructionActivity("employee-1", { lastActivityAt: 2_000 })
+              : codexDeskWorkingActivity("employee-1", { lastActivityAt: 3_000 });
+          default:
+            return null;
+        }
+      },
+    );
+    act(() => {
+      useAppStore.setState({
+        employees: [employee()],
+      });
+    });
+
+    await act(async () => {
+      await useAppStore.getState().setEmployeeStandby("employee-1");
+    });
+    await waitFor(() => {
+      expect(useAppStore.getState().employeeActivities["employee-1"]?.lastActivityAt).toBe(2_000);
+    });
+    expect(useAppStore.getState().employees[0]).toMatchObject({ status: "standby" });
+
+    await act(async () => {
+      await useAppStore.getState().resumeEmployeeFromStandby("employee-1");
+    });
+    await waitFor(() => {
+      expect(useAppStore.getState().employeeActivities["employee-1"]?.lastActivityAt).toBe(3_000);
+    });
+    expect(useAppStore.getState().employees[0]).toMatchObject({ status: "running" });
+  });
+
   it("refreshes desk activity after submitting a Codex app-server task", async () => {
     const workingSession = codexAppServerWorkingSession();
     const workingActivity = codexDeskWorkingActivity("employee-1", {
@@ -652,6 +763,109 @@ describe("app store smoke behavior", () => {
     expect(useAppStore.getState().employeeActivities["employee-2"]?.status).toBe(
       "codex_waiting_instruction",
     );
+  });
+
+  it("preserves a newer employee activity refresh over an older full-list response", async () => {
+    const staleList = deferred<EmployeeActivity[]>();
+    const freshEmployeeActivity = deferred<EmployeeActivity>();
+    (mockTauriInvoke as InvokeMock).mockImplementation(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command === "employee_activity_list") {
+          return staleList.promise;
+        }
+        if (command === "employee_activity_get") {
+          expect(args).toEqual({ employeeId: "employee-1" });
+          return freshEmployeeActivity.promise;
+        }
+        return null;
+      },
+    );
+
+    await act(async () => {
+      void useAppStore.getState().loadEmployeeActivities();
+      void useAppStore.getState().refreshEmployeeActivity("employee-1");
+    });
+
+    await act(async () => {
+      freshEmployeeActivity.resolve(
+        codexWaitingInstructionActivity("employee-1", { lastActivityAt: 2_000 }),
+      );
+      await freshEmployeeActivity.promise;
+    });
+    await waitFor(() => {
+      expect(useAppStore.getState().employeeActivities["employee-1"]?.lastActivityAt).toBe(2_000);
+    });
+
+    await act(async () => {
+      staleList.resolve([codexDeskWorkingActivity("employee-1", { lastActivityAt: 1_000 })]);
+      await staleList.promise;
+    });
+
+    expect(useAppStore.getState().employeeActivities["employee-1"]).toMatchObject({
+      status: "codex_waiting_instruction",
+      lastActivityAt: 2_000,
+    });
+  });
+
+  it("ignores an older full-list response after a newer full-list refresh wins", async () => {
+    const staleList = deferred<EmployeeActivity[]>();
+    const freshList = deferred<EmployeeActivity[]>();
+    let listCalls = 0;
+    (mockTauriInvoke as InvokeMock).mockImplementation(async (command: string) => {
+      if (command === "employee_activity_list") {
+        listCalls += 1;
+        return listCalls === 1 ? staleList.promise : freshList.promise;
+      }
+      return null;
+    });
+
+    await act(async () => {
+      void useAppStore.getState().loadEmployeeActivities();
+      void useAppStore.getState().loadEmployeeActivities();
+    });
+    expect(listCalls).toBe(2);
+
+    await act(async () => {
+      freshList.resolve([codexDeskWorkingActivity("employee-1", { lastActivityAt: 2_000 })]);
+      await freshList.promise;
+    });
+    await waitFor(() => {
+      expect(useAppStore.getState().employeeActivities["employee-1"]?.lastActivityAt).toBe(2_000);
+    });
+
+    await act(async () => {
+      staleList.resolve([
+        codexWaitingInstructionActivity("employee-1", { lastActivityAt: 1_000 }),
+      ]);
+      await staleList.promise;
+    });
+
+    expect(useAppStore.getState().employeeActivities["employee-1"]).toMatchObject({
+      status: "codex_running",
+      lastActivityAt: 2_000,
+    });
+  });
+
+  it("removes activity only when the latest employee refresh reports it missing", async () => {
+    (mockTauriInvoke as InvokeMock).mockImplementation(async (command: string) => {
+      if (command === "employee_activity_get") {
+        throw new Error("activity missing");
+      }
+      return null;
+    });
+    act(() => {
+      useAppStore.setState({
+        employeeActivities: {
+          "employee-1": codexDeskWorkingActivity("employee-1"),
+        },
+      });
+    });
+
+    await act(async () => {
+      await useAppStore.getState().refreshEmployeeActivity("employee-1");
+    });
+
+    expect(useAppStore.getState().employeeActivities["employee-1"]).toBeUndefined();
   });
 
   it("applies terminal session updates before refreshing floor activity from backend contract", async () => {
