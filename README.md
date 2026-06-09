@@ -69,6 +69,8 @@ Use the full local gate before pushing:
 npm run check
 ```
 
+Pull requests and pushes to `main` run the same non-browser validation gate in GitHub Actions.
+
 `npm run check` runs:
 
 - TypeScript typecheck.
