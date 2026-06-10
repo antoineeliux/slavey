@@ -39,8 +39,12 @@ npm run check
 For browser smoke coverage:
 
 ```sh
-npm run test:e2e:run
+npm run check:e2e:smoke
 ```
+
+`npm run check:e2e:smoke` is the CI-safe Playwright gate. It runs the smoke tests in `e2e/app-shell.ci.spec.ts` and avoids screenshot snapshot assertions.
+
+Use `npm run test:e2e:run` for broader local browser checks. That command may include local-only visual coverage such as screenshot baselines, so review failures on your machine instead of treating them as Ubuntu CI expectations.
 
 Use targeted checks while developing:
 
@@ -57,15 +61,16 @@ Run `npm run check:coverage` when changing employee activity presentation, emplo
 
 ## CI Gate
 
-GitHub Actions runs the same non-browser validation gate on pull requests and pushes to `main`.
+GitHub Actions runs the validation gate on pull requests and pushes to `main`.
 
 CI installs dependencies with `npm ci`, uses Node.js 22 LTS and stable Rust, then runs:
 
 - `npm run check:web`
+- `npm run check:e2e:smoke`
 - `npm run check:coverage`
 - `npm run check:rust`
 
-Browser smoke tests remain a separate local check for now and are not part of the CI gate.
+CI installs Playwright Chromium before the browser smoke gate. Screenshot baselines remain local review assets for now and are not part of CI because the current snapshots are platform-specific.
 
 ## Git Workflow
 
