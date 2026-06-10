@@ -22,6 +22,7 @@ export function createEmployeeFloorRenderer(
       antialias: true,
       alpha: false,
       powerPreference: "low-power",
+      preserveDrawingBuffer: e2ePreserveDrawingBufferEnabled(),
     });
   } catch {
     return null;
@@ -38,6 +39,15 @@ export function createEmployeeFloorRenderer(
   container.appendChild(renderer.domElement);
 
   return { renderer, width, height };
+}
+
+function e2ePreserveDrawingBufferEnabled(): boolean {
+  if (import.meta.env.VITE_SLAVEY_E2E !== "true" || typeof window === "undefined") {
+    return false;
+  }
+  return (
+    window as typeof window & { __slaveyE2ePreserveDrawingBuffer?: boolean }
+  ).__slaveyE2ePreserveDrawingBuffer === true;
 }
 
 export function sizeForContainer(container: HTMLElement): { width: number; height: number } {
