@@ -1,5 +1,16 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const ciChromiumLaunchOptions = process.env.CI
+  ? {
+      args: [
+        "--use-gl=swiftshader",
+        "--enable-unsafe-swiftshader",
+        "--ignore-gpu-blocklist",
+        "--disable-dev-shm-usage",
+      ],
+    }
+  : undefined;
+
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
@@ -16,6 +27,7 @@ export default defineConfig({
     reducedMotion: "reduce",
     timezoneId: "UTC",
     trace: "on-first-retry",
+    launchOptions: ciChromiumLaunchOptions,
   },
   webServer: {
     command: "npm exec vite -- --host 127.0.0.1 --port 1421",

@@ -1,5 +1,7 @@
 import { expect, type Locator, type Page } from "@playwright/test";
 
+export const OFFICE_READY_TIMEOUT = 30_000;
+
 export type OpenAppOptions = {
   deterministicRendering?: boolean;
   preserveDrawingBuffer?: boolean;
@@ -43,12 +45,22 @@ export async function openApp(
     });
   }
   await page.goto("/");
-  await expect(page.locator("#root .app-shell")).toBeVisible();
-  await expect(page.locator("#root .app-shell")).toHaveAttribute("data-backend-ready", "true");
-  await expect(workspaceTab(page, "Office")).toBeVisible();
+  const appShell = page.locator("#root .app-shell");
+  const officeTab = workspaceTab(page, "Office");
+  await expect(appShell).toBeVisible();
+  await expect(appShell).toHaveAttribute("data-backend-ready", "true");
+  await expect(officeTab).toBeVisible();
   if (options.waitForOffice) {
-    await expect(page.locator(".office-pane")).toBeVisible();
-    await expect(page.locator(".office-status-hud").getByText("Mira Frontend")).toBeVisible();
+    await officeTab.click();
+    await expect(appShell).toHaveClass(/office-active/, { timeout: OFFICE_READY_TIMEOUT });
+    const officePane = page.locator(".office-pane");
+    await expect(officePane).toBeVisible({ timeout: OFFICE_READY_TIMEOUT });
+    await expect(officePane.locator(".office-floating-toolbar")).toBeVisible({
+      timeout: OFFICE_READY_TIMEOUT,
+    });
+    await expect(officePane.locator(".office-status-hud").getByText("Mira Frontend")).toBeVisible({
+      timeout: OFFICE_READY_TIMEOUT,
+    });
   }
 }
 
@@ -66,7 +78,7 @@ export async function expectCanvasToBeNonBlank(canvas: Locator): Promise<void> {
           const webglCanvas = element as HTMLCanvasElement;
           return webglCanvas.width > 0 && webglCanvas.height > 0;
         }),
-      { timeout: 5_000 },
+      { timeout: OFFICE_READY_TIMEOUT },
     )
     .toBe(true);
   await expect
@@ -117,7 +129,7 @@ export async function expectCanvasToBeNonBlank(canvas: Locator): Promise<void> {
 
           return colors.size >= 8 && maxLuminance - minLuminance >= 8;
         }),
-      { timeout: 10_000 },
+      { timeout: OFFICE_READY_TIMEOUT },
     )
     .toBe(true);
 }

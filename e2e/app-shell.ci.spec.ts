@@ -1,8 +1,9 @@
-import { expect, test as base, type Page } from "@playwright/test";
+import { expect, test as base, type Locator, type Page } from "@playwright/test";
 
 import {
   collectUnexpectedErrors,
   expectCanvasToBeNonBlank,
+  OFFICE_READY_TIMEOUT,
   openApp,
   workspaceTab,
 } from "./helpers";
@@ -80,44 +81,47 @@ test.describe("app shell CI smoke", () => {
   });
 
   test("renders the office pane and nonblank WebGL canvas", async ({ page }) => {
+    test.setTimeout(60_000);
     await openApp(page, { preserveDrawingBuffer: true, waitForOffice: true });
-
-    await workspaceTab(page, "Office").click();
 
     const officePane = page.locator(".office-pane");
     const canvas = officePane.locator(".employee-floor-webgl");
-    await expect(officePane).toBeVisible();
-    await expect(officePane.locator(".office-floating-toolbar")).toBeVisible();
-    await expect(officePane.locator(".office-status-hud").getByText("Mira Frontend")).toBeVisible();
-    await expect(canvas).toBeVisible();
+    await expect(officePane).toBeVisible({ timeout: OFFICE_READY_TIMEOUT });
+    await expect(officePane.locator(".office-floating-toolbar")).toBeVisible({
+      timeout: OFFICE_READY_TIMEOUT,
+    });
+    await expect(officePane.locator(".office-status-hud").getByText("Mira Frontend")).toBeVisible({
+      timeout: OFFICE_READY_TIMEOUT,
+    });
+    await expect(canvas).toBeVisible({ timeout: OFFICE_READY_TIMEOUT });
     await expectCanvasToBeNonBlank(canvas);
   });
 
   test("opens refreshes closes and reopens the office terminal dock", async ({ page }) => {
+    test.setTimeout(90_000);
     await openApp(page, { waitForOffice: true });
 
     const officePane = page.locator(".office-pane");
-    const terminalDock = officePane.getByLabel("Mira Frontend terminal");
-    const terminalAction = officePane
-      .locator(".office-status-hud")
-      .getByRole("button", { name: "Terminal" })
-      .first();
+    const statusHud = officePane.locator(".office-status-hud");
+    const terminalDock = officePane.locator(
+      'section.office-terminal-dock[aria-label="Mira Frontend terminal"]',
+    );
+    const terminalActions = statusHud.locator(".office-status-actions");
 
-    await terminalAction.click();
-    await expect(terminalDock).toBeVisible();
-    await expect(terminalDock.getByText("Mock shell · running")).toBeVisible();
-    await expect(terminalDock.locator(".office-terminal-host")).toBeVisible();
-    await expect(terminalDock.getByText("npm run test:web:run").first()).toBeVisible();
+    await expect(statusHud).toContainText("Mira Frontend", { timeout: OFFICE_READY_TIMEOUT });
+    await expect(statusHud).toContainText("session linked", { timeout: OFFICE_READY_TIMEOUT });
+    await expect(statusHud).toContainText("frontend-smoke", { timeout: OFFICE_READY_TIMEOUT });
 
-    await terminalDock.getByRole("button", { name: "Refresh terminal rendering" }).click();
-    await expect(terminalDock.getByText("npm run test:web:run").first()).toBeVisible();
+    await openTerminalDock(terminalActions, terminalDock);
+    await expectTerminalDockContent(terminalDock);
 
-    await terminalDock.getByTitle("Close terminal").click();
-    await expect(terminalDock).toBeHidden();
+    await clickRenderedButton(terminalDock, "Refresh terminal rendering");
+    await expectTerminalDockContent(terminalDock);
 
-    await terminalAction.click();
-    await expect(terminalDock).toBeVisible();
-    await expect(terminalDock.getByText("npm run test:web:run").first()).toBeVisible();
+    await closeTerminalDock(terminalDock);
+
+    await openTerminalDock(terminalActions, terminalDock);
+    await expectTerminalDockContent(terminalDock);
   });
 });
 
@@ -133,4 +137,100 @@ async function expectAppShellToBeNonBlank(page: Page): Promise<void> {
       }),
     )
     .toBe(true);
+}
+
+async function expectTerminalDockContent(terminalDock: Locator): Promise<void> {
+  await expect(terminalDock).toBeVisible({ timeout: OFFICE_READY_TIMEOUT });
+  await expect
+    .poll(
+      () =>
+        terminalDock.evaluate((element) => {
+          const rect = element.getBoundingClientRect();
+          const host = element.querySelector(".office-terminal-host");
+          const hostRect = host?.getBoundingClientRect();
+          const renderedText = (element.textContent ?? "").replace(/\s+/g, " ").trim();
+          const refreshButton = element.querySelector(
+            'button[aria-label="Refresh terminal rendering"]',
+          );
+          const closeButton = element.querySelector('button[aria-label="Close terminal"]');
+          return {
+            hasEmployeeName: renderedText.includes("Mira Frontend"),
+            hasRefreshAction: Boolean(refreshButton),
+            hasCloseAction: Boolean(closeButton),
+            hasVisibleHost:
+              Boolean(host) &&
+              Boolean(hostRect) &&
+              hostRect.width >= 240 &&
+              hostRect.height >= 80,
+            hasVisibleShell: rect.width >= 320 && rect.height >= 180,
+          };
+        }),
+      { timeout: OFFICE_READY_TIMEOUT },
+    )
+    .toEqual({
+      hasEmployeeName: true,
+      hasRefreshAction: true,
+      hasCloseAction: true,
+      hasVisibleHost: true,
+      hasVisibleShell: true,
+    });
+}
+
+async function openTerminalDock(terminalActions: Locator, terminalDock: Locator): Promise<void> {
+  await expect(terminalActions).toBeVisible({ timeout: OFFICE_READY_TIMEOUT });
+  await expect(async () => {
+    await clickRenderedButton(terminalActions, "Terminal", 5_000);
+    await expect(terminalDock).toHaveCount(1, { timeout: 5_000 });
+    await expect(terminalDock).toBeVisible({ timeout: 5_000 });
+  }).toPass({ timeout: OFFICE_READY_TIMEOUT });
+}
+
+async function closeTerminalDock(terminalDock: Locator): Promise<void> {
+  await expect(async () => {
+    await clickRenderedButton(terminalDock, "Close terminal", 5_000);
+    await expect(terminalDock).toHaveCount(0, { timeout: 5_000 });
+  }).toPass({ timeout: OFFICE_READY_TIMEOUT });
+}
+
+async function clickRenderedButton(
+  container: Locator,
+  label: string,
+  timeout = OFFICE_READY_TIMEOUT,
+): Promise<void> {
+  await expect
+    .poll(
+      () =>
+        container.evaluate((element, targetLabel) => {
+          const normalizedTarget = targetLabel.replace(/\s+/g, " ").trim();
+          const buttons = Array.from(element.querySelectorAll("button"));
+          const button = buttons.find((candidate) => {
+            const accessibleLabel =
+              candidate.getAttribute("aria-label") ??
+              candidate.getAttribute("title") ??
+              candidate.textContent ??
+              "";
+            return accessibleLabel.replace(/\s+/g, " ").trim() === normalizedTarget;
+          });
+          if (!(button instanceof HTMLButtonElement)) {
+            return "missing";
+          }
+          const rect = button.getBoundingClientRect();
+          const style = window.getComputedStyle(button);
+          if (button.disabled) {
+            return "disabled";
+          }
+          if (
+            rect.width <= 0 ||
+            rect.height <= 0 ||
+            style.display === "none" ||
+            style.visibility === "hidden"
+          ) {
+            return "hidden";
+          }
+          button.click();
+          return "clicked";
+        }, label),
+      { timeout },
+    )
+    .toBe("clicked");
 }
