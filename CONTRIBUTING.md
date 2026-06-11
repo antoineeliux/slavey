@@ -104,7 +104,7 @@ It builds with Node.js 22 and stable Rust on:
 - `ubuntu-24.04`
 - `windows-latest`
 
-The current Tauri bundle config targets macOS `app` and `dmg` bundles. The dry run builds unsigned macOS bundles with `npm run build -- --ci --no-sign`; Linux and Windows compile release binaries with `npm run build -- --ci --no-bundle` until platform bundle targets are intentionally added. The workflow uploads any produced bundle output from `src-tauri/target/release/bundle`, release binaries, and a per-platform summary artifact.
+The current Tauri bundle config targets macOS `app` and `dmg` bundles. The dry run builds the unsigned macOS app bundle with `npm run build -- --ci --no-sign --bundles app`; DMG output is a TODO until unsigned headless DMG bundling is reliable. Linux and Windows compile release binaries with `npm run build -- --ci --no-bundle` until platform bundle targets are intentionally added. The workflow uploads any produced bundle output from `src-tauri/target/release/bundle`, release binaries, and a per-platform summary artifact.
 
 ## Git Workflow
 

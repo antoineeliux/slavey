@@ -46,7 +46,8 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Keep release dry-run workflows separate from required PR validation until they are proven reliable across hosted macOS, Linux, and Windows runners.
 - Do not require signing or notarization secrets for dry runs; unsigned bundle production is enough to prove the packaging path still works.
 - Document platform packaging gaps in the workflow or contributor docs instead of hiding them behind silent skips.
-- When adding Linux or Windows Tauri bundle targets, update the dry-run workflow in the same phase so those platforms upload installer artifacts instead of only release binaries.
+- The current dry run builds the unsigned macOS app bundle and skips DMG output until unsigned headless DMG bundling is reliable.
+- When adding DMG, Linux, or Windows Tauri bundle targets, update the dry-run workflow in the same phase so those platforms upload installer artifacts instead of only release binaries.
 
 ## Backend Safety Principles
 
