@@ -92,6 +92,20 @@ CI installs Playwright Chromium before the browser smoke gate. Screenshot baseli
 
 The weekly `Security Audit` workflow runs separately from PR validation. It runs npm audit and installs `cargo-audit` in CI before running the Rust advisory audit, but it is not a required PR gate.
 
+## Release Dry Run
+
+Use the manual `Release Dry Run` GitHub Actions workflow before release-like changes, packaging changes, or dependency updates that could affect the Tauri desktop bundle.
+
+The workflow is started from the Actions tab with `workflow_dispatch`; it is not part of the required PR gate and does not publish a GitHub release.
+
+It builds with Node.js 22 and stable Rust on:
+
+- `macos-latest`
+- `ubuntu-24.04`
+- `windows-latest`
+
+The current Tauri bundle config targets macOS `app` and `dmg` bundles. The dry run builds unsigned macOS bundles with `npm run build -- --ci --no-sign`; Linux and Windows compile release binaries with `npm run build -- --ci --no-bundle` until platform bundle targets are intentionally added. The workflow uploads any produced bundle output from `src-tauri/target/release/bundle`, release binaries, and a per-platform summary artifact.
+
 ## Git Workflow
 
 - Start with `git status --short --branch`.

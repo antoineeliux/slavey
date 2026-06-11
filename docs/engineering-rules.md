@@ -8,6 +8,7 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - GitHub Actions CI runs on pull requests and pushes to `main`, and mirrors the local validation gate with `npm ci`, `npm run check:web`, `npm run check:e2e:smoke`, `npm run check:coverage`, and `npm run check:rust`.
 - Run `npm run check:coverage` when touching employee activity presentation, employee floor routing, or frontend employee/terminal store behavior.
 - Run `npm run build` before release-like changes.
+- Run the manual `Release Dry Run` GitHub Actions workflow before release-like changes, Tauri packaging changes, or dependency updates that could affect desktop bundles. Keep it manual-only unless it becomes fast and stable enough for routine PR validation.
 - Run `npm run check:e2e:smoke` when touching app-shell loading, workspace tabs, lazy-loaded workspace panes, terminal rendering, diagnostics actions, office canvas rendering, or terminal dock behavior.
 - Run `npm run test:e2e:run` for broader local browser checks, including local-only visual screenshot baseline review.
 - `npm run check` runs the production bundle guard after Vite build to catch E2E fixture leakage into `dist/`.
@@ -39,6 +40,13 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Prioritize security updates over routine version drift.
 - Do not suppress or ignore dependency advisories without documenting the advisory, the reason, and the follow-up plan.
 - Do not add audit checks to the required PR path until runtime, advisory database, and network behavior are stable enough for normal development.
+
+## Release Maintenance
+
+- Keep release dry-run workflows separate from required PR validation until they are proven reliable across hosted macOS, Linux, and Windows runners.
+- Do not require signing or notarization secrets for dry runs; unsigned bundle production is enough to prove the packaging path still works.
+- Document platform packaging gaps in the workflow or contributor docs instead of hiding them behind silent skips.
+- When adding Linux or Windows Tauri bundle targets, update the dry-run workflow in the same phase so those platforms upload installer artifacts instead of only release binaries.
 
 ## Backend Safety Principles
 
