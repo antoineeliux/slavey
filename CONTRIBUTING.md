@@ -59,6 +59,24 @@ The pre-commit hook runs Rust formatting checks and TypeScript typecheck. The pr
 
 Run `npm run check:coverage` when changing employee activity presentation, employee floor routing, or frontend employee/terminal store behavior. The coverage gate is intentionally focused on those critical frontend modules, not the entire app.
 
+## Dependency And Security Maintenance
+
+Run the dependency audit command when reviewing dependency updates or security-related changes:
+
+```sh
+npm run audit
+```
+
+`npm run audit:npm` runs `npm audit --audit-level=moderate`, which ignores low-severity noise but fails on moderate or higher npm advisories.
+
+`npm run audit:rust` uses `cargo-audit` for Rust advisories. If `cargo-audit` is not installed locally, the script prints an install hint and skips the Rust audit instead of mutating your machine. Install it when you need the local Rust audit:
+
+```sh
+cargo install cargo-audit --locked
+```
+
+Dependabot opens weekly dependency update PRs for npm, Cargo, and GitHub Actions. Minor and patch updates are grouped by ecosystem to reduce noise; major updates stay separate and should get normal validation and review. Security updates should be prioritized.
+
 ## CI Gate
 
 GitHub Actions runs the validation gate on pull requests and pushes to `main`.
@@ -71,6 +89,8 @@ CI installs dependencies with `npm ci`, uses Node.js 22 LTS and stable Rust, the
 - `npm run check:rust`
 
 CI installs Playwright Chromium before the browser smoke gate. Screenshot baselines remain local review assets for now and are not part of CI because the current snapshots are platform-specific.
+
+The weekly `Security Audit` workflow runs separately from PR validation. It runs npm audit and installs `cargo-audit` in CI before running the Rust advisory audit, but it is not a required PR gate.
 
 ## Git Workflow
 

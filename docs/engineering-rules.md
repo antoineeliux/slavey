@@ -12,6 +12,8 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Run `npm run test:e2e:run` for broader local browser checks, including local-only visual screenshot baseline review.
 - `npm run check` runs the production bundle guard after Vite build to catch E2E fixture leakage into `dist/`.
 - The existing Vite large chunk warning is acceptable until frontend splitting is handled separately.
+- `npm run audit` runs npm and Rust advisory checks for dependency maintenance. The Rust audit requires `cargo-audit`; if it is missing locally, the script prints an install hint and skips only the Rust audit.
+- The scheduled `Security Audit` workflow is separate from PR validation and should not become a required PR gate until it has proven stable and fast.
 
 ## Local Hooks
 
@@ -28,6 +30,15 @@ These rules keep Slavey changes reviewable, validated, and aligned with the app'
 - Commit after each complete phase.
 - Push regularly to `origin/main`.
 - Finish with a clean `git status --short --branch`.
+
+## Dependency Maintenance
+
+- Keep dependency update PRs small and reviewable.
+- Group routine minor and patch updates by ecosystem when automation can do so cleanly.
+- Keep major updates separate and run the normal validation gate before merging.
+- Prioritize security updates over routine version drift.
+- Do not suppress or ignore dependency advisories without documenting the advisory, the reason, and the follow-up plan.
+- Do not add audit checks to the required PR path until runtime, advisory database, and network behavior are stable enough for normal development.
 
 ## Backend Safety Principles
 
