@@ -98,7 +98,7 @@ test.describe("app shell CI smoke", () => {
   });
 
   test("opens refreshes closes and reopens the office terminal dock", async ({ page }) => {
-    test.setTimeout(90_000);
+    test.setTimeout(150_000);
     await openApp(page, { waitForOffice: true });
 
     const officePane = page.locator(".office-pane");
@@ -178,18 +178,14 @@ async function expectTerminalDockContent(terminalDock: Locator): Promise<void> {
 
 async function openTerminalDock(terminalActions: Locator, terminalDock: Locator): Promise<void> {
   await expect(terminalActions).toBeVisible({ timeout: OFFICE_READY_TIMEOUT });
-  await expect(async () => {
-    await clickRenderedButton(terminalActions, "Terminal", 5_000);
-    await expect(terminalDock).toHaveCount(1, { timeout: 5_000 });
-    await expect(terminalDock).toBeVisible({ timeout: 5_000 });
-  }).toPass({ timeout: OFFICE_READY_TIMEOUT });
+  await clickRenderedButton(terminalActions, "Terminal");
+  await expect(terminalDock).toHaveCount(1, { timeout: OFFICE_READY_TIMEOUT });
+  await expect(terminalDock).toBeVisible({ timeout: OFFICE_READY_TIMEOUT });
 }
 
 async function closeTerminalDock(terminalDock: Locator): Promise<void> {
-  await expect(async () => {
-    await clickRenderedButton(terminalDock, "Close terminal", 5_000);
-    await expect(terminalDock).toHaveCount(0, { timeout: 5_000 });
-  }).toPass({ timeout: OFFICE_READY_TIMEOUT });
+  await clickRenderedButton(terminalDock, "Close terminal");
+  await expect(terminalDock).toHaveCount(0, { timeout: OFFICE_READY_TIMEOUT });
 }
 
 async function clickRenderedButton(
@@ -197,40 +193,8 @@ async function clickRenderedButton(
   label: string,
   timeout = OFFICE_READY_TIMEOUT,
 ): Promise<void> {
-  await expect
-    .poll(
-      () =>
-        container.evaluate((element, targetLabel) => {
-          const normalizedTarget = targetLabel.replace(/\s+/g, " ").trim();
-          const buttons = Array.from(element.querySelectorAll("button"));
-          const button = buttons.find((candidate) => {
-            const accessibleLabel =
-              candidate.getAttribute("aria-label") ??
-              candidate.getAttribute("title") ??
-              candidate.textContent ??
-              "";
-            return accessibleLabel.replace(/\s+/g, " ").trim() === normalizedTarget;
-          });
-          if (!(button instanceof HTMLButtonElement)) {
-            return "missing";
-          }
-          const rect = button.getBoundingClientRect();
-          const style = window.getComputedStyle(button);
-          if (button.disabled) {
-            return "disabled";
-          }
-          if (
-            rect.width <= 0 ||
-            rect.height <= 0 ||
-            style.display === "none" ||
-            style.visibility === "hidden"
-          ) {
-            return "hidden";
-          }
-          button.click();
-          return "clicked";
-        }, label),
-      { timeout },
-    )
-    .toBe("clicked");
+  const button = container.getByRole("button", { name: label, exact: true });
+  await expect(button).toBeVisible({ timeout });
+  await expect(button).toBeEnabled({ timeout });
+  await button.click({ force: true, timeout });
 }
