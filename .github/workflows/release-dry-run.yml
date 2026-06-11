@@ -1,0 +1,140 @@
+name: Release Dry Run
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dry-run-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+          - ubuntu-24.04
+          - windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            pkg-config \
+            wget
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: release-dry-run-${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            release-dry-run-${{ runner.os }}-cargo-
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build unsigned release dry run
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            npm run build -- --ci --no-sign --bundles app
+          else
+            # Current Tauri bundle targets are macOS-only ("app" and "dmg").
+            # Linux and Windows still compile the release binary until platform
+            # package targets are intentionally added.
+            npm run build -- --ci --no-bundle
+          fi
+
+      - name: Write dry-run summary
+        if: always()
+        run: |
+          mkdir -p release-dry-run-summary
+          {
+            echo "Release dry run for $RUNNER_OS on ${{ matrix.os }}"
+            echo "Tauri bundle targets in src-tauri/tauri.conf.json: app, dmg"
+            echo
+            if [[ "$RUNNER_OS" == "macOS" ]]; then
+              echo "Ran: npm run build -- --ci --no-sign --bundles app"
+              echo "Expected output: unsigned macOS app bundle."
+              echo "TODO: enable DMG output once unsigned headless DMG bundling is reliable."
+            else
+              echo "Ran: npm run build -- --ci --no-bundle"
+              echo "Expected output: release binary only."
+              echo "TODO: add Linux and Windows bundle targets when packaging requirements are defined."
+            fi
+            echo
+            echo "Bundle directory contents:"
+            if [[ -d src-tauri/target/release/bundle ]]; then
+              find src-tauri/target/release/bundle -maxdepth 4 -type f -print | sort
+            else
+              echo "No bundle directory was produced."
+            fi
+            echo
+            echo "Release binary candidates:"
+            find src-tauri/target/release -maxdepth 1 -type f \( -name "slavey" -o -name "slavey.exe" \) -print 2>/dev/null || true
+          } > "release-dry-run-summary/${{ matrix.os }}.txt"
+
+      - name: Upload release outputs
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-dry-run-${{ matrix.os }}
+          path: |
+            src-tauri/target/release/bundle/**
+            src-tauri/target/release/slavey
+            src-tauri/target/release/slavey.exe
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload dry-run summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-dry-run-summary-${{ matrix.os }}
+          path: release-dry-run-summary/*.txt
+          if-no-files-found: error
+          retention-days: 14
