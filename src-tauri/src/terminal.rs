@@ -38,6 +38,7 @@ const SHELL_CWD_MARKER_FAMILY_PREFIX: &str = "\x1b]777;slavey-";
 mod agent_runtime;
 mod codex_notify;
 mod codex_status;
+mod evidence;
 #[cfg(test)]
 mod session_fixture_tests;
 mod session_store;

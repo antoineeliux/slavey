@@ -5,12 +5,15 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     agent_runtime::{
+        codex_session_is_active, codex_session_is_waiting_for_approval,
+        codex_session_is_waiting_for_instruction, codex_session_should_track_prompt,
+        AgentRuntimeState,
+    },
+    evidence::{
         codex_output_ends_at_prompt, codex_output_has_completion_text_before_prompt,
         codex_output_has_visible_text, codex_output_suggests_active_work,
         codex_output_suggests_approval_choice, codex_output_suggests_approval_prompt,
-        codex_session_is_active, codex_session_is_waiting_for_approval,
-        codex_session_is_waiting_for_instruction, codex_session_should_track_prompt,
-        terminal_input_submits_prompt, terminal_input_updates_owner_prompt, AgentRuntimeState,
+        terminal_input_submits_prompt, terminal_input_updates_owner_prompt,
     },
     TerminalLaunchProfile, TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE, TERMINAL_LABEL_MAX_CHARS,
 };
