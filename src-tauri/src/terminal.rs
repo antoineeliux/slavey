@@ -42,6 +42,7 @@ mod evidence;
 #[cfg(test)]
 mod session_fixture_tests;
 mod session_store;
+mod turn_resolver;
 pub mod uploads;
 
 pub(crate) use self::agent_runtime::{
