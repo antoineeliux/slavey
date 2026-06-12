@@ -16,9 +16,9 @@ use crate::{
     persistence::AppSettings,
     processes::{ManagedProcess, ManagedProcessStatus},
     terminal::{
-        codex_cli_status_impl, AgentRuntimeSnapshot, CodexCliStatus, TerminalLaunchProfile,
-        TerminalSessionRecord, TerminalSessionRuntime, TerminalSessionStatus, TerminalStopReason,
-        TerminalTurnState, TerminalTurnTransitionReason,
+        codex_cli_status_impl, codex_program_from_settings, AgentRuntimeSnapshot, CodexCliStatus,
+        TerminalLaunchProfile, TerminalSessionRecord, TerminalSessionRuntime,
+        TerminalSessionStatus, TerminalStopReason, TerminalTurnState, TerminalTurnTransitionReason,
     },
     workspace::{repo_health_for_workspace, RepoHealth},
     AppState,
@@ -252,7 +252,9 @@ pub fn diagnostics_export_bundle(state: State<'_, AppState>) -> DiagnosticsExpor
 
 fn diagnostics_summary_impl(state: &AppState) -> DiagnosticsSummary {
     let workspace_root = state.workspace_root();
-    let codex_status = codex_cli_status_impl();
+    let settings = state.persistence.settings();
+    let codex_program = codex_program_from_settings(&settings);
+    let codex_status = codex_cli_status_impl(&codex_program);
     let repo_health = repo_health_for_workspace(&workspace_root, codex_status.clone());
     let terminal_sessions = state.terminal_sessions.list(None);
     let actions = state.actions.list(None);
@@ -294,7 +296,10 @@ fn diagnostics_summary_impl(state: &AppState) -> DiagnosticsSummary {
 
 fn diagnostics_export_bundle_impl(state: &AppState) -> DiagnosticsExportBundle {
     let workspace_root = state.workspace_root();
-    let repo_health = repo_health_for_workspace(&workspace_root, codex_cli_status_impl());
+    let settings = state.persistence.settings();
+    let codex_program = codex_program_from_settings(&settings);
+    let repo_health =
+        repo_health_for_workspace(&workspace_root, codex_cli_status_impl(&codex_program));
     let terminal_session_records = state.terminal_sessions.list(None);
     let terminal_sessions_by_id = terminal_session_records
         .iter()
@@ -324,7 +329,7 @@ fn diagnostics_export_bundle_impl(state: &AppState) -> DiagnosticsExportBundle {
     DiagnosticsExportBundle {
         generated_at: now_ms(),
         summary: diagnostics_summary_impl(state),
-        settings: state.persistence.settings(),
+        settings: sanitize_settings(settings),
         workspace: diagnostics_workspace_info(&workspace_root, repo_health, state),
         employee_activities,
         actions,
@@ -336,6 +341,13 @@ fn diagnostics_export_bundle_impl(state: &AppState) -> DiagnosticsExportBundle {
             "Terminal output, process logs, environment variables, credentials, tokens, and file-write contents are excluded.".to_string(),
         ],
     }
+}
+
+fn sanitize_settings(mut settings: AppSettings) -> AppSettings {
+    if !settings.codex_binary_path.trim().is_empty() {
+        settings.codex_binary_path = redact_path_string(&settings.codex_binary_path);
+    }
+    settings
 }
 
 fn diagnostics_workspace_info(
@@ -649,6 +661,7 @@ fn sanitize_codex_status(status: CodexCliStatus) -> CodexCliStatus {
         available: status.available,
         version: status.version.as_deref().map(redact_diagnostic_string),
         message: redact_diagnostic_string(&status.message),
+        path: status.path.as_deref().map(redact_path_string),
     }
 }
 

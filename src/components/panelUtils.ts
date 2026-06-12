@@ -19,6 +19,16 @@ export function codexStatusLabel(
   return status.version ?? "available";
 }
 
+export function codexStatusTitle(
+  status: { message: string; path?: string | null } | null,
+  loading: boolean,
+): string {
+  if (loading || !status) {
+    return "Checking Codex CLI";
+  }
+  return status.path ? `${status.message} (${status.path})` : status.message;
+}
+
 export function identityLabel(health: RepoHealth | null): string {
   if (!health?.isGitRepo) {
     return "unavailable";

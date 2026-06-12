@@ -7,7 +7,7 @@ use crate::{
     events::{emit_employee_activity_updated, emit_log, LogLevel},
     git::{current_branch as git_current_branch, git_success, parse_status_lines, run_git},
     persistence::AppSettings,
-    terminal::{codex_cli_status_impl, CodexCliStatus},
+    terminal::{codex_cli_status_impl, codex_program_from_settings, CodexCliStatus},
     AppState,
 };
 
@@ -116,11 +116,16 @@ pub fn workspace_recent_clear(state: State<'_, AppState>) -> Result<Vec<String>,
 
 fn workspace_info_impl(state: &AppState) -> WorkspaceInfo {
     let workspace_root = state.workspace_root();
+    let settings = state.persistence.settings();
+    let codex_program = codex_program_from_settings(&settings);
     WorkspaceInfo {
         workspace_root: workspace_root.to_string_lossy().to_string(),
         recent_workspaces: state.persistence.recent_workspaces(),
-        settings: state.persistence.settings(),
-        repo_health: repo_health_for_workspace(&workspace_root, codex_cli_status_impl()),
+        settings,
+        repo_health: repo_health_for_workspace(
+            &workspace_root,
+            codex_cli_status_impl(&codex_program),
+        ),
         switch_blockers: workspace_switch_blockers_from_activity(workspace_activity(state)),
     }
 }
@@ -368,6 +373,7 @@ mod tests {
             available: false,
             version: None,
             message: "not checked in test".to_string(),
+            path: None,
         }
     }
 

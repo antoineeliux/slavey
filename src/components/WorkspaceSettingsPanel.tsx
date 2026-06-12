@@ -5,7 +5,7 @@ import { Clipboard, FolderOpen, History, RefreshCw, Settings2, ShieldCheck } fro
 import * as commands from "../lib/tauriCommands";
 import { useAppStore } from "../store/appStore";
 import type { AppSettings, DiagnosticsSummary, RepoHealth } from "../types";
-import { codexStatusLabel, identityLabel } from "./panelUtils";
+import { codexStatusLabel, codexStatusTitle, identityLabel } from "./panelUtils";
 
 export function WorkspaceSettingsPanel() {
   const workspaceRoot = useAppStore((state) => state.workspaceRoot);
@@ -153,7 +153,7 @@ export function WorkspaceSettingsPanel() {
               {health?.worktreeSupported ? "available" : "unavailable"}
             </strong>
             <span>Codex CLI</span>
-            <strong title={health?.codexCliStatus.message ?? ""}>
+            <strong title={codexStatusTitle(health?.codexCliStatus ?? null, false)}>
               {health ? codexStatusLabel(health.codexCliStatus, false) : "unknown"}
             </strong>
           </div>
@@ -254,57 +254,76 @@ function SettingsForm({
   onChange: (settings: Partial<AppSettings>) => Promise<void>;
 }) {
   return (
-    <section className="settings-section">
-      <div className="section-heading compact-heading">
-        <Settings2 size={15} />
-        Safety
-      </div>
-      <div className="settings-form">
-        <label className="checkbox-row">
-          <input
-            type="checkbox"
-            checked={settings.requireConfirmationDiscard}
-            onChange={(event) =>
-              void onChange({ requireConfirmationDiscard: event.target.checked })
-            }
-          />
-          <span>Confirm discard</span>
-        </label>
-        <label className="checkbox-row">
-          <input
-            type="checkbox"
-            checked={settings.requireConfirmationDelete}
-            onChange={(event) =>
-              void onChange({ requireConfirmationDelete: event.target.checked })
-            }
-          />
-          <span>Confirm delete</span>
-        </label>
-        <label className="checkbox-row">
-          <input
-            type="checkbox"
-            checked={settings.requireConfirmationHandoffApply}
-            onChange={(event) =>
-              void onChange({ requireConfirmationHandoffApply: event.target.checked })
-            }
-          />
-          <span>Confirm handoff apply</span>
-        </label>
-        <label>
-          <span>Terminal buffer</span>
-          <input
-            type="number"
-            min={20000}
-            max={2000000}
-            step={10000}
-            value={settings.maxTerminalBufferChars}
-            onChange={(event) =>
-              void onChange({ maxTerminalBufferChars: Number(event.target.value) })
-            }
-          />
-        </label>
-      </div>
-    </section>
+    <>
+      <section className="settings-section">
+        <div className="section-heading compact-heading">
+          <Settings2 size={15} />
+          Safety
+        </div>
+        <div className="settings-form">
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={settings.requireConfirmationDiscard}
+              onChange={(event) =>
+                void onChange({ requireConfirmationDiscard: event.target.checked })
+              }
+            />
+            <span>Confirm discard</span>
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={settings.requireConfirmationDelete}
+              onChange={(event) =>
+                void onChange({ requireConfirmationDelete: event.target.checked })
+              }
+            />
+            <span>Confirm delete</span>
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={settings.requireConfirmationHandoffApply}
+              onChange={(event) =>
+                void onChange({ requireConfirmationHandoffApply: event.target.checked })
+              }
+            />
+            <span>Confirm handoff apply</span>
+          </label>
+        </div>
+      </section>
+
+      <section className="settings-section">
+        <div className="section-heading compact-heading">
+          <Settings2 size={15} />
+          Terminal
+        </div>
+        <div className="settings-form">
+          <label>
+            <span>Terminal buffer</span>
+            <input
+              type="number"
+              min={20000}
+              max={2000000}
+              step={10000}
+              value={settings.maxTerminalBufferChars}
+              onChange={(event) =>
+                void onChange({ maxTerminalBufferChars: Number(event.target.value) })
+              }
+            />
+          </label>
+          <label>
+            <span>Codex binary</span>
+            <input
+              value={settings.codexBinaryPath}
+              placeholder="codex or /absolute/path/to/codex"
+              onChange={(event) => void onChange({ codexBinaryPath: event.target.value })}
+            />
+          </label>
+        </div>
+      </section>
+    </>
   );
 }
 

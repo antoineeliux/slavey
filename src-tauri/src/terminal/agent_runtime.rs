@@ -541,13 +541,6 @@ pub fn codex_session_is_waiting_for_approval(record: &TerminalSessionRecord) -> 
     last_approval_prompt_at >= last_prompt_submitted_at && last_approval_prompt_at > 0
 }
 
-pub fn codex_output_suggests_prompt_ready(output: &str) -> bool {
-    strip_ansi(output)
-        .replace('\r', "\n")
-        .lines()
-        .any(|line| line.trim_start().starts_with('›'))
-}
-
 pub fn codex_output_ends_at_prompt(output: &str) -> bool {
     strip_ansi(output)
         .replace('\r', "\n")
@@ -596,12 +589,44 @@ pub fn codex_output_has_visible_text(output: &str) -> bool {
 
 pub fn codex_output_suggests_active_work(output: &str) -> bool {
     let clean = strip_ansi(output).replace('\r', "\n").to_ascii_lowercase();
-    clean.lines().any(|line| {
-        let line = line.trim_start();
-        (line.starts_with('•') || line.starts_with('-') || line.starts_with('*'))
-            && line.contains("working")
-            && (line.contains("esc to interrupt") || line.contains('('))
-    })
+    clean
+        .lines()
+        .map(str::trim_start)
+        .any(codex_line_suggests_active_work)
+}
+
+pub fn codex_output_has_completion_text_before_prompt(output: &str) -> bool {
+    let clean = strip_ansi(output).replace('\r', "\n").to_ascii_lowercase();
+    let mut seen_working = false;
+    let mut saw_completion_text = false;
+
+    for line in clean.lines().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('›') {
+            if seen_working && saw_completion_text {
+                return true;
+            }
+            continue;
+        }
+        if codex_line_suggests_active_work(line) {
+            seen_working = true;
+            saw_completion_text = false;
+            continue;
+        }
+        if seen_working {
+            saw_completion_text = true;
+        }
+    }
+
+    false
+}
+
+fn codex_line_suggests_active_work(line: &str) -> bool {
+    (line.starts_with('•') || line.starts_with('-') || line.starts_with('*'))
+        && line.contains("working")
+        && (line.contains("esc to interrupt") || line.contains('('))
 }
 
 pub fn terminal_input_submits_prompt(input: &str) -> bool {
@@ -1092,7 +1117,6 @@ mod tests {
 
     #[test]
     fn prompt_detection_ignores_ansi_control_sequences() {
-        assert!(codex_output_suggests_prompt_ready("\x1b[?25l\r\n› "));
         assert!(codex_output_ends_at_prompt(
             "\x1b[2K\r• Working (10s • esc to interrupt)\r\nDone.\r\n› "
         ));
@@ -1105,6 +1129,15 @@ mod tests {
         ));
         assert!(!codex_output_suggests_active_work(
             "Tip: New use /fast to enable fastest inference"
+        ));
+        assert!(codex_output_has_completion_text_before_prompt(
+            "\r\n• Working (10s • esc to interrupt)\r\nDone.\r\n› "
+        ));
+        assert!(codex_output_has_completion_text_before_prompt(
+            "\r\n• Working (10s • esc to interrupt)\r\n› \r\nDone.\r\n› "
+        ));
+        assert!(!codex_output_has_completion_text_before_prompt(
+            "\r\n• Working (10s • esc to interrupt)\r\n› "
         ));
     }
 

@@ -1,4 +1,5 @@
 use std::{
+    env,
     io::Read,
     process::{Child, Command as ProcessCommand, Stdio},
     sync::mpsc,
@@ -14,8 +15,10 @@ const CODEX_STATUS_STDOUT_CAP: usize = 8 * 1024;
 const CODEX_STATUS_STDERR_CAP: usize = 8 * 1024;
 const COMMAND_OUTPUT_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 
-pub fn codex_cli_status_impl() -> CodexCliStatus {
-    let mut command = ProcessCommand::new("codex");
+pub fn codex_cli_status_impl(codex_program: &str) -> CodexCliStatus {
+    let codex_path =
+        resolved_command_path(codex_program).unwrap_or_else(|| codex_program.to_string());
+    let mut command = ProcessCommand::new(codex_program);
     command.arg("--version");
     command.env("CI", "true");
     command.env("NO_COLOR", "1");
@@ -27,18 +30,32 @@ pub fn codex_cli_status_impl() -> CodexCliStatus {
         CODEX_STATUS_STDOUT_CAP,
         CODEX_STATUS_STDERR_CAP,
     ) {
-        Ok(output) => codex_status_from_output(output),
+        Ok(output) => codex_status_from_output(output, &codex_path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => CodexCliStatus {
             available: false,
             version: None,
-            message: "Codex CLI not found".to_string(),
+            message: codex_not_found_message(codex_program),
+            path: Some(codex_path),
         },
         Err(error) => CodexCliStatus {
             available: false,
             version: None,
             message: codex_status_error_message(error.kind()),
+            path: Some(codex_path),
         },
     }
+}
+
+fn resolved_command_path(program: &str) -> Option<String> {
+    if program.contains('/') || program.contains('\\') {
+        return Some(program.to_string());
+    }
+
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|dir| dir.join(program))
+        .find(|candidate| candidate.is_file())
+        .map(|path| path.to_string_lossy().to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -233,12 +250,13 @@ fn terminate_status_child(child: &mut Child) {
     terminate_process_tree(child);
 }
 
-fn codex_status_from_output(output: BoundedCommandOutput) -> CodexCliStatus {
+fn codex_status_from_output(output: BoundedCommandOutput, codex_path: &str) -> CodexCliStatus {
     if output.timed_out {
         return CodexCliStatus {
             available: false,
             version: None,
             message: "Codex CLI version check timed out".to_string(),
+            path: Some(codex_path.to_string()),
         };
     }
 
@@ -247,6 +265,7 @@ fn codex_status_from_output(output: BoundedCommandOutput) -> CodexCliStatus {
             available: false,
             version: None,
             message: "Codex CLI version check produced too much output".to_string(),
+            path: Some(codex_path.to_string()),
         };
     }
 
@@ -257,6 +276,7 @@ fn codex_status_from_output(output: BoundedCommandOutput) -> CodexCliStatus {
             available: true,
             version: version.clone(),
             message: version.unwrap_or_else(|| "Codex CLI is available".to_string()),
+            path: Some(codex_path.to_string()),
         }
     } else {
         CodexCliStatus {
@@ -266,7 +286,16 @@ fn codex_status_from_output(output: BoundedCommandOutput) -> CodexCliStatus {
                 Some(code) => format!("Codex CLI version check failed with exit code {code}"),
                 None => "Codex CLI version check failed".to_string(),
             },
+            path: Some(codex_path.to_string()),
         }
+    }
+}
+
+fn codex_not_found_message(codex_program: &str) -> String {
+    if codex_program == "codex" {
+        "Codex CLI not found".to_string()
+    } else {
+        format!("Codex CLI not found at {codex_program}")
     }
 }
 
@@ -300,31 +329,38 @@ mod tests {
 
     #[test]
     fn codex_status_parses_successful_version_from_stdout() {
-        let status = codex_status_from_output(BoundedCommandOutput {
-            status_code: Some(0),
-            success: true,
-            stdout: b"codex 1.2.3\n".to_vec(),
-            stderr: Vec::new(),
-            timed_out: false,
-            stdout_truncated: false,
-            stderr_truncated: false,
-        });
+        let status = codex_status_from_output(
+            BoundedCommandOutput {
+                status_code: Some(0),
+                success: true,
+                stdout: b"codex 1.2.3\n".to_vec(),
+                stderr: Vec::new(),
+                timed_out: false,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            },
+            "/usr/local/bin/codex",
+        );
 
         assert!(status.available);
         assert_eq!(status.version.as_deref(), Some("codex 1.2.3"));
+        assert_eq!(status.path.as_deref(), Some("/usr/local/bin/codex"));
     }
 
     #[test]
     fn codex_status_hides_failure_output() {
-        let status = codex_status_from_output(BoundedCommandOutput {
-            status_code: Some(2),
-            success: false,
-            stdout: Vec::new(),
-            stderr: b"auth config path should not be surfaced\n".to_vec(),
-            timed_out: false,
-            stdout_truncated: false,
-            stderr_truncated: false,
-        });
+        let status = codex_status_from_output(
+            BoundedCommandOutput {
+                status_code: Some(2),
+                success: false,
+                stdout: Vec::new(),
+                stderr: b"auth config path should not be surfaced\n".to_vec(),
+                timed_out: false,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            },
+            "codex",
+        );
 
         assert!(!status.available);
         assert_eq!(
@@ -335,15 +371,18 @@ mod tests {
 
     #[test]
     fn codex_status_reports_timeout() {
-        let status = codex_status_from_output(BoundedCommandOutput {
-            status_code: None,
-            success: false,
-            stdout: Vec::new(),
-            stderr: Vec::new(),
-            timed_out: true,
-            stdout_truncated: false,
-            stderr_truncated: false,
-        });
+        let status = codex_status_from_output(
+            BoundedCommandOutput {
+                status_code: None,
+                success: false,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                timed_out: true,
+                stdout_truncated: false,
+                stderr_truncated: false,
+            },
+            "codex",
+        );
 
         assert!(!status.available);
         assert_eq!(status.message, "Codex CLI version check timed out");

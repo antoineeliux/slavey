@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     agent_runtime::{
-        codex_output_ends_at_prompt, codex_output_has_visible_text,
-        codex_output_suggests_active_work, codex_output_suggests_approval_choice,
-        codex_output_suggests_approval_prompt, codex_output_suggests_prompt_ready,
+        codex_output_ends_at_prompt, codex_output_has_completion_text_before_prompt,
+        codex_output_has_visible_text, codex_output_suggests_active_work,
+        codex_output_suggests_approval_choice, codex_output_suggests_approval_prompt,
         codex_session_is_active, codex_session_is_waiting_for_approval,
         codex_session_is_waiting_for_instruction, codex_session_should_track_prompt,
         terminal_input_submits_prompt, terminal_input_updates_owner_prompt, AgentRuntimeState,
@@ -111,6 +111,7 @@ enum TerminalTurnTransitionKind {
     ActiveProfile,
     Finish,
     AppServer,
+    CodexNotify,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -129,6 +130,7 @@ pub enum TerminalTurnTransitionReason {
     ActiveProfileChangedToCodex,
     SessionFinishedCompleted,
     SessionFinishedFailed,
+    CodexNotifyAgentTurnComplete,
     AppServerStarting,
     AppServerThinking,
     AppServerWaitingPrompt,
@@ -504,6 +506,49 @@ impl TerminalSessionStore {
         activity_relevant_change.then(|| record.clone())
     }
 
+    pub fn record_codex_notify_agent_turn_complete(
+        &self,
+        session_id: &str,
+        event_at: u64,
+    ) -> Option<TerminalSessionRecord> {
+        let mut records = self.records.lock();
+        let record = records.get_mut(session_id)?;
+        if record.runtime != TerminalSessionRuntime::Pty
+            || record.status != TerminalSessionStatus::Running
+            || !codex_session_should_track_prompt(record)
+            || matches!(
+                record.turn_state,
+                TerminalTurnState::PromptSubmitted | TerminalTurnState::AgentWorking
+            )
+        {
+            return None;
+        }
+        if record
+            .last_prompt_submitted_at
+            .is_some_and(|submitted_at| event_at < submitted_at)
+        {
+            return None;
+        }
+
+        let previous_active_profile = record.active_profile;
+        let previous_prompt_ready_at = record.last_prompt_ready_at;
+        let previous_prompt_submitted_at = record.last_prompt_submitted_at;
+        let previous_approval_prompt_at = record.last_approval_prompt_at;
+        let previous_turn_state = record.turn_state;
+        let previous_transition_reason = record.last_transition_reason;
+
+        let transition = resolve_codex_notify_agent_turn_complete_transition(record);
+        apply_terminal_turn_transition(record, transition, crate::events::now_ms());
+
+        let activity_relevant_change = previous_active_profile != record.active_profile
+            || previous_prompt_ready_at != record.last_prompt_ready_at
+            || previous_prompt_submitted_at != record.last_prompt_submitted_at
+            || previous_approval_prompt_at != record.last_approval_prompt_at
+            || previous_turn_state != record.turn_state
+            || previous_transition_reason != record.last_transition_reason;
+        activity_relevant_change.then(|| record.clone())
+    }
+
     pub fn rename(&self, session_id: &str, label: &str) -> Result<TerminalSessionRecord, String> {
         let label = cleaned_session_label(label)?;
         let mut records = self.records.lock();
@@ -545,16 +590,34 @@ fn terminal_output_evidence(
             && codex_output_suggests_approval_prompt(detection_output));
     let owner_waiting = codex_session_is_waiting_for_instruction(record)
         || codex_session_is_waiting_for_approval(record);
-    let codex_prompt_ready = codex_output_suggests_prompt_ready(output)
-        || (!owner_waiting && codex_output_suggests_prompt_ready(detection_output));
+    let agent_owned = matches!(
+        record.turn_state,
+        TerminalTurnState::PromptSubmitted | TerminalTurnState::AgentWorking
+    );
     let detection_output_ends_at_prompt = codex_output_ends_at_prompt(detection_output);
     let codex_prompt_ready_at_end =
         codex_output_ends_at_prompt(output) || (!owner_waiting && detection_output_ends_at_prompt);
-    let codex_active_work = !codex_prompt_ready_at_end
-        && (codex_output_suggests_active_work(output)
-            || (!codex_approval_prompt
-                && !detection_output_ends_at_prompt
-                && codex_output_suggests_active_work(detection_output)));
+    let codex_active_work_in_output = codex_output_suggests_active_work(output);
+    let codex_active_work_evidence = codex_active_work_in_output
+        || (!owner_waiting
+            && !codex_approval_prompt
+            && codex_output_suggests_active_work(detection_output));
+    let completion_text_before_prompt =
+        codex_output_has_completion_text_before_prompt(detection_output);
+    let status_only_work_redraw_at_prompt = codex_prompt_ready_at_end
+        && codex_active_work_evidence
+        && agent_owned
+        && !completion_text_before_prompt;
+    let owner_status_only_work_redraw_at_prompt = owner_waiting
+        && codex_prompt_ready_at_end
+        && codex_active_work_in_output
+        && !completion_text_before_prompt;
+    let codex_prompt_ready = !status_only_work_redraw_at_prompt
+        && codex_prompt_ready_at_end
+        && (!agent_owned || completion_text_before_prompt);
+    let codex_active_work = !owner_status_only_work_redraw_at_prompt
+        && (!codex_prompt_ready_at_end || status_only_work_redraw_at_prompt)
+        && codex_active_work_evidence;
 
     TerminalOutputEvidence {
         codex_approval_prompt,
@@ -562,8 +625,7 @@ fn terminal_output_evidence(
         codex_prompt_ready,
         codex_prompt_ready_at_end,
         codex_active_work,
-        stale_work_redraw_at_prompt: codex_prompt_ready_at_end
-            && codex_output_suggests_active_work(output),
+        stale_work_redraw_at_prompt: codex_prompt_ready_at_end && codex_active_work_in_output,
         has_visible_text: codex_output_has_visible_text(output),
     }
 }
@@ -614,6 +676,12 @@ fn resolve_output_transition(
         return transition;
     }
 
+    if evidence.owner_waiting {
+        return TerminalTurnTransition::no_change(
+            TerminalTurnTransitionReason::OwnerPromptEchoIgnored,
+        );
+    }
+
     if record.status == TerminalSessionStatus::Running
         && evidence.codex_prompt_ready
         && codex_output_should_track_codex(record)
@@ -630,12 +698,6 @@ fn resolve_output_transition(
             .with_prompt_ready_at(TimestampTransition::SetNow)
             .with_approval_prompt_at(TimestampTransition::Clear)
             .with_turn_state(TerminalTurnState::OwnerPromptReady);
-    }
-
-    if evidence.owner_waiting {
-        return TerminalTurnTransition::no_change(
-            TerminalTurnTransitionReason::OwnerPromptEchoIgnored,
-        );
     }
 
     let mut transition = TerminalTurnTransition::new(
@@ -826,6 +888,28 @@ fn resolve_app_server_runtime_state_transition(
     }
 }
 
+fn resolve_codex_notify_agent_turn_complete_transition(
+    record: &TerminalSessionRecord,
+) -> TerminalTurnTransition {
+    let prompt_ready_at = if record.turn_state == TerminalTurnState::OwnerPromptReady
+        && record.last_prompt_ready_at.is_some()
+    {
+        TimestampTransition::Unchanged
+    } else {
+        TimestampTransition::SetNow
+    };
+
+    TerminalTurnTransition::new(
+        TerminalTurnTransitionKind::CodexNotify,
+        TerminalTurnTransitionReason::CodexNotifyAgentTurnComplete,
+    )
+    .with_active_profile(TerminalLaunchProfile::Codex)
+    .with_prompt_ready_at(prompt_ready_at)
+    .with_approval_prompt_at(TimestampTransition::Clear)
+    .with_turn_state(TerminalTurnState::OwnerPromptReady)
+    .with_clear_output_tail()
+}
+
 fn apply_terminal_turn_transition(
     record: &mut TerminalSessionRecord,
     transition: TerminalTurnTransition,
@@ -841,7 +925,8 @@ fn apply_terminal_turn_transition(
         | TerminalTurnTransitionKind::Input
         | TerminalTurnTransitionKind::ActiveProfile
         | TerminalTurnTransitionKind::Finish
-        | TerminalTurnTransitionKind::AppServer => {}
+        | TerminalTurnTransitionKind::AppServer
+        | TerminalTurnTransitionKind::CodexNotify => {}
     }
 
     if let Some(active_profile) = transition.active_profile {
@@ -1404,6 +1489,242 @@ mod tests {
         assert!(approval.last_approval_prompt_at.is_some());
         assert_eq!(approval.last_prompt_ready_at, None);
         assert_eq!(approval.turn_state, TerminalTurnState::WaitingApproval);
+    }
+
+    #[test]
+    fn codex_notify_turn_complete_marks_started_pty_session_waiting_for_owner() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+
+        let ready = store
+            .record_codex_notify_agent_turn_complete("term-1", crate::events::now_ms())
+            .unwrap();
+
+        assert_eq!(ready.runtime, TerminalSessionRuntime::Pty);
+        assert_eq!(ready.active_profile, Some(TerminalLaunchProfile::Codex));
+        assert_eq!(ready.turn_state, TerminalTurnState::OwnerPromptReady);
+        assert!(ready.last_prompt_ready_at.is_some());
+        assert_eq!(ready.last_approval_prompt_at, None);
+        assert_eq!(
+            ready.last_transition_reason,
+            Some(TerminalTurnTransitionReason::CodexNotifyAgentTurnComplete)
+        );
+
+        let runtime = AgentRuntimeStore::default();
+        let snapshot = runtime.sync_from_terminal_session(&ready).unwrap();
+        assert_eq!(snapshot.state, AgentRuntimeState::WaitingPrompt);
+        assert_eq!(snapshot.source, AgentRuntimeSource::TerminalFallback);
+        assert_eq!(
+            snapshot.confidence,
+            AgentRuntimeConfidence::TerminalFallback
+        );
+    }
+
+    #[test]
+    fn codex_notify_turn_complete_does_not_override_agent_working() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+        store.record_input("term-1", "Implement feature\r").unwrap();
+        store
+            .record_output("term-1", "\r\n• Working (2s • esc to interrupt)")
+            .unwrap();
+
+        let ready =
+            store.record_codex_notify_agent_turn_complete("term-1", crate::events::now_ms());
+
+        assert!(ready.is_none());
+        let current = store.get("term-1").unwrap();
+        assert_eq!(current.turn_state, TerminalTurnState::AgentWorking);
+        assert_eq!(current.last_prompt_ready_at, None);
+    }
+
+    #[test]
+    fn status_only_work_redraw_ending_at_prompt_stays_agent_working() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+        store.record_input("term-1", "Implement feature\r").unwrap();
+        store
+            .record_output("term-1", "\r\n• Working (2s • esc to interrupt)")
+            .unwrap();
+
+        let update =
+            store.record_output("term-1", "\x1b[2K\r• Working (2s • esc to interrupt)\r\n› ");
+
+        assert!(update.is_none());
+        let working = store.get("term-1").unwrap();
+        assert_eq!(working.turn_state, TerminalTurnState::AgentWorking);
+        assert_eq!(working.last_prompt_ready_at, None);
+        assert_eq!(working.last_approval_prompt_at, None);
+    }
+
+    #[test]
+    fn split_completion_text_then_prompt_marks_owner_ready() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+        store.record_input("term-1", "Implement feature\r").unwrap();
+        store
+            .record_output("term-1", "\r\n• Working (2s • esc to interrupt)")
+            .unwrap();
+        assert!(store.record_output("term-1", "\r\nDone.\r\n").is_none());
+
+        let ready = store.record_output("term-1", "› ").unwrap();
+
+        assert_eq!(ready.turn_state, TerminalTurnState::OwnerPromptReady);
+        assert!(ready.last_prompt_ready_at.is_some());
+    }
+
+    #[test]
+    fn completion_text_then_bare_prompt_marks_owner_ready() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+        store.record_output("term-1", "\r\n› ").unwrap();
+        store.record_input("term-1", "Implement feature\r").unwrap();
+        store
+            .record_output("term-1", "\r\n• Working (2s • esc to interrupt)")
+            .unwrap();
+
+        let ready = store.record_output("term-1", "\r\nDone.\r\n›").unwrap();
+
+        assert_eq!(ready.turn_state, TerminalTurnState::OwnerPromptReady);
+        assert!(ready.last_prompt_ready_at.is_some());
+    }
+
+    #[test]
+    fn trailing_prompt_space_after_completion_stays_owner_ready() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+        store.record_output("term-1", "\r\n› ").unwrap();
+        store.record_input("term-1", "Implement feature\r").unwrap();
+        store
+            .record_output("term-1", "\r\n• Working (2s • esc to interrupt)")
+            .unwrap();
+        store.record_output("term-1", "\r\nDone.\r\n›").unwrap();
+
+        assert!(store.record_output("term-1", " ").is_none());
+        let current = store.get("term-1").unwrap();
+        assert_eq!(current.turn_state, TerminalTurnState::OwnerPromptReady);
+        assert!(current.last_prompt_ready_at.is_some());
+    }
+
+    #[test]
+    fn codex_notify_turn_complete_clears_waiting_approval() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+        store.record_input("term-1", "Implement feature\r").unwrap();
+        store
+            .record_output("term-1", "Allow command to run?\n› Yes / No")
+            .unwrap();
+
+        let ready = store
+            .record_codex_notify_agent_turn_complete("term-1", crate::events::now_ms())
+            .unwrap();
+
+        assert_eq!(ready.turn_state, TerminalTurnState::OwnerPromptReady);
+        assert!(ready.last_prompt_ready_at.is_some());
+        assert_eq!(ready.last_approval_prompt_at, None);
+    }
+
+    #[test]
+    fn stale_codex_notify_turn_complete_does_not_rewind_new_prompt() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+        let submitted = store.record_input("term-1", "New prompt\r").unwrap();
+        let stale_event_at = submitted
+            .last_prompt_submitted_at
+            .unwrap()
+            .saturating_sub(1);
+
+        let stale_update = store.record_codex_notify_agent_turn_complete("term-1", stale_event_at);
+
+        assert!(stale_update.is_none());
+        let current = store.get("term-1").unwrap();
+        assert_eq!(current.turn_state, TerminalTurnState::PromptSubmitted);
+        assert_eq!(current.last_prompt_ready_at, None);
+    }
+
+    #[test]
+    fn codex_notify_turn_complete_ignores_app_server_and_shell_sessions() {
+        let store = TerminalSessionStore::default();
+        store.create_with_runtime(
+            "app-server-session".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+            TerminalSessionRuntime::CodexAppServer,
+        );
+        store.create(
+            "shell-session".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Shell,
+            "/tmp".to_string(),
+        );
+
+        assert!(store
+            .record_codex_notify_agent_turn_complete("app-server-session", crate::events::now_ms())
+            .is_none());
+        assert!(store
+            .record_codex_notify_agent_turn_complete("shell-session", crate::events::now_ms())
+            .is_none());
+    }
+
+    #[test]
+    fn terminal_write_after_codex_notify_prompt_ready_submits_prompt() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+        store
+            .record_codex_notify_agent_turn_complete("term-1", crate::events::now_ms())
+            .unwrap();
+
+        let submitted = store.record_input("term-1", "Next prompt\r").unwrap();
+
+        assert_eq!(submitted.turn_state, TerminalTurnState::PromptSubmitted);
+        assert!(submitted.last_prompt_submitted_at.is_some());
+        assert_eq!(submitted.last_prompt_ready_at, None);
     }
 
     #[test]

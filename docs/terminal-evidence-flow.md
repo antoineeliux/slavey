@@ -4,11 +4,13 @@ This audit documents the current terminal and Codex evidence flow. It describes 
 
 ## Overview
 
-Slavey has two Codex evidence paths.
+Slavey has three Codex evidence paths.
 
 The preferred path is the Codex app-server path. It uses structured JSON-RPC responses, notifications, and requests from `codex app-server --stdio`. Those events are recorded in `AgentRuntimeStore` with `source: codex_app_server` and `confidence: structured`.
 
-The fallback path is PTY parsing. Shell sessions and direct Codex terminal sessions stream terminal bytes through a PTY reader. Slavey strips its own control markers, stores bounded terminal metadata, and parses bounded output tails for strong Codex signals such as prompt-ready output, approval prompts, and active working output. PTY parsing is fallback evidence because terminal output is not a stable protocol.
+PTY-launched Codex sessions also get a scoped Codex `notify` override. Codex calls a Slavey-owned helper for `agent-turn-complete`; the helper writes the official notification payload into a per-session temp directory, and the backend watcher re-applies the current PTY size to trigger a Codex redraw for that session. The redraw is then parsed through the normal PTY evidence path. This path exists to avoid requiring a manual terminal resize after turn completion, but it still records terminal-fallback source/confidence because it is attached to a PTY session rather than an app-server session.
+
+The final fallback path is PTY parsing. Shell sessions and direct Codex terminal sessions stream terminal bytes through a PTY reader. Slavey strips its own control markers, stores bounded terminal metadata, and parses bounded output tails for strong Codex signals such as prompt-ready output, approval prompts, and active working output. PTY parsing is fallback evidence because terminal output is not a stable protocol.
 
 `EmployeeActivity.contract` remains the canonical employee state for the frontend. The floor, employee labels, attention state, and routing should consume the backend activity contract, not terminal text. Legacy activity fields exist for compatibility and diagnostics. The frontend keeps bounded terminal buffers fresh and interprets backend session records for presentation fallback, but it does not parse raw terminal output to infer Codex turn state.
 
@@ -89,7 +91,7 @@ This integration is currently configured for Unix `bash` and `zsh` shells. The m
 - `confidence`: `none`, `terminal_fallback`, or `structured`.
 - `turn_owner`: `none`, `owner`, `agent`, or `tool`.
 
-PTY sessions sync into fallback runtime snapshots. Codex app-server sessions sync into structured snapshots. For running app-server sessions, an existing structured app-server snapshot is preserved when it is newer than the session-derived snapshot.
+PTY sessions sync into fallback runtime snapshots, including prompt readiness discovered after Codex notify-triggered redraws. Codex app-server sessions sync into structured snapshots. For running app-server sessions, an existing structured app-server snapshot is preserved when it is newer than the session-derived snapshot.
 
 ### Codex App-Server Notifications
 
@@ -123,20 +125,22 @@ Terminal owner-wait states, such as Codex waiting for instruction or terminal ap
 
 1. `employee_start_terminal` creates a `TerminalSessionRecord`, syncs an initial agent runtime snapshot, and starts a PTY session through `TerminalManager`.
 2. `TerminalManager` spawns the requested shell or Codex command. Direct Codex sessions run `codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox`. Shell sessions install shell integrations where supported.
-3. The terminal reader receives chunks from the PTY in an 8192-byte buffer.
-4. `parse_terminal_control_markers` removes Slavey control markers and reports active-profile and CWD changes. Partial markers can be held in a pending buffer across reads.
-5. Visible output is appended to the in-memory bounded terminal output buffer and emitted as `terminal:data`.
-6. The output callback calls `TerminalSessionStore.record_output`.
-7. `record_output` builds a bounded detection string from `last_output_tail` plus the new output.
-8. `record_output` collects PTY evidence for terminal approval prompts, active work, prompt-ready output, prompt-at-end stale redraws, owner-wait state, and visible text.
-9. A private backend resolver turns that immutable session state and output evidence into a `TerminalTurnTransition`. Applying the transition to the mutable session record is a separate step.
-10. If output shows an approval prompt, the session becomes `waiting_approval`, `last_approval_prompt_at` is set, and prompt-ready state is cleared.
-11. If output shows active work and does not end at a prompt, the session becomes `agent_working`, prompt-ready and approval timestamps are cleared, and a missing submitted timestamp may be filled when work resumes from an owner-wait state.
-12. If output shows a Codex prompt ready, the session becomes `owner_prompt_ready`, `last_prompt_ready_at` is set, and approval state is cleared.
-13. If the session is already waiting for owner input or approval, echoed owner draft text and prompt redraws do not prove that the agent resumed work.
-14. Otherwise visible output updates `last_output_at`; active Codex sessions that emit visible text while already submitted or working remain `agent_working`.
-15. When relevant session fields change, `AgentRuntimeStore.sync_from_terminal_session` records a fallback runtime snapshot and the backend emits `terminal:session-updated`.
-16. `emit_terminal_session_updated` also emits `employee:activity-updated`.
+3. On Unix, `TerminalManager` creates a per-session Codex notify bridge. Direct Codex PTYs receive `--config notify=[...]`; shell PTYs expose the same override through the temporary `codex` wrapper. The helper writes Codex notification JSON to a per-session temp directory, and the watcher re-applies the current PTY size when it sees `agent-turn-complete`.
+4. The terminal reader receives chunks from the PTY in an 8192-byte buffer.
+5. `parse_terminal_control_markers` removes Slavey control markers and reports active-profile and CWD changes. Partial markers can be held in a pending buffer across reads.
+6. Visible output is appended to the in-memory bounded terminal output buffer and emitted as `terminal:data`.
+7. The output callback calls `TerminalSessionStore.record_output`.
+8. `record_output` builds a bounded detection string from `last_output_tail` plus the new output.
+9. `record_output` collects PTY evidence for terminal approval prompts, active work, prompt-ready output, prompt-at-end stale redraws, owner-wait state, and visible text.
+10. A private backend resolver turns that immutable session state and output evidence into a `TerminalTurnTransition`. Applying the transition to the mutable session record is a separate step.
+11. If output shows an approval prompt, the session becomes `waiting_approval`, `last_approval_prompt_at` is set, and prompt-ready state is cleared.
+12. If output shows active work and does not end at a prompt, the session becomes `agent_working`, prompt-ready and approval timestamps are cleared, and a missing submitted timestamp may be filled when work resumes from an owner-wait state.
+13. If output shows a Codex prompt ready, the session becomes `owner_prompt_ready`, `last_prompt_ready_at` is set, and approval state is cleared.
+14. If a Codex notify `agent-turn-complete` event arrives for a PTY session, the watcher refreshes the PTY so Codex can redraw its current state. Status-only working redraws that end at a prompt glyph remain `agent_working`; working redraws with completion text before the returned prompt can become `owner_prompt_ready`.
+15. If the session is already waiting for owner input or approval, echoed owner draft text and prompt redraws do not prove that the agent resumed work.
+16. Otherwise visible output updates `last_output_at`; active Codex sessions that emit visible text while already submitted or working remain `agent_working`.
+17. When relevant session fields change, `AgentRuntimeStore.sync_from_terminal_session` records a fallback runtime snapshot and the backend emits `terminal:session-updated`.
+18. `emit_terminal_session_updated` also emits `employee:activity-updated`.
 
 Input follows a separate path:
 
@@ -148,7 +152,7 @@ Input follows a separate path:
 
 The recent stale-redraw fix lives in this flow: if a final output chunk contains stale `Working ... esc to interrupt` text but the last meaningful line is the `›` prompt, prompt-ready wins over active work.
 
-The resolver records transition reasons such as `shell_output`, `codex_approval_prompt`, `codex_active_work`, `codex_prompt_ready`, `codex_prompt_ready_at_end_stale_work_redraw`, `owner_prompt_echo_ignored`, `owner_input_submitted`, `owner_composing`, `active_profile_reset_to_shell`, `active_profile_changed_to_codex`, `session_finished_completed`, and `session_finished_failed`. App-server session sync records app-server transition reasons such as `app_server_thinking`, `app_server_waiting_prompt`, `app_server_waiting_approval`, `app_server_completed`, and `app_server_failed`. These labels are persisted on `TerminalSessionRecord.lastTransitionReason` for support/debugging; they are not UI routing state.
+The resolver records transition reasons such as `shell_output`, `codex_approval_prompt`, `codex_active_work`, `codex_prompt_ready`, `codex_prompt_ready_at_end_stale_work_redraw`, `codex_notify_agent_turn_complete`, `owner_prompt_echo_ignored`, `owner_input_submitted`, `owner_composing`, `active_profile_reset_to_shell`, `active_profile_changed_to_codex`, `session_finished_completed`, and `session_finished_failed`. App-server session sync records app-server transition reasons such as `app_server_thinking`, `app_server_waiting_prompt`, `app_server_waiting_approval`, `app_server_completed`, and `app_server_failed`. These labels are persisted on `TerminalSessionRecord.lastTransitionReason` for support/debugging; they are not UI routing state.
 
 ## Fixture Corpus
 
@@ -263,13 +267,13 @@ Diagnostics continue to exclude raw terminal output, raw process logs, environme
 
 ## Current Risk Areas
 
-- PTY output is not a stable protocol. Codex UI text, prompt glyphs, progress wording, and redraw behavior can change outside Slavey's control.
+- PTY output is not a stable protocol. Codex UI text, prompt glyphs, progress wording, and redraw behavior can change outside Slavey's control. The Codex notify side-channel reduces redraw dependence for turn completion but does not replace app-server structured state.
 - Redraws, ANSI/control sequences, carriage returns, and split chunks can create edge cases. The parser handles known stale redraws and split Slavey control markers, but the corpus is not complete.
 - Frontend terminal buffers may update before the matching `terminal:session-updated` record arrives. During that gap, terminal text can be fresher than terminal session turn metadata, but backend session records remain authoritative for Codex state.
 - Activity refresh responses can still be delayed by IPC or command latency, but stale responses are ignored so a slower old refresh should not overwrite a newer backend activity contract.
 - Diagnostics now expose the terminal/session evidence, runtime source/confidence, activity reason, and activity contract chain. They make wrong-state bugs easier to explain, but they do not make PTY fallback signals less heuristic.
 - The fixture corpus and stress matrix cover important prompt-ready, approval, active-work, owner-draft, app-server, stale-redraw, duplicate-redraw, chunk-boundary, and single-character streaming cases. They are broader than targeted unit tests, but still not a full transcript replay suite.
-- Structured app-server evidence is preferred, but shell-launched Codex still relies on PTY fallback and wrapper markers.
+- Structured app-server evidence is preferred, but shell-launched Codex still relies on PTY fallback, wrapper markers, and the scoped Codex notify bridge.
 - CWD markers are currently shell-integration dependent. Unsupported shells or failed shell integration can leave `current_cwd` at the start directory even when terminal output and activity continue normally.
 
 The items above are remaining production risks. This document records current behavior and does not imply runtime changes.

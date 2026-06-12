@@ -131,6 +131,7 @@ describe("AppShell", () => {
             available: true,
             version: "codex 1.0.0",
             message: "available",
+            path: "codex",
           },
         },
       },

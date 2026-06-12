@@ -25,8 +25,8 @@ use crate::{
         emit_terminal_session_updated, LogLevel,
     },
     terminal::{
-        AgentRuntimeStore, TerminalLaunchProfile, TerminalSessionRecord, TerminalSessionRuntime,
-        TerminalSessionStatus, TerminalSessionStore,
+        codex_program_from_settings, AgentRuntimeStore, TerminalLaunchProfile,
+        TerminalSessionRecord, TerminalSessionRuntime, TerminalSessionStatus, TerminalSessionStore,
     },
     AppState,
 };
@@ -107,6 +107,7 @@ struct CodexAppServerInner {
 }
 
 struct CodexAppServerProcess {
+    codex_program: String,
     stdin: Arc<Mutex<ChildStdin>>,
     child: Arc<Mutex<Child>>,
 }
@@ -120,6 +121,7 @@ impl Drop for CodexAppServerProcess {
 }
 
 struct CodexTurnRequest {
+    codex_program: String,
     session_id: String,
     cwd: String,
     workspace_root: String,
@@ -128,8 +130,9 @@ struct CodexTurnRequest {
 }
 
 #[tauri::command]
-pub fn codex_app_server_status() -> CodexAppServerStatus {
-    codex_app_server_status_impl()
+pub fn codex_app_server_status(state: State<'_, AppState>) -> CodexAppServerStatus {
+    let codex_program = codex_program_from_settings(&state.persistence.settings());
+    codex_app_server_status_impl(&codex_program)
 }
 
 #[tauri::command]
@@ -141,8 +144,8 @@ pub fn codex_task_submit(
     codex_task_submit_impl(app, &state, payload)
 }
 
-pub fn codex_app_server_status_impl() -> CodexAppServerStatus {
-    match probe_codex_app_server() {
+pub fn codex_app_server_status_impl(codex_program: &str) -> CodexAppServerStatus {
+    match probe_codex_app_server(codex_program) {
         Ok(result) => status_from_initialize_result(result),
         Err(error) => CodexAppServerStatus {
             available: false,
@@ -170,6 +173,7 @@ fn codex_task_submit_impl(
         .get(&payload.employee_id)
         .ok_or_else(|| "employee not found".to_string())?;
     let workspace_root = state.workspace_root();
+    let codex_program = codex_program_from_settings(&state.persistence.settings());
     let cwd = resolve_employee_execution_dir(&workspace_root, &employee, None)?;
     let cwd_label = cwd.to_string_lossy().to_string();
     let session_id = payload
@@ -238,6 +242,7 @@ fn codex_task_submit_impl(
         state.codex_app_server.clone(),
     );
     if let Err(error) = state.codex_app_server.submit_turn(CodexTurnRequest {
+        codex_program,
         session_id: session_id.clone(),
         cwd: cwd_label,
         workspace_root: workspace_root.to_string_lossy().to_string(),
@@ -281,7 +286,7 @@ fn codex_task_submit_impl(
 
 impl CodexAppServerManager {
     fn submit_turn(&self, request: CodexTurnRequest) -> Result<()> {
-        self.ensure_started()?;
+        self.ensure_started(&request.codex_program)?;
         let thread_id = match self
             .inner
             .session_threads
@@ -399,12 +404,25 @@ impl CodexAppServerManager {
             .unwrap_or_default()
     }
 
-    fn ensure_started(&self) -> Result<()> {
-        if self.inner.process.lock().is_some() {
-            return Ok(());
+    fn ensure_started(&self, codex_program: &str) -> Result<()> {
+        {
+            let process = self.inner.process.lock();
+            if process
+                .as_ref()
+                .is_some_and(|process| process.codex_program == codex_program)
+            {
+                return Ok(());
+            }
         }
 
-        let mut child = Command::new("codex")
+        if self.inner.process.lock().take().is_some() {
+            self.inner.session_threads.lock().clear();
+            self.inner.thread_sessions.lock().clear();
+            self.inner.session_turns.lock().clear();
+            self.inner.session_handlers.lock().clear();
+        }
+
+        let mut child = Command::new(codex_program)
             .args(["app-server", "--stdio"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -423,6 +441,7 @@ impl CodexAppServerManager {
         let child = Arc::new(Mutex::new(child));
 
         *self.inner.process.lock() = Some(CodexAppServerProcess {
+            codex_program: codex_program.to_string(),
             stdin: Arc::clone(&stdin),
             child,
         });
@@ -739,8 +758,8 @@ fn append_app_server_transcript(
     emit_terminal_data(app, employee_id.to_string(), session_id.to_string(), data);
 }
 
-fn probe_codex_app_server() -> Result<Value> {
-    let mut child = Command::new("codex")
+fn probe_codex_app_server(codex_program: &str) -> Result<Value> {
+    let mut child = Command::new(codex_program)
         .args(["app-server", "--stdio"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

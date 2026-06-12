@@ -30,6 +30,8 @@ const MAX_RECENT_WORKSPACES: usize = 10;
 pub struct AppSettings {
     #[serde(default = "default_terminal_profile")]
     pub default_terminal_profile: TerminalLaunchProfile,
+    #[serde(default)]
+    pub codex_binary_path: String,
     #[serde(default = "default_true")]
     pub require_confirmation_discard: bool,
     #[serde(default = "default_true")]
@@ -44,6 +46,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             default_terminal_profile: default_terminal_profile(),
+            codex_binary_path: String::new(),
             require_confirmation_discard: true,
             require_confirmation_delete: true,
             require_confirmation_handoff_apply: true,
@@ -56,6 +59,7 @@ impl Default for AppSettings {
 #[serde(rename_all = "camelCase")]
 pub struct AppSettingsUpdateRequest {
     pub default_terminal_profile: Option<TerminalLaunchProfile>,
+    pub codex_binary_path: Option<String>,
     pub require_confirmation_discard: Option<bool>,
     pub require_confirmation_delete: Option<bool>,
     pub require_confirmation_handoff_apply: Option<bool>,
@@ -216,6 +220,9 @@ impl PersistenceManager {
         if let Some(profile) = request.default_terminal_profile {
             settings.default_terminal_profile = profile;
         }
+        if let Some(path) = request.codex_binary_path {
+            settings.codex_binary_path = normalize_codex_binary_path(&path);
+        }
         if let Some(value) = request.require_confirmation_discard {
             settings.require_confirmation_discard = value;
         }
@@ -267,12 +274,17 @@ fn validate_terminal_buffer_size(value: usize) -> Result<usize, String> {
 }
 
 fn normalize_settings(mut settings: AppSettings) -> AppSettings {
+    settings.codex_binary_path = normalize_codex_binary_path(&settings.codex_binary_path);
     if let Ok(size) = validate_terminal_buffer_size(settings.max_terminal_buffer_chars) {
         settings.max_terminal_buffer_chars = size;
     } else {
         settings.max_terminal_buffer_chars = DEFAULT_MAX_TERMINAL_BUFFER_CHARS;
     }
     settings
+}
+
+fn normalize_codex_binary_path(path: &str) -> String {
+    path.trim().to_string()
 }
 
 fn atomic_write_json(path: &Path, contents: &[u8]) -> Result<(), String> {
@@ -487,6 +499,9 @@ mod tests {
         let updated = manager
             .update_settings(AppSettingsUpdateRequest {
                 default_terminal_profile: Some(crate::terminal::TerminalLaunchProfile::Codex),
+                codex_binary_path: Some(
+                    " /Users/ada/.nvm/versions/node/v22/bin/codex ".to_string(),
+                ),
                 require_confirmation_discard: Some(false),
                 require_confirmation_delete: Some(false),
                 require_confirmation_handoff_apply: Some(true),
@@ -496,6 +511,10 @@ mod tests {
         assert_eq!(
             updated.default_terminal_profile,
             crate::terminal::TerminalLaunchProfile::Codex
+        );
+        assert_eq!(
+            updated.codex_binary_path,
+            "/Users/ada/.nvm/versions/node/v22/bin/codex"
         );
         assert!(!updated.require_confirmation_discard);
         assert!(!updated.require_confirmation_delete);

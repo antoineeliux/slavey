@@ -18,6 +18,7 @@ import { ActionPanel, ApprovalPanel } from "./ActionApprovalPanel";
 import { EmployeeDashboard } from "./EmployeeDashboard";
 import {
   codexStatusLabel,
+  codexStatusTitle,
   formatLabel,
   formatTimestamp,
   worktreeCreateDisabledReason,
@@ -208,7 +209,10 @@ export function EmployeeDetailsPanel() {
           </div>
           <div>
             <dt>Codex CLI</dt>
-            <dd className="codex-status-line" title={codexCliStatus?.message ?? "Checking Codex CLI"}>
+            <dd
+              className="codex-status-line"
+              title={codexStatusTitle(codexCliStatus, codexCliStatusLoading)}
+            >
               <span>{codexStatusLabel(codexCliStatus, codexCliStatusLoading)}</span>
               <button
                 className="icon-button mini"

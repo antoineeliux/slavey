@@ -11,6 +11,7 @@ const TERMINAL_TRUNCATION_MARKER = "\n[... earlier output truncated ...]\n";
 
 export const DEFAULT_SETTINGS: AppSettings = {
   defaultTerminalProfile: "shell",
+  codexBinaryPath: "",
   requireConfirmationDiscard: true,
   requireConfirmationDelete: true,
   requireConfirmationHandoffApply: true,
@@ -123,6 +124,10 @@ export function normalizeSettings(settings?: AppSettings | null): AppSettings {
   return {
     ...DEFAULT_SETTINGS,
     ...settings,
+    codexBinaryPath:
+      typeof settings?.codexBinaryPath === "string"
+        ? settings.codexBinaryPath.trim()
+        : DEFAULT_SETTINGS.codexBinaryPath,
     maxTerminalBufferChars:
       typeof settings?.maxTerminalBufferChars === "number"
         ? settings.maxTerminalBufferChars

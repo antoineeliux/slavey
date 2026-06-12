@@ -21,8 +21,8 @@ use crate::{
     processes::ProcessManager,
     read_workspace_root,
     terminal::{
-        TerminalLaunchProfile, TerminalProfileSessionRequest, TerminalSessionRuntime,
-        TerminalSessionStatus, TerminalSessionStore, DEFAULT_PTY_SIZE,
+        codex_program_from_settings, TerminalLaunchProfile, TerminalProfileSessionRequest,
+        TerminalSessionRuntime, TerminalSessionStatus, TerminalSessionStore, DEFAULT_PTY_SIZE,
     },
     AppState, WorkspaceRootHandle,
 };
@@ -349,6 +349,7 @@ fn start_terminal_with_profile(
     emit_employee_updated(&app, starting);
 
     let session_id = format!("term-{}", Uuid::new_v4());
+    let codex_program = codex_program_from_settings(&state.persistence.settings());
     let session_record = state.terminal_sessions.create(
         session_id.clone(),
         employee_id.clone(),
@@ -389,6 +390,17 @@ fn start_terminal_with_profile(
             emit_terminal_session_updated(&cwd_app, record);
         }
     });
+    let notify_app = app.clone();
+    let notify_terminal_sessions = state.terminal_sessions.clone();
+    let notify_agent_runtime = state.agent_runtime.clone();
+    let on_codex_turn_complete = Arc::new(move |session_id: &str, event_at: u64| {
+        if let Some(record) =
+            notify_terminal_sessions.record_codex_notify_agent_turn_complete(session_id, event_at)
+        {
+            notify_agent_runtime.sync_from_terminal_session(&record);
+            emit_terminal_session_updated(&notify_app, record);
+        }
+    });
     let exit_app = app.clone();
     let exit_employee_id = employee_id.clone();
     let exit_session_id = session_id.clone();
@@ -412,9 +424,11 @@ fn start_terminal_with_profile(
             cwd,
             size: DEFAULT_PTY_SIZE,
             profile,
+            codex_program,
             on_output,
             on_active_profile_changed,
             on_cwd_changed,
+            on_codex_turn_complete,
             on_exit: move |exit_code| {
                 let exit_code_i32 = i32::try_from(exit_code).unwrap_or(i32::MAX);
                 let next_status = if exit_code == 0 {

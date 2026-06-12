@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
     thread,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -21,9 +22,11 @@ use crate::{
         emit_employee_updated, emit_log, emit_terminal_data, emit_terminal_session_updated,
         LogLevel,
     },
+    persistence::AppSettings,
     AppState,
 };
 
+const DEFAULT_CODEX_PROGRAM: &str = "codex";
 const TERMINAL_HISTORY_LIMIT_PER_EMPLOYEE: usize = 50;
 const TERMINAL_LABEL_MAX_CHARS: usize = 80;
 pub(crate) const TERMINAL_OUTPUT_BUFFER_MAX_BYTES: usize = 250_000;
@@ -32,6 +35,7 @@ const CODEX_SHELL_START_MARKER: &str = "\x1b]777;slavey-codex=start\x07";
 const CODEX_SHELL_END_MARKER: &str = "\x1b]777;slavey-codex=end\x07";
 const SHELL_CWD_MARKER_PREFIX: &str = "\x1b]777;slavey-cwd=";
 const SHELL_CWD_MARKER_FAMILY_PREFIX: &str = "\x1b]777;slavey-";
+const CODEX_NOTIFY_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 
 mod agent_runtime;
 mod codex_status;
@@ -63,12 +67,14 @@ struct TerminalSession {
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     killer: Mutex<Box<dyn ChildKiller + Send>>,
+    size: Mutex<PtySize>,
     output: Mutex<String>,
 }
 
 type TerminalOutputCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
 type TerminalActiveProfileCallback = Arc<dyn Fn(&str, TerminalLaunchProfile) + Send + Sync>;
 type TerminalCwdCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
+type TerminalCodexTurnCompleteCallback = Arc<dyn Fn(&str, u64) + Send + Sync>;
 
 #[derive(Clone)]
 struct TerminalReaderCallbacks {
@@ -89,10 +95,16 @@ pub struct TerminalProfileSessionRequest<F> {
     pub cwd: PathBuf,
     pub size: PtySize,
     pub profile: TerminalLaunchProfile,
+    pub codex_program: String,
     pub on_output: TerminalOutputCallback,
     pub on_active_profile_changed: TerminalActiveProfileCallback,
     pub on_cwd_changed: TerminalCwdCallback,
+    pub on_codex_turn_complete: TerminalCodexTurnCompleteCallback,
     pub on_exit: F,
+}
+
+struct CodexNotifyBridge {
+    event_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +127,7 @@ pub struct CodexCliStatus {
     pub available: bool,
     pub version: Option<String>,
     pub message: String,
+    pub path: Option<String>,
 }
 
 impl TerminalLaunchProfile {
@@ -153,9 +166,11 @@ impl TerminalManager {
             cwd,
             size,
             profile: TerminalLaunchProfile::Shell,
+            codex_program: DEFAULT_CODEX_PROGRAM.to_string(),
             on_output: Arc::new(|_, _| {}),
             on_active_profile_changed: Arc::new(|_, _| {}),
             on_cwd_changed: Arc::new(|_, _| {}),
+            on_codex_turn_complete: Arc::new(|_, _| {}),
             on_exit,
         })
     }
@@ -171,23 +186,37 @@ impl TerminalManager {
             cwd,
             size,
             profile,
+            codex_program,
             on_output,
             on_active_profile_changed,
             on_cwd_changed,
+            on_codex_turn_complete,
             on_exit,
         } = request;
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(size).context("failed to open PTY")?;
-        let spec = terminal_command_spec(profile);
+        let spec = terminal_command_spec(profile, &codex_program);
         let mut command = command_builder_from_spec(&spec);
         configure_terminal_environment(&mut command);
-        if let Err(error) = configure_command_for_profile(&mut command, profile) {
+        if let Err(error) = configure_command_for_profile(&mut command, profile, &codex_program) {
             emit_log(
                 &app,
                 LogLevel::Warn,
                 format!("failed to configure terminal profile environment: {error}"),
             );
         }
+        let notify_bridge = match configure_codex_notify_bridge(&mut command, profile, &session_id)
+        {
+            Ok(bridge) => bridge,
+            Err(error) => {
+                emit_log(
+                    &app,
+                    LogLevel::Warn,
+                    format!("failed to configure Codex notify bridge: {error}"),
+                );
+                None
+            }
+        };
         command.cwd(cwd);
 
         let mut child = pair
@@ -209,6 +238,7 @@ impl TerminalManager {
             writer: Mutex::new(writer),
             master: Mutex::new(pair.master),
             killer: Mutex::new(killer),
+            size: Mutex::new(size),
             output: Mutex::new(String::new()),
         });
 
@@ -228,6 +258,15 @@ impl TerminalManager {
                 cwd_changed: Arc::clone(&on_cwd_changed),
             },
         );
+        if let Some(notify_bridge) = notify_bridge {
+            spawn_codex_notify_watcher(
+                app.clone(),
+                session_id.clone(),
+                notify_bridge.event_dir,
+                Arc::clone(&self.sessions),
+                Arc::clone(&on_codex_turn_complete),
+            );
+        }
 
         let sessions = Arc::clone(&self.sessions);
         thread::spawn(move || {
@@ -279,16 +318,18 @@ impl TerminalManager {
             .cloned()
             .with_context(|| format!("terminal session {session_id} not found"))?;
         ensure_session_owner(&session.employee_id, employee_id)?;
+        let size = PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
         session
             .master
             .lock()
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
+            .resize(size)
             .context("failed to resize PTY")?;
+        *session.size.lock() = size;
         Ok(())
     }
 
@@ -330,7 +371,19 @@ impl TerminalManager {
     }
 }
 
-pub fn terminal_command_spec(profile: TerminalLaunchProfile) -> TerminalCommandSpec {
+pub fn codex_program_from_settings(settings: &AppSettings) -> String {
+    let trimmed = settings.codex_binary_path.trim();
+    if trimmed.is_empty() {
+        DEFAULT_CODEX_PROGRAM.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+pub fn terminal_command_spec(
+    profile: TerminalLaunchProfile,
+    codex_program: &str,
+) -> TerminalCommandSpec {
     match profile {
         TerminalLaunchProfile::Shell => TerminalCommandSpec {
             program: default_shell(),
@@ -338,7 +391,7 @@ pub fn terminal_command_spec(profile: TerminalLaunchProfile) -> TerminalCommandS
             command_label: "shell",
         },
         TerminalLaunchProfile::Codex => TerminalCommandSpec {
-            program: "codex".to_string(),
+            program: codex_program.to_string(),
             args: vec![
                 "--no-alt-screen".to_string(),
                 "--dangerously-bypass-approvals-and-sandbox".to_string(),
@@ -361,19 +414,72 @@ fn configure_terminal_environment(command: &mut CommandBuilder) {
     command.env("COLORTERM", "truecolor");
 }
 
+#[cfg(unix)]
+fn configure_codex_notify_bridge(
+    command: &mut CommandBuilder,
+    profile: TerminalLaunchProfile,
+    session_id: &str,
+) -> Result<Option<CodexNotifyBridge>> {
+    let base_dir = env::temp_dir().join(format!("slavey-codex-notify-{}", std::process::id()));
+    let event_dir = base_dir.join(session_id);
+    fs::create_dir_all(&event_dir)
+        .with_context(|| format!("failed to create {}", event_dir.display()))?;
+
+    let helper_path = base_dir.join("codex-notify.sh");
+    fs::write(&helper_path, codex_notify_helper_script())
+        .with_context(|| format!("failed to write {}", helper_path.display()))?;
+    fs::set_permissions(&helper_path, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("failed to make {} executable", helper_path.display()))?;
+
+    let config_arg = codex_notify_config_arg(&helper_path, &event_dir);
+    match profile {
+        TerminalLaunchProfile::Codex => {
+            command.arg("--config");
+            command.arg(config_arg);
+        }
+        TerminalLaunchProfile::Shell => {
+            command.env("SLAVEY_CODEX_NOTIFY_CONFIG", config_arg);
+        }
+    }
+
+    Ok(Some(CodexNotifyBridge { event_dir }))
+}
+
+#[cfg(not(unix))]
+fn configure_codex_notify_bridge(
+    _command: &mut CommandBuilder,
+    _profile: TerminalLaunchProfile,
+    _session_id: &str,
+) -> Result<Option<CodexNotifyBridge>> {
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn codex_notify_config_arg(helper_path: &Path, event_dir: &Path) -> String {
+    let notify = serde_json::json!([
+        helper_path.to_string_lossy().to_string(),
+        event_dir.to_string_lossy().to_string()
+    ]);
+    format!("notify={notify}")
+}
+
 fn configure_command_for_profile(
     command: &mut CommandBuilder,
     profile: TerminalLaunchProfile,
+    codex_program: &str,
 ) -> Result<()> {
     if profile == TerminalLaunchProfile::Shell {
-        configure_shell_codex_detection(command)?;
+        configure_shell_codex_detection(command, codex_program)?;
         configure_shell_cwd_detection(command)?;
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn configure_shell_codex_detection(command: &mut CommandBuilder) -> Result<()> {
+fn configure_shell_codex_detection(
+    command: &mut CommandBuilder,
+    codex_program: &str,
+) -> Result<()> {
     let wrapper_dir = env::temp_dir().join(format!("slavey-codex-wrapper-{}", std::process::id()));
     fs::create_dir_all(&wrapper_dir)
         .with_context(|| format!("failed to create {}", wrapper_dir.display()))?;
@@ -394,11 +500,17 @@ fn configure_shell_codex_detection(command: &mut CommandBuilder) -> Result<()> {
 
     command.env("PATH", next_path);
     command.env("SLAVEY_CODEX_WRAPPER_DIR", wrapper_dir.as_os_str());
+    if codex_program != DEFAULT_CODEX_PROGRAM {
+        command.env("SLAVEY_CODEX_PATH", codex_program);
+    }
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn configure_shell_codex_detection(_command: &mut CommandBuilder) -> Result<()> {
+fn configure_shell_codex_detection(
+    _command: &mut CommandBuilder,
+    _codex_program: &str,
+) -> Result<()> {
     Ok(())
 }
 
@@ -506,25 +618,39 @@ fn home_dir() -> Option<PathBuf> {
 fn codex_wrapper_script() -> &'static str {
     r#"#!/bin/sh
 wrapper_dir=${SLAVEY_CODEX_WRAPPER_DIR:-}
+configured_codex=${SLAVEY_CODEX_PATH:-}
+notify_config=${SLAVEY_CODEX_NOTIFY_CONFIG:-}
 printf '\033]777;slavey-codex=start\007'
 
 real_codex=
-old_ifs=$IFS
-IFS=:
-for path_dir in $PATH; do
-  if [ -z "$path_dir" ]; then
-    path_dir=.
+if [ -n "$configured_codex" ]; then
+  if [ -x "$configured_codex" ]; then
+    real_codex=$configured_codex
+  else
+    printf 'Slavey codex wrapper: configured codex executable not found: %s\n' "$configured_codex" >&2
+    printf '\033]777;slavey-codex=end\007'
+    exit 127
   fi
-  if [ -n "$wrapper_dir" ] && [ "$path_dir" = "$wrapper_dir" ]; then
-    continue
-  fi
-  candidate=$path_dir/codex
-  if [ -x "$candidate" ]; then
-    real_codex=$candidate
-    break
-  fi
-done
-IFS=$old_ifs
+fi
+
+if [ -z "$real_codex" ]; then
+  old_ifs=$IFS
+  IFS=:
+  for path_dir in $PATH; do
+    if [ -z "$path_dir" ]; then
+      path_dir=.
+    fi
+    if [ -n "$wrapper_dir" ] && [ "$path_dir" = "$wrapper_dir" ]; then
+      continue
+    fi
+    candidate=$path_dir/codex
+    if [ -x "$candidate" ]; then
+      real_codex=$candidate
+      break
+    fi
+  done
+  IFS=$old_ifs
+fi
 
 if [ -z "$real_codex" ]; then
   printf 'Slavey codex wrapper: real codex executable not found\n' >&2
@@ -542,11 +668,33 @@ done
 if [ "$has_no_alt_screen" = false ]; then
   set -- --no-alt-screen "$@"
 fi
+if [ -n "$notify_config" ]; then
+  set -- --config "$notify_config" "$@"
+fi
 
 "$real_codex" "$@"
 status=$?
 printf '\033]777;slavey-codex=end\007'
 exit "$status"
+"#
+}
+
+#[cfg(unix)]
+fn codex_notify_helper_script() -> &'static str {
+    r#"#!/bin/sh
+event_dir=${1:-}
+payload=${2:-}
+if [ -z "$event_dir" ]; then
+  exit 0
+fi
+mkdir -p "$event_dir" 2>/dev/null || exit 0
+tmp=$(mktemp "$event_dir/event.XXXXXX.tmp") || exit 0
+if ! printf '%s\n' "$payload" > "$tmp"; then
+  rm -f "$tmp"
+  exit 0
+fi
+mv "$tmp" "$tmp.json" 2>/dev/null || rm -f "$tmp"
+exit 0
 "#
 }
 
@@ -608,6 +756,116 @@ fn spawn_reader(
             emit_terminal_data(&app, employee_id, session_id, control_buffer);
         }
     });
+}
+
+#[cfg(unix)]
+fn spawn_codex_notify_watcher(
+    app: AppHandle,
+    session_id: String,
+    event_dir: PathBuf,
+    sessions: Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
+    on_codex_turn_complete: TerminalCodexTurnCompleteCallback,
+) {
+    thread::spawn(move || loop {
+        if !sessions.lock().contains_key(&session_id) {
+            let _ = fs::remove_dir_all(&event_dir);
+            break;
+        }
+
+        if let Err(error) =
+            drain_codex_notify_events(&event_dir, &session_id, &sessions, &on_codex_turn_complete)
+        {
+            emit_log(
+                &app,
+                LogLevel::Warn,
+                format!("failed to read Codex notify events for {session_id}: {error}"),
+            );
+        }
+
+        thread::sleep(CODEX_NOTIFY_WATCH_INTERVAL);
+    });
+}
+
+#[cfg(not(unix))]
+fn spawn_codex_notify_watcher(
+    _app: AppHandle,
+    _session_id: String,
+    _event_dir: PathBuf,
+    _sessions: Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
+    _on_codex_turn_complete: TerminalCodexTurnCompleteCallback,
+) {
+}
+
+#[cfg(unix)]
+fn drain_codex_notify_events(
+    event_dir: &Path,
+    session_id: &str,
+    sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
+    on_codex_turn_complete: &TerminalCodexTurnCompleteCallback,
+) -> Result<()> {
+    if !event_dir.is_dir() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(event_dir)
+        .with_context(|| format!("failed to scan {}", event_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+
+        let event_at = codex_notify_event_modified_at(&path);
+        let payload = fs::read_to_string(&path).unwrap_or_default();
+        let _ = fs::remove_file(&path);
+        if codex_notify_payload_is_agent_turn_complete(&payload) {
+            refresh_session_after_codex_notify(sessions, session_id)?;
+            on_codex_turn_complete(session_id, event_at);
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn refresh_session_after_codex_notify(
+    sessions: &Arc<Mutex<HashMap<String, Arc<TerminalSession>>>>,
+    session_id: &str,
+) -> Result<()> {
+    let Some(session) = sessions.lock().get(session_id).cloned() else {
+        return Ok(());
+    };
+    let size = *session.size.lock();
+    session
+        .master
+        .lock()
+        .resize(size)
+        .context("failed to refresh PTY after Codex notify")?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn codex_notify_event_modified_at(path: &Path) -> u64 {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_else(crate::events::now_ms)
+}
+
+#[cfg(unix)]
+fn codex_notify_payload_is_agent_turn_complete(payload: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(|event_type| event_type == "agent-turn-complete")
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -760,8 +1018,9 @@ fn default_shell() -> String {
 }
 
 #[tauri::command]
-pub fn codex_cli_status() -> CodexCliStatus {
-    codex_cli_status_impl()
+pub fn codex_cli_status(state: State<'_, AppState>) -> CodexCliStatus {
+    let codex_program = codex_program_from_settings(&state.persistence.settings());
+    codex_cli_status_impl(&codex_program)
 }
 
 #[tauri::command]
@@ -981,7 +1240,7 @@ mod tests {
 
     #[test]
     fn shell_profile_uses_default_shell_without_extra_args() {
-        let spec = terminal_command_spec(TerminalLaunchProfile::Shell);
+        let spec = terminal_command_spec(TerminalLaunchProfile::Shell, "codex");
 
         assert!(!spec.program.is_empty());
         assert!(spec.args.is_empty());
@@ -990,7 +1249,7 @@ mod tests {
 
     #[test]
     fn codex_profile_uses_no_alt_screen_with_approval_and_sandbox_bypass() {
-        let spec = terminal_command_spec(TerminalLaunchProfile::Codex);
+        let spec = terminal_command_spec(TerminalLaunchProfile::Codex, "codex");
 
         assert_eq!(spec.program, "codex");
         assert_eq!(
@@ -1001,6 +1260,91 @@ mod tests {
             ],
         );
         assert_eq!(spec.command_label, "codex");
+    }
+
+    #[test]
+    fn codex_profile_uses_configured_codex_program() {
+        let spec = terminal_command_spec(
+            TerminalLaunchProfile::Codex,
+            "/Users/ada/.nvm/versions/node/v22/bin/codex",
+        );
+
+        assert_eq!(spec.program, "/Users/ada/.nvm/versions/node/v22/bin/codex");
+        assert_eq!(spec.command_label, "codex");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_notify_config_arg_uses_json_array_override() {
+        let config = super::codex_notify_config_arg(
+            std::path::Path::new("/tmp/slavey helper/codex-notify.sh"),
+            std::path::Path::new("/tmp/slavey events/term-1"),
+        );
+        let value = config.strip_prefix("notify=").unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(value).unwrap();
+
+        assert_eq!(
+            parsed,
+            serde_json::json!([
+                "/tmp/slavey helper/codex-notify.sh",
+                "/tmp/slavey events/term-1"
+            ])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_codex_wrapper_injects_notify_config_override() {
+        let script = super::codex_wrapper_script();
+
+        assert!(script.contains("SLAVEY_CODEX_NOTIFY_CONFIG"));
+        assert!(script.contains("set -- --config \"$notify_config\" \"$@\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_notify_payload_filters_agent_turn_complete() {
+        assert!(super::codex_notify_payload_is_agent_turn_complete(
+            r#"{"type":"agent-turn-complete","thread-id":"abc"}"#
+        ));
+        assert!(!super::codex_notify_payload_is_agent_turn_complete(
+            r#"{"type":"approval-requested"}"#
+        ));
+        assert!(!super::codex_notify_payload_is_agent_turn_complete(
+            "not json"
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drain_codex_notify_events_invokes_callback_and_removes_file() {
+        let event_dir =
+            std::env::temp_dir().join(format!("slavey-codex-notify-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&event_dir).unwrap();
+        let event_path = event_dir.join("event.json");
+        std::fs::write(&event_path, r#"{"type":"agent-turn-complete"}"#).unwrap();
+
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let callback_calls = std::sync::Arc::clone(&calls);
+        let callback: super::TerminalCodexTurnCompleteCallback =
+            std::sync::Arc::new(move |session_id, event_at| {
+                callback_calls
+                    .lock()
+                    .unwrap()
+                    .push((session_id.to_string(), event_at));
+            });
+
+        let sessions =
+            std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+        super::drain_codex_notify_events(&event_dir, "term-1", &sessions, &callback).unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "term-1");
+        assert!(calls[0].1 > 0);
+        assert!(!event_path.exists());
+        let _ = std::fs::remove_dir_all(&event_dir);
     }
 
     #[test]

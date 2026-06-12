@@ -44,6 +44,7 @@ const frontendCwd = `${workspaceRoot}/.slavey/worktrees/frontend-smoke`;
 
 const settings: AppSettings = {
   defaultTerminalProfile: "shell",
+  codexBinaryPath: "",
   requireConfirmationDiscard: true,
   requireConfirmationDelete: true,
   requireConfirmationHandoffApply: true,
@@ -54,6 +55,7 @@ const codexCliStatus: CodexCliStatus = {
   available: false,
   version: null,
   message: "Codex CLI unavailable in browser smoke mock mode.",
+  path: null,
 };
 
 const employees: Employee[] = [

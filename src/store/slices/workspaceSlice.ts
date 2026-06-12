@@ -132,6 +132,7 @@ export const createWorkspaceSlice: AppStoreSlice<WorkspaceSlice> = (set, get) =>
         available: false,
         version: null,
         message: `Codex status failed: ${formatError(error)}`,
+        path: null,
       };
       set((state) => ({
         codexCliStatus,

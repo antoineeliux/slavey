@@ -11,6 +11,9 @@ import type {
 } from "../../types";
 import { refreshWorktreeReviewForEmployee } from "./reviewSlice";
 
+const BRACKETED_PASTE_START = "\x1b[200~";
+const BRACKETED_PASTE_END = "\x1b[201~";
+
 type TerminalSlice = Pick<
   AppStore,
   | "terminalBuffers"
@@ -233,8 +236,7 @@ export const createTerminalSlice: AppStoreSlice<TerminalSlice> = (set, get) => {
   ) => {
     try {
       const uploaded = await commands.terminalImageUpload(image);
-      await insertUploadedTerminalImage(get, employeeId, sessionId, uploaded);
-      return true;
+      return await insertUploadedTerminalImage(get, employeeId, sessionId, uploaded);
     } catch (error) {
       get().addLog(localLog("error", `terminal image upload failed: ${formatError(error)}`));
       return false;
@@ -248,8 +250,7 @@ export const createTerminalSlice: AppStoreSlice<TerminalSlice> = (set, get) => {
   ) => {
     try {
       const uploaded = await commands.terminalImageUploadPath(image);
-      await insertUploadedTerminalImage(get, employeeId, sessionId, uploaded);
-      return true;
+      return await insertUploadedTerminalImage(get, employeeId, sessionId, uploaded);
     } catch (error) {
       get().addLog(localLog("error", `terminal image drop failed: ${formatError(error)}`));
       return false;
@@ -323,11 +324,38 @@ async function insertUploadedTerminalImage(
   employeeId: string,
   sessionId: string,
   uploaded: TerminalImageUploadResult,
-): Promise<void> {
-  await commands.terminalWrite(employeeId, sessionId, `${terminalPathLiteral(uploaded.path)} `);
-  get().addLog(
-    localLog("info", `inserted image path into terminal: ${shortPath(uploaded.path)}`),
+): Promise<boolean> {
+  const session = get().terminalSessions.find(
+    (session) => session.employeeId === employeeId && session.sessionId === sessionId,
   );
+  if (session?.runtime === "codex_app_server") {
+    get().addLog(localLog("warn", "Codex app-server image attachments are not supported yet."));
+    return false;
+  }
+
+  const input = terminalImageInput(uploaded.path, session);
+  await commands.terminalWrite(employeeId, sessionId, input);
+  get().addLog(
+    localLog("info", terminalImageLogMessage(uploaded.path, session)),
+  );
+  return true;
+}
+
+function terminalImageInput(path: string, session: TerminalSessionRecord | undefined): string {
+  if (session && terminalSessionIsCodexActive(session)) {
+    return `${BRACKETED_PASTE_START}${path}${BRACKETED_PASTE_END}`;
+  }
+  return `${terminalPathLiteral(path)} `;
+}
+
+function terminalImageLogMessage(
+  path: string,
+  session: TerminalSessionRecord | undefined,
+): string {
+  if (session && terminalSessionIsCodexActive(session)) {
+    return `attached image to Codex terminal: ${shortPath(path)}`;
+  }
+  return `inserted image path into terminal: ${shortPath(path)}`;
 }
 
 function terminalPathLiteral(path: string): string {

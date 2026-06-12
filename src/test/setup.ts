@@ -5,6 +5,7 @@ import { afterEach, vi } from "vitest";
 const tauriMocks = vi.hoisted(() => {
   const settings = {
     defaultTerminalProfile: "shell",
+    codexBinaryPath: "",
     requireConfirmationDiscard: true,
     requireConfirmationDelete: true,
     requireConfirmationHandoffApply: true,
@@ -14,6 +15,7 @@ const tauriMocks = vi.hoisted(() => {
     available: false,
     version: null,
     message: "Codex CLI unavailable in web tests",
+    path: null,
   };
   const repoHealth = {
     isExistingDirectory: true,
@@ -170,6 +172,35 @@ if (!globalThis.ResizeObserver) {
     disconnect() {}
   };
 }
+
+function createMemoryStorage(): Storage {
+  const entries = new Map<string, string>();
+  return {
+    get length() {
+      return entries.size;
+    },
+    clear() {
+      entries.clear();
+    },
+    getItem(key: string) {
+      return entries.get(key) ?? null;
+    },
+    key(index: number) {
+      return Array.from(entries.keys())[index] ?? null;
+    },
+    removeItem(key: string) {
+      entries.delete(key);
+    },
+    setItem(key: string, value: string) {
+      entries.set(key, value);
+    },
+  };
+}
+
+Object.defineProperty(window, "localStorage", {
+  configurable: true,
+  value: createMemoryStorage(),
+});
 
 Object.defineProperty(navigator, "clipboard", {
   configurable: true,

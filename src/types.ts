@@ -74,6 +74,7 @@ export type TerminalTurnTransitionReason =
   | "active_profile_changed_to_codex"
   | "session_finished_completed"
   | "session_finished_failed"
+  | "codex_notify_agent_turn_complete"
   | "app_server_starting"
   | "app_server_thinking"
   | "app_server_waiting_prompt"
@@ -389,6 +390,7 @@ export type AppTab = "office" | "terminal" | "editor" | "settings";
 
 export type AppSettings = {
   defaultTerminalProfile: TerminalSessionProfile;
+  codexBinaryPath: string;
   requireConfirmationDiscard: boolean;
   requireConfirmationDelete: boolean;
   requireConfirmationHandoffApply: boolean;
@@ -860,6 +862,7 @@ export type CodexCliStatus = {
   available: boolean;
   version?: string | null;
   message: string;
+  path?: string | null;
 };
 
 export type CodexAppServerStatus = {

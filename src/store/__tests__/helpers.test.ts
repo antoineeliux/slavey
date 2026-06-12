@@ -58,11 +58,13 @@ describe("store helpers", () => {
       normalizeSettings({
         ...DEFAULT_SETTINGS,
         defaultTerminalProfile: "codex",
+        codexBinaryPath: " /Users/ada/.nvm/versions/node/v22/bin/codex ",
         requireConfirmationDelete: false,
         maxTerminalBufferChars: 120_000,
       }),
     ).toMatchObject({
       defaultTerminalProfile: "codex",
+      codexBinaryPath: "/Users/ada/.nvm/versions/node/v22/bin/codex",
       requireConfirmationDelete: false,
       maxTerminalBufferChars: 120_000,
     });

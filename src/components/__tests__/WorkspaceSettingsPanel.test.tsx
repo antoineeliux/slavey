@@ -30,6 +30,7 @@ function workspaceInfo(): WorkspaceInfo {
         available: false,
         version: null,
         message: "Codex CLI unavailable in web tests",
+        path: null,
       },
     },
   };

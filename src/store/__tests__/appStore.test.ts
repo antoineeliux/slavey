@@ -328,6 +328,52 @@ describe("app store smoke behavior", () => {
     });
   });
 
+  it("uploads terminal images and sends a bracketed paste to active Codex sessions", async () => {
+    (mockTauriInvoke as InvokeMock).mockImplementation(
+      async (command: string, args?: Record<string, unknown>) => {
+        if (command === "terminal_image_upload") {
+          return {
+            path: "/workspace/.slavey/terminal-images/screen.png",
+            fileName: "screen.png",
+            bytes: 128,
+            mimeType: "image/png",
+          };
+        }
+        if (command === "terminal_write") {
+          return null;
+        }
+        return args ?? null;
+      },
+    );
+
+    act(() => {
+      useAppStore.setState({
+        employees: [employee({ terminalSessionId: "codex-session" })],
+        terminalSessions: [
+          terminalSession({
+            sessionId: "codex-session",
+            profile: "codex",
+            activeProfile: "codex",
+          }),
+        ],
+      });
+    });
+
+    await act(async () => {
+      await useAppStore.getState().insertTerminalImage("employee-1", "codex-session", {
+        fileName: "screen.png",
+        mimeType: "image/png",
+        dataBase64: "aW1hZ2U=",
+      });
+    });
+
+    expect(mockTauriInvoke).toHaveBeenCalledWith("terminal_write", {
+      employeeId: "employee-1",
+      sessionId: "codex-session",
+      input: "\x1b[200~/workspace/.slavey/terminal-images/screen.png\x1b[201~",
+    });
+  });
+
   it("uploads dropped terminal image paths and writes the copied path into the PTY", async () => {
     (mockTauriInvoke as InvokeMock).mockImplementation(
       async (command: string, args?: Record<string, unknown>) => {
@@ -1263,6 +1309,7 @@ function workspaceInfo(): WorkspaceInfo {
         available: false,
         version: null,
         message: "Codex CLI unavailable in store tests",
+        path: null,
       },
     },
     switchBlockers: [],
