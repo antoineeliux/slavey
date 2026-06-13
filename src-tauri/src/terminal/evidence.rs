@@ -10,32 +10,46 @@ pub fn codex_output_ends_at_prompt(output: &str) -> bool {
 
 pub fn codex_output_suggests_approval_prompt(output: &str) -> bool {
     let clean = strip_ansi(output).replace('\r', "\n").to_ascii_lowercase();
-    let has_direct_request =
-        clean.contains("approve") || clean.contains("allow ") || clean.contains("permission");
-    let has_approval_request =
-        clean.contains("approval") && (clean.contains("required") || clean.contains("request"));
-    let has_action_word = clean.contains("run")
-        || clean.contains("command")
-        || clean.contains("edit")
-        || clean.contains("write")
-        || clean.contains("proceed")
-        || clean.contains("continue");
-    let has_choice = clean.contains("yes")
-        || clean.contains("no")
-        || clean.contains("[y")
-        || clean.contains("(y")
-        || clean.contains('›');
+    let has_direct_request = contains_word(&clean, "approve")
+        || contains_word(&clean, "allow")
+        || contains_word(&clean, "permission");
+    let has_approval_request = contains_word(&clean, "approval")
+        && (contains_word(&clean, "required") || contains_word(&clean, "request"));
+    let has_action_word = contains_word(&clean, "run")
+        || contains_word(&clean, "command")
+        || contains_word(&clean, "edit")
+        || contains_word(&clean, "write")
+        || contains_word(&clean, "proceed")
+        || contains_word(&clean, "continue");
+    let has_choice = approval_choice_in_clean_output(&clean);
     (has_direct_request && has_action_word && has_choice)
         || (has_approval_request && (has_action_word || has_choice))
 }
 
 pub fn codex_output_suggests_approval_choice(output: &str) -> bool {
     let clean = strip_ansi(output).replace('\r', "\n").to_ascii_lowercase();
-    clean.contains("yes")
-        || clean.contains("no")
+    approval_choice_in_clean_output(&clean)
+}
+
+fn approval_choice_in_clean_output(clean: &str) -> bool {
+    contains_word(clean, "yes")
+        || contains_word(clean, "no")
         || clean.contains("[y")
         || clean.contains("(y")
-        || clean.contains('›')
+}
+
+fn contains_word(haystack: &str, word: &str) -> bool {
+    haystack.match_indices(word).any(|(index, _)| {
+        let starts_word = haystack[..index]
+            .chars()
+            .next_back()
+            .is_none_or(|character| !character.is_alphanumeric());
+        let ends_word = haystack[index + word.len()..]
+            .chars()
+            .next()
+            .is_none_or(|character| !character.is_alphanumeric());
+        starts_word && ends_word
+    })
 }
 
 pub fn codex_output_has_visible_text(output: &str) -> bool {
@@ -173,5 +187,20 @@ mod tests {
         assert!(!codex_output_suggests_approval_prompt(
             "Finished checking approval tests\n› "
         ));
+    }
+
+    #[test]
+    fn approval_word_matching_uses_word_boundaries() {
+        assert!(!codex_output_suggests_approval_prompt(
+            "Allowed paths are now running fine\n› "
+        ));
+        assert!(!codex_output_suggests_approval_prompt(
+            "I added permission checks so you can run them now.\n› "
+        ));
+        assert!(codex_output_suggests_approval_prompt(
+            "Approval required to run this command\n[y/N]"
+        ));
+        assert!(!codex_output_suggests_approval_choice("Working now\n› "));
+        assert!(codex_output_suggests_approval_choice("› Yes / No"));
     }
 }

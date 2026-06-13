@@ -135,9 +135,14 @@ pub(super) fn terminal_output_evidence(
     output: &str,
     detection_output: &str,
 ) -> TerminalOutputEvidence {
-    let codex_approval_prompt = codex_output_suggests_approval_prompt(output)
-        || (codex_output_suggests_approval_choice(output)
-            && codex_output_suggests_approval_prompt(detection_output));
+    // Direct Codex sessions launch with approvals bypassed (see
+    // terminal/profile.rs), so terminal approval prompts can only appear in
+    // shell-launched sessions.
+    let approvals_possible = record.profile != TerminalLaunchProfile::Codex;
+    let codex_approval_prompt = approvals_possible
+        && (codex_output_suggests_approval_prompt(output)
+            || (codex_output_suggests_approval_choice(detection_output)
+                && codex_output_suggests_approval_prompt(detection_output)));
     let owner_waiting = codex_session_is_waiting_for_instruction(record)
         || codex_session_is_waiting_for_approval(record);
     let agent_owned = matches!(

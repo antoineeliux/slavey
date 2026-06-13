@@ -532,25 +532,34 @@ fn fixtures() -> Vec<Fixture> {
             ],
             expected: expected_codex_waiting_prompt(true),
         },
+        // Approval fixtures use shell-launched Codex: direct Codex sessions run
+        // with approvals bypassed, so terminal approval prompts cannot occur there.
         Fixture {
             name: "approval prompt becomes waiting approval",
-            launch_profile: TerminalLaunchProfile::Codex,
+            launch_profile: TerminalLaunchProfile::Shell,
             events: vec![
+                FixtureEvent::ActiveProfile(TerminalLaunchProfile::Codex),
                 FixtureEvent::Input("write fixture docs\r"),
                 FixtureEvent::Output("Allow command to run?\n› Yes / No"),
             ],
-            expected: expected_codex_waiting_approval(true),
+            expected: expected_shell_codex(
+                TerminalTurnState::WaitingApproval,
+                true,
+                false,
+                true,
+                AgentRuntimeState::WaitingApproval,
+            ),
         },
         Fixture {
             name: "approval response submission returns to prompt submitted",
-            launch_profile: TerminalLaunchProfile::Codex,
+            launch_profile: TerminalLaunchProfile::Shell,
             events: vec![
+                FixtureEvent::ActiveProfile(TerminalLaunchProfile::Codex),
                 FixtureEvent::Input("write fixture docs\r"),
                 FixtureEvent::Output("Allow command to run?\n› Yes / No"),
                 FixtureEvent::Input("y\r"),
             ],
-            expected: expected_codex(
-                TerminalSessionStatus::Running,
+            expected: expected_shell_codex(
                 TerminalTurnState::PromptSubmitted,
                 true,
                 false,
@@ -560,13 +569,33 @@ fn fixtures() -> Vec<Fixture> {
         },
         Fixture {
             name: "approval prompt split across chunks is detected",
-            launch_profile: TerminalLaunchProfile::Codex,
+            launch_profile: TerminalLaunchProfile::Shell,
             events: vec![
+                FixtureEvent::ActiveProfile(TerminalLaunchProfile::Codex),
                 FixtureEvent::Input("write fixture docs\r"),
                 FixtureEvent::Output("Allow "),
                 FixtureEvent::Output("command to run?\n› Yes / No"),
             ],
-            expected: expected_codex_waiting_approval(true),
+            expected: expected_shell_codex(
+                TerminalTurnState::WaitingApproval,
+                true,
+                false,
+                true,
+                AgentRuntimeState::WaitingApproval,
+            ),
+        },
+        Fixture {
+            name: "direct Codex answer mentioning permissions stays owner prompt ready",
+            launch_profile: TerminalLaunchProfile::Codex,
+            events: vec![
+                FixtureEvent::Output("\r\n› "),
+                FixtureEvent::Input("update the docs\r"),
+                FixtureEvent::Output("\r\n• Working (2s • esc to interrupt)"),
+                FixtureEvent::Output(
+                    "\r\nYes, you can now run the tests; permission checks were added.\r\n› ",
+                ),
+            ],
+            expected: expected_codex_waiting_prompt(true),
         },
         Fixture {
             name: "prompt-ready output split across chunks is detected",
@@ -674,17 +703,6 @@ fn expected_codex_waiting_prompt(has_prompt_submitted_at: bool) -> ExpectedState
         true,
         false,
         AgentRuntimeState::WaitingPrompt,
-    )
-}
-
-fn expected_codex_waiting_approval(has_prompt_submitted_at: bool) -> ExpectedState {
-    expected_codex(
-        TerminalSessionStatus::Running,
-        TerminalTurnState::WaitingApproval,
-        has_prompt_submitted_at,
-        false,
-        true,
-        AgentRuntimeState::WaitingApproval,
     )
 }
 

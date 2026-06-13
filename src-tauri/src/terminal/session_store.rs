@@ -1016,9 +1016,12 @@ mod tests {
         store.create(
             "term-1".to_string(),
             "employee-1".to_string(),
-            TerminalLaunchProfile::Codex,
+            TerminalLaunchProfile::Shell,
             "/tmp".to_string(),
         );
+        store
+            .set_active_profile("term-1", TerminalLaunchProfile::Codex)
+            .unwrap();
         store.record_input("term-1", "\r").unwrap();
 
         let approval = store
@@ -1037,9 +1040,12 @@ mod tests {
         store.create(
             "term-1".to_string(),
             "employee-1".to_string(),
-            TerminalLaunchProfile::Codex,
+            TerminalLaunchProfile::Shell,
             "/tmp".to_string(),
         );
+        store
+            .set_active_profile("term-1", TerminalLaunchProfile::Codex)
+            .unwrap();
         store.record_input("term-1", "\r").unwrap();
 
         let partial = store.record_output("term-1", "Allow ").unwrap();
@@ -1287,9 +1293,12 @@ mod tests {
         store.create(
             "term-1".to_string(),
             "employee-1".to_string(),
-            TerminalLaunchProfile::Codex,
+            TerminalLaunchProfile::Shell,
             "/tmp".to_string(),
         );
+        store
+            .set_active_profile("term-1", TerminalLaunchProfile::Codex)
+            .unwrap();
         store.record_input("term-1", "Implement feature\r").unwrap();
         store
             .record_output("term-1", "Allow command to run?\n› Yes / No")

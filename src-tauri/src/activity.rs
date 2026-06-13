@@ -1231,6 +1231,7 @@ mod tests {
 
     fn activity_for_pty_events(
         name: &str,
+        launch_profile: TerminalLaunchProfile,
         events: &[PtyActivityEvent],
         stream_output_chars: bool,
     ) -> EmployeeActivity {
@@ -1240,7 +1241,7 @@ mod tests {
         let session = state.terminal_sessions.create(
             "session-1".to_string(),
             employee.id.clone(),
-            TerminalLaunchProfile::Codex,
+            launch_profile,
             root.to_string_lossy().to_string(),
         );
 
@@ -1336,6 +1337,7 @@ mod tests {
     fn split_pty_flows_preserve_activity_contracts() {
         struct Case {
             name: &'static str,
+            launch_profile: TerminalLaunchProfile,
             events: Vec<PtyActivityEvent>,
             expected: ExpectedContractSummary,
         }
@@ -1343,6 +1345,7 @@ mod tests {
         let cases = [
             Case {
                 name: "split-working-contract",
+                launch_profile: TerminalLaunchProfile::Codex,
                 events: vec![
                     PtyActivityEvent::Input("write fixture docs\r"),
                     PtyActivityEvent::Output("\r\n• Working (2s • esc to interrupt)"),
@@ -1361,6 +1364,7 @@ mod tests {
             },
             Case {
                 name: "split-final-prompt-return-contract",
+                launch_profile: TerminalLaunchProfile::Codex,
                 events: vec![
                     PtyActivityEvent::Output("\r\n› "),
                     PtyActivityEvent::Input("write fixture docs\r"),
@@ -1381,6 +1385,7 @@ mod tests {
             },
             Case {
                 name: "notify-fast-turn-contract",
+                launch_profile: TerminalLaunchProfile::Codex,
                 events: vec![
                     PtyActivityEvent::Output("\r\n› "),
                     PtyActivityEvent::Input("hello\r"),
@@ -1403,7 +1408,10 @@ mod tests {
             },
             Case {
                 name: "split-approval-prompt-contract",
+                // Approval prompts only occur in shell-launched Codex sessions.
+                launch_profile: TerminalLaunchProfile::Shell,
                 events: vec![
+                    PtyActivityEvent::Output("\r\n› "),
                     PtyActivityEvent::Input("write fixture docs\r"),
                     PtyActivityEvent::Output("Allow command to run?\n› Yes / No"),
                 ],
@@ -1422,9 +1430,14 @@ mod tests {
         ];
 
         for case in cases {
-            let unsplit = activity_for_pty_events(case.name, &case.events, false);
-            let streamed =
-                activity_for_pty_events(&format!("{}-streamed", case.name), &case.events, true);
+            let unsplit =
+                activity_for_pty_events(case.name, case.launch_profile, &case.events, false);
+            let streamed = activity_for_pty_events(
+                &format!("{}-streamed", case.name),
+                case.launch_profile,
+                &case.events,
+                true,
+            );
 
             assert_eq!(streamed.contract, unsplit.contract, "{}", case.name);
             assert_contract_summary(&streamed, case.expected);
@@ -1778,10 +1791,16 @@ mod tests {
             let root = test_root(case.name);
             let state = test_state(root.clone());
             let employee = create_employee(&state);
+            // Approval prompts only occur in shell-launched Codex sessions;
+            // direct Codex sessions run with approvals bypassed.
+            let launch_profile = match case.setup {
+                CodexTerminalContractSetup::ApprovalPrompt => TerminalLaunchProfile::Shell,
+                _ => TerminalLaunchProfile::Codex,
+            };
             let session = state.terminal_sessions.create(
                 "session-1".to_string(),
                 employee.id.clone(),
-                TerminalLaunchProfile::Codex,
+                launch_profile,
                 root.to_string_lossy().to_string(),
             );
 
@@ -1815,6 +1834,9 @@ mod tests {
                         .record_output(&session.session_id, "Improve documentation");
                 }
                 CodexTerminalContractSetup::ApprovalPrompt => {
+                    state
+                        .terminal_sessions
+                        .set_active_profile(&session.session_id, TerminalLaunchProfile::Codex);
                     state
                         .terminal_sessions
                         .record_input(&session.session_id, "\r");
@@ -2262,9 +2284,12 @@ mod tests {
         let session = state.terminal_sessions.create(
             "session-1".to_string(),
             employee.id.clone(),
-            TerminalLaunchProfile::Codex,
+            TerminalLaunchProfile::Shell,
             root.to_string_lossy().to_string(),
         );
+        state
+            .terminal_sessions
+            .set_active_profile(&session.session_id, TerminalLaunchProfile::Codex);
         state
             .terminal_sessions
             .record_input(&session.session_id, "\r");
@@ -2403,9 +2428,12 @@ mod tests {
         let session = state.terminal_sessions.create(
             "session-1".to_string(),
             employee.id.clone(),
-            TerminalLaunchProfile::Codex,
+            TerminalLaunchProfile::Shell,
             root.to_string_lossy().to_string(),
         );
+        state
+            .terminal_sessions
+            .set_active_profile(&session.session_id, TerminalLaunchProfile::Codex);
         state
             .terminal_sessions
             .record_output(&session.session_id, "Allow command to run?\n› Yes / No");
@@ -2616,9 +2644,12 @@ mod tests {
         let session = state.terminal_sessions.create(
             "session-1".to_string(),
             employee.id.clone(),
-            TerminalLaunchProfile::Codex,
+            TerminalLaunchProfile::Shell,
             root.to_string_lossy().to_string(),
         );
+        state
+            .terminal_sessions
+            .set_active_profile(&session.session_id, TerminalLaunchProfile::Codex);
         state
             .terminal_sessions
             .record_input(&session.session_id, "\r");
@@ -2699,9 +2730,12 @@ mod tests {
         let session = state.terminal_sessions.create(
             "session-1".to_string(),
             employee.id.clone(),
-            TerminalLaunchProfile::Codex,
+            TerminalLaunchProfile::Shell,
             root.to_string_lossy().to_string(),
         );
+        state
+            .terminal_sessions
+            .set_active_profile(&session.session_id, TerminalLaunchProfile::Codex);
         state
             .terminal_sessions
             .record_input(&session.session_id, "\r");
@@ -2814,9 +2848,12 @@ mod tests {
         let session = state.terminal_sessions.create(
             "session-1".to_string(),
             employee.id.clone(),
-            TerminalLaunchProfile::Codex,
+            TerminalLaunchProfile::Shell,
             root.to_string_lossy().to_string(),
         );
+        state
+            .terminal_sessions
+            .set_active_profile(&session.session_id, TerminalLaunchProfile::Codex);
         state
             .terminal_sessions
             .record_input(&session.session_id, "\r");
