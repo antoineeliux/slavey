@@ -8,7 +8,8 @@ use super::{
         codex_output_ends_at_prompt, codex_output_has_completion_text_before_prompt,
         codex_output_has_visible_text, codex_output_suggests_active_work,
         codex_output_suggests_approval_choice, codex_output_suggests_approval_prompt,
-        terminal_input_submits_prompt, terminal_input_updates_owner_prompt,
+        terminal_input_is_bare_newline, terminal_input_submits_prompt,
+        terminal_input_updates_owner_prompt,
     },
     session_store::{
         TerminalSessionRecord, TerminalSessionStatus, TerminalTurnState,
@@ -289,6 +290,16 @@ pub(super) fn resolve_input_transition(
     input: &str,
 ) -> TerminalTurnTransition {
     if terminal_input_submits_prompt(input) {
+        // Bare Enter on an empty composer submits nothing to Codex; without a
+        // tracked draft there is no turn to wait for.
+        if terminal_input_is_bare_newline(input)
+            && record.turn_state == TerminalTurnState::OwnerPromptReady
+        {
+            return TerminalTurnTransition::no_change(
+                TerminalTurnTransitionReason::NoActivityRelevantChange,
+            );
+        }
+
         return TerminalTurnTransition::new(
             TerminalTurnTransitionKind::Input,
             TerminalTurnTransitionReason::OwnerInputSubmitted,

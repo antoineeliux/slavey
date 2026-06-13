@@ -410,6 +410,62 @@ fn fixtures() -> Vec<Fixture> {
             ),
         },
         Fixture {
+            name: "bare Enter on empty composer stays owner prompt ready",
+            launch_profile: TerminalLaunchProfile::Codex,
+            events: vec![FixtureEvent::Output("\r\n› "), FixtureEvent::Input("\r")],
+            expected: expected_codex_waiting_prompt(false),
+        },
+        Fixture {
+            name: "draft then bare Enter submits prompt",
+            launch_profile: TerminalLaunchProfile::Codex,
+            events: vec![
+                FixtureEvent::Output("\r\n› "),
+                FixtureEvent::Input("write fixture docs"),
+                FixtureEvent::Input("\r"),
+            ],
+            expected: expected_codex(
+                TerminalSessionStatus::Running,
+                TerminalTurnState::PromptSubmitted,
+                true,
+                false,
+                false,
+                AgentRuntimeState::Thinking,
+            ),
+        },
+        Fixture {
+            name: "bracketed multi-line paste composes instead of submitting",
+            launch_profile: TerminalLaunchProfile::Codex,
+            events: vec![
+                FixtureEvent::Output("\r\n› "),
+                FixtureEvent::Input("\x1b[200~line one\nline two\x1b[201~"),
+            ],
+            expected: expected_codex(
+                TerminalSessionStatus::Running,
+                TerminalTurnState::OwnerComposing,
+                false,
+                true,
+                false,
+                AgentRuntimeState::WaitingPrompt,
+            ),
+        },
+        Fixture {
+            name: "bracketed paste followed by Enter submits prompt",
+            launch_profile: TerminalLaunchProfile::Codex,
+            events: vec![
+                FixtureEvent::Output("\r\n› "),
+                FixtureEvent::Input("\x1b[200~line one\nline two\x1b[201~"),
+                FixtureEvent::Input("\r"),
+            ],
+            expected: expected_codex(
+                TerminalSessionStatus::Running,
+                TerminalTurnState::PromptSubmitted,
+                true,
+                false,
+                false,
+                AgentRuntimeState::Thinking,
+            ),
+        },
+        Fixture {
             name: "prompt submission becomes prompt submitted",
             launch_profile: TerminalLaunchProfile::Codex,
             events: vec![

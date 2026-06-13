@@ -94,8 +94,38 @@ pub fn codex_output_has_completion_text_before_prompt(output: &str) -> bool {
     false
 }
 
+const BRACKETED_PASTE_START: &str = "\x1b[200~";
+const BRACKETED_PASTE_END: &str = "\x1b[201~";
+
 pub fn terminal_input_submits_prompt(input: &str) -> bool {
-    input.contains('\r') || input.contains('\n')
+    // Newlines inside a bracketed paste are inserted into the composer draft;
+    // only a newline outside paste markers submits the prompt.
+    let mut remaining = input;
+    let mut inside_paste = false;
+    loop {
+        let marker = if inside_paste {
+            BRACKETED_PASTE_END
+        } else {
+            BRACKETED_PASTE_START
+        };
+        match remaining.find(marker) {
+            Some(index) => {
+                if !inside_paste && remaining[..index].contains(['\r', '\n']) {
+                    return true;
+                }
+                inside_paste = !inside_paste;
+                remaining = &remaining[index + marker.len()..];
+            }
+            None => return !inside_paste && remaining.contains(['\r', '\n']),
+        }
+    }
+}
+
+pub fn terminal_input_is_bare_newline(input: &str) -> bool {
+    !input.is_empty()
+        && input
+            .chars()
+            .all(|character| character == '\r' || character == '\n')
 }
 
 pub fn terminal_input_updates_owner_prompt(input: &str) -> bool {
@@ -187,6 +217,25 @@ mod tests {
         assert!(!codex_output_suggests_approval_prompt(
             "Finished checking approval tests\n› "
         ));
+    }
+
+    #[test]
+    fn input_submission_respects_bracketed_paste_and_bare_newlines() {
+        assert!(terminal_input_submits_prompt("hello\r"));
+        assert!(terminal_input_submits_prompt("\r"));
+        assert!(!terminal_input_submits_prompt(
+            "\x1b[200~line one\nline two\x1b[201~"
+        ));
+        assert!(terminal_input_submits_prompt(
+            "\x1b[200~line one\nline two\x1b[201~\r"
+        ));
+        assert!(terminal_input_updates_owner_prompt(
+            "\x1b[200~line one\nline two\x1b[201~"
+        ));
+        assert!(terminal_input_is_bare_newline("\r"));
+        assert!(terminal_input_is_bare_newline("\r\n"));
+        assert!(!terminal_input_is_bare_newline("y\r"));
+        assert!(!terminal_input_is_bare_newline(""));
     }
 
     #[test]

@@ -880,6 +880,7 @@ mod tests {
         assert!(ready.last_prompt_ready_at.is_some());
         assert_eq!(ready.turn_state, TerminalTurnState::OwnerPromptReady);
 
+        store.record_input("term-1", "Implement feature").unwrap();
         let submitted = store.record_input("term-1", "\r").unwrap();
 
         assert_eq!(submitted.active_profile, Some(TerminalLaunchProfile::Codex));
@@ -1391,6 +1392,7 @@ mod tests {
             "/tmp".to_string(),
         );
         store.record_output("term-1", "\r\n› ").unwrap();
+        store.record_input("term-1", "write fixture docs").unwrap();
         store.record_input("term-1", "\r").unwrap();
         store
             .record_output("term-1", "Allow command to run?\n› Yes / No")

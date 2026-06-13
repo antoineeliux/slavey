@@ -146,8 +146,8 @@ Input follows a separate path:
 
 1. `terminal_write` writes owner input to the PTY.
 2. `TerminalSessionStore.record_input` runs for running Codex-tracked sessions.
-3. Any input containing carriage return or newline submits a prompt and moves `turnState` to `prompt_submitted`.
-4. Nonempty input without carriage return or newline marks `owner_composing` only when the session is already waiting for instruction or approval.
+3. Input containing a carriage return or newline outside bracketed-paste markers submits a prompt and moves `turnState` to `prompt_submitted`. Newlines inside a bracketed paste are draft content, not a submission. Bare Enter (newline-only input) from `owner_prompt_ready` is ignored: Codex submits nothing from an empty composer, so without a tracked draft there is no turn to wait for.
+4. Nonempty input that does not submit (including bracketed multi-line pastes) marks `owner_composing` only when the session is already waiting for instruction or approval.
 5. Relevant input changes sync the runtime snapshot and emit `terminal:session-updated`.
 
 The recent stale-redraw fix lives in this flow: if a final output chunk contains stale `Working ... esc to interrupt` text but the last meaningful line is the `›` prompt, prompt-ready wins over active work.
