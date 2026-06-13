@@ -23,6 +23,7 @@ enum FixtureEvent {
     Output(&'static str),
     Input(&'static str),
     ActiveProfile(TerminalLaunchProfile),
+    NotifyTurnComplete,
     Finish(i32),
 }
 
@@ -74,6 +75,8 @@ fn pty_terminal_key_flows_tolerate_single_character_streaming() {
         "stale Working redraw plus returned prompt becomes owner prompt ready",
         "approval prompt split across chunks is detected",
         "shell-launched Codex working output routes to agent working",
+        "notify turn complete resolves fast turn without working line",
+        "stale working redraw after notify turn complete stays owner prompt ready",
     ];
     let fixtures = fixtures();
 
@@ -178,6 +181,13 @@ fn replay_fixture_with_output_chunks(
                     runtime.sync_from_terminal_session(&record);
                 }
             }
+            FixtureEvent::NotifyTurnComplete => {
+                if let Some(record) = store
+                    .record_codex_notify_agent_turn_complete(SESSION_ID, crate::events::now_ms())
+                {
+                    runtime.sync_from_terminal_session(&record);
+                }
+            }
             FixtureEvent::Finish(exit_code) => {
                 if let Some(record) = store.finish(SESSION_ID, *exit_code) {
                     runtime.sync_from_terminal_session(&record);
@@ -264,9 +274,10 @@ fn fixture_output_events(fixture: &Fixture) -> Vec<(usize, &'static str)> {
         .enumerate()
         .filter_map(|(index, event)| match event {
             FixtureEvent::Output(output) => Some((index, *output)),
-            FixtureEvent::Input(_) | FixtureEvent::ActiveProfile(_) | FixtureEvent::Finish(_) => {
-                None
-            }
+            FixtureEvent::Input(_)
+            | FixtureEvent::ActiveProfile(_)
+            | FixtureEvent::NotifyTurnComplete
+            | FixtureEvent::Finish(_) => None,
         })
         .collect()
 }
@@ -485,6 +496,43 @@ fn fixtures() -> Vec<Fixture> {
             expected: expected_codex_waiting_prompt(true),
         },
         Fixture {
+            name: "notify turn complete resolves fast turn without working line",
+            launch_profile: TerminalLaunchProfile::Codex,
+            events: vec![
+                FixtureEvent::Output("\r\n› "),
+                FixtureEvent::Input("hello\r"),
+                FixtureEvent::Output(
+                    "\r\n› hello\r\n\r\nHello! How can I help you today?\r\n\r\n› ",
+                ),
+                FixtureEvent::NotifyTurnComplete,
+            ],
+            expected: expected_codex_waiting_prompt(true),
+        },
+        Fixture {
+            name: "notify turn complete resolves long final answer beyond detection tail",
+            launch_profile: TerminalLaunchProfile::Codex,
+            events: vec![
+                FixtureEvent::Output("\r\n› "),
+                FixtureEvent::Input("write fixture docs\r"),
+                FixtureEvent::Output("\r\n• Working (2s • esc to interrupt)"),
+                FixtureEvent::Output(long_final_answer_output()),
+                FixtureEvent::NotifyTurnComplete,
+            ],
+            expected: expected_codex_waiting_prompt(true),
+        },
+        Fixture {
+            name: "stale working redraw after notify turn complete stays owner prompt ready",
+            launch_profile: TerminalLaunchProfile::Codex,
+            events: vec![
+                FixtureEvent::Output("\r\n› "),
+                FixtureEvent::Input("write fixture docs\r"),
+                FixtureEvent::Output("\r\n• Working (2s • esc to interrupt)"),
+                FixtureEvent::NotifyTurnComplete,
+                FixtureEvent::Output("\x1b[2K\r• Working (3s • esc to interrupt)"),
+            ],
+            expected: expected_codex_waiting_prompt(true),
+        },
+        Fixture {
             name: "approval prompt becomes waiting approval",
             launch_profile: TerminalLaunchProfile::Codex,
             events: vec![
@@ -591,6 +639,16 @@ fn fixtures() -> Vec<Fixture> {
             ),
         },
     ]
+}
+
+fn long_final_answer_output() -> &'static str {
+    static OUTPUT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    OUTPUT.get_or_init(|| {
+        format!(
+            "\r\n{}\r\n› ",
+            "All checks passed and the requested fixture docs were written. ".repeat(24)
+        )
+    })
 }
 
 fn expected_shell(status: TerminalSessionStatus, turn_state: TerminalTurnState) -> ExpectedState {

@@ -93,6 +93,8 @@ pub struct TerminalSessionRecord {
     pub last_transition_reason: Option<TerminalTurnTransitionReason>,
     #[serde(default, skip_serializing)]
     pub last_output_tail: String,
+    #[serde(default, skip_serializing)]
+    pub last_notify_turn_complete_at: Option<u64>,
     #[serde(default)]
     pub message: Option<String>,
 }
@@ -175,6 +177,7 @@ impl TerminalSessionStore {
             turn_state: initial_turn_state_for_profile(profile),
             last_transition_reason: None,
             last_output_tail: String::new(),
+            last_notify_turn_complete_at: None,
             message: None,
         };
         let mut records = self.records.lock();
@@ -409,10 +412,6 @@ impl TerminalSessionStore {
         if record.runtime != TerminalSessionRuntime::Pty
             || record.status != TerminalSessionStatus::Running
             || !codex_session_should_track_prompt(record)
-            || matches!(
-                record.turn_state,
-                TerminalTurnState::PromptSubmitted | TerminalTurnState::AgentWorking
-            )
         {
             return None;
         }
@@ -511,6 +510,11 @@ fn apply_terminal_turn_transition(
     apply_timestamp_transition(
         &mut record.last_approval_prompt_at,
         transition.approval_prompt_at,
+        now,
+    );
+    apply_timestamp_transition(
+        &mut record.last_notify_turn_complete_at,
+        transition.notify_turn_complete_at,
         now,
     );
     if let Some(turn_state) = transition.turn_state {
@@ -1087,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_notify_turn_complete_does_not_override_agent_working() {
+    fn codex_notify_turn_complete_resolves_agent_working_to_owner_ready() {
         let store = TerminalSessionStore::default();
         store.create(
             "term-1".to_string(),
@@ -1100,13 +1104,93 @@ mod tests {
             .record_output("term-1", "\r\n• Working (2s • esc to interrupt)")
             .unwrap();
 
-        let ready =
-            store.record_codex_notify_agent_turn_complete("term-1", crate::events::now_ms());
+        let ready = store
+            .record_codex_notify_agent_turn_complete("term-1", crate::events::now_ms())
+            .unwrap();
 
-        assert!(ready.is_none());
+        assert_eq!(ready.turn_state, TerminalTurnState::OwnerPromptReady);
+        assert!(ready.last_prompt_ready_at.is_some());
+        assert!(ready.last_notify_turn_complete_at.is_some());
+        assert_eq!(ready.last_approval_prompt_at, None);
+        assert_eq!(
+            ready.last_transition_reason,
+            Some(TerminalTurnTransitionReason::CodexNotifyAgentTurnComplete)
+        );
+    }
+
+    #[test]
+    fn codex_notify_turn_complete_resolves_fast_turn_without_working_line() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+        store.record_output("term-1", "\r\n› ").unwrap();
+        store.record_input("term-1", "hello\r").unwrap();
+        let answered = store
+            .record_output(
+                "term-1",
+                "\r\n› hello\r\n\r\nHello! How can I help you today?\r\n\r\n› ",
+            )
+            .unwrap();
+        assert_eq!(answered.turn_state, TerminalTurnState::AgentWorking);
+
+        let ready = store
+            .record_codex_notify_agent_turn_complete("term-1", crate::events::now_ms())
+            .unwrap();
+
+        assert_eq!(ready.turn_state, TerminalTurnState::OwnerPromptReady);
+        assert!(ready.last_prompt_ready_at.is_some());
+    }
+
+    #[test]
+    fn stale_working_redraw_after_notify_turn_complete_stays_owner_ready() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+        store.record_input("term-1", "Implement feature\r").unwrap();
+        store
+            .record_output("term-1", "\r\n• Working (2s • esc to interrupt)")
+            .unwrap();
+        store
+            .record_codex_notify_agent_turn_complete("term-1", crate::events::now_ms())
+            .unwrap();
+
+        let update = store.record_output("term-1", "\x1b[2K\r• Working (2s • esc to interrupt)");
+
+        assert!(update.is_none());
         let current = store.get("term-1").unwrap();
-        assert_eq!(current.turn_state, TerminalTurnState::AgentWorking);
-        assert_eq!(current.last_prompt_ready_at, None);
+        assert_eq!(current.turn_state, TerminalTurnState::OwnerPromptReady);
+        assert!(current.last_prompt_ready_at.is_some());
+    }
+
+    #[test]
+    fn owner_submission_after_notify_turn_complete_re_enables_work_evidence() {
+        let store = TerminalSessionStore::default();
+        store.create(
+            "term-1".to_string(),
+            "employee-1".to_string(),
+            TerminalLaunchProfile::Codex,
+            "/tmp".to_string(),
+        );
+        store.record_input("term-1", "Implement feature\r").unwrap();
+        store
+            .record_codex_notify_agent_turn_complete("term-1", crate::events::now_ms())
+            .unwrap();
+
+        let submitted = store.record_input("term-1", "Next prompt\r").unwrap();
+        assert_eq!(submitted.last_notify_turn_complete_at, None);
+
+        let working = store
+            .record_output("term-1", "\r\n• Working (2s • esc to interrupt)")
+            .unwrap();
+        assert_eq!(working.turn_state, TerminalTurnState::AgentWorking);
     }
 
     #[test]
@@ -1660,6 +1744,7 @@ mod tests {
             turn_state: TerminalTurnState::CodexStarting,
             last_transition_reason: None,
             last_output_tail: String::new(),
+            last_notify_turn_complete_at: None,
             message: None,
         }]);
 
@@ -1704,6 +1789,7 @@ mod tests {
             turn_state: TerminalTurnState::Completed,
             last_transition_reason: None,
             last_output_tail: String::new(),
+            last_notify_turn_complete_at: None,
             message: None,
         }
     }
@@ -1735,6 +1821,7 @@ mod tests {
             turn_state,
             last_transition_reason: None,
             last_output_tail: String::new(),
+            last_notify_turn_complete_at: None,
             message: None,
         }
     }

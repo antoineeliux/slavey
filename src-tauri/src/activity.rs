@@ -1226,6 +1226,7 @@ mod tests {
     enum PtyActivityEvent {
         Output(&'static str),
         Input(&'static str),
+        NotifyTurnComplete,
     }
 
     fn activity_for_pty_events(
@@ -1267,6 +1268,17 @@ mod tests {
                     if let Some(record) = state
                         .terminal_sessions
                         .record_input(&session.session_id, input)
+                    {
+                        state.agent_runtime.sync_from_terminal_session(&record);
+                    }
+                }
+                PtyActivityEvent::NotifyTurnComplete => {
+                    if let Some(record) = state
+                        .terminal_sessions
+                        .record_codex_notify_agent_turn_complete(
+                            &session.session_id,
+                            crate::events::now_ms(),
+                        )
                     {
                         state.agent_runtime.sync_from_terminal_session(&record);
                     }
@@ -1354,6 +1366,28 @@ mod tests {
                     PtyActivityEvent::Input("write fixture docs\r"),
                     PtyActivityEvent::Output("\r\n• Working (2s • esc to interrupt)"),
                     PtyActivityEvent::Output("\r\nDone.\r\n› "),
+                ],
+                expected: ExpectedContractSummary {
+                    work_kind: EmployeeActivityContractWorkKind::Codex,
+                    work_phase: EmployeeActivityContractWorkPhase::WaitingOwner,
+                    turn_owner: EmployeeTurnOwner::Owner,
+                    placement: EmployeeActivityContractRenderPlacement::OwnerOffice,
+                    posture: EmployeeActivityContractRenderPosture::Standing,
+                    render_activity: EmployeeActivityContractRenderActivity::WaitingInstruction,
+                    attention_reason: Some(EmployeeAttentionReason::NeedsInstruction),
+                    source_runtime: Some(EmployeeActivityContractSourceRuntime::Pty),
+                    source_confidence: Some(EmployeeActivityContractSourceConfidence::Fallback),
+                },
+            },
+            Case {
+                name: "notify-fast-turn-contract",
+                events: vec![
+                    PtyActivityEvent::Output("\r\n› "),
+                    PtyActivityEvent::Input("hello\r"),
+                    PtyActivityEvent::Output(
+                        "\r\n› hello\r\n\r\nHello! How can I help you today?\r\n\r\n› ",
+                    ),
+                    PtyActivityEvent::NotifyTurnComplete,
                 ],
                 expected: ExpectedContractSummary {
                     work_kind: EmployeeActivityContractWorkKind::Codex,

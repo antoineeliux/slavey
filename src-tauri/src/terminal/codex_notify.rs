@@ -158,8 +158,10 @@ fn drain_events(
         let payload = fs::read_to_string(&path).unwrap_or_default();
         let _ = fs::remove_file(&path);
         if payload_is_agent_turn_complete(&payload) {
-            refresh_session(session_id)?;
+            // Record the authoritative turn completion before triggering the PTY
+            // redraw so redraw output is parsed against owner-wait state.
             on_turn_complete(session_id, event_at);
+            refresh_session(session_id)?;
         }
     }
 

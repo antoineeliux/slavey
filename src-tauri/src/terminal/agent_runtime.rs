@@ -699,6 +699,7 @@ mod tests {
             turn_state: TerminalTurnState::CodexStarting,
             last_transition_reason: None,
             last_output_tail: String::new(),
+            last_notify_turn_complete_at: None,
             message: None,
         };
         overrides(&mut session);

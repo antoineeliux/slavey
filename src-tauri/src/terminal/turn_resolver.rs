@@ -45,6 +45,7 @@ pub(super) struct TerminalTurnTransition {
     pub(super) prompt_submitted_at: TimestampTransition,
     pub(super) prompt_ready_at: TimestampTransition,
     pub(super) approval_prompt_at: TimestampTransition,
+    pub(super) notify_turn_complete_at: TimestampTransition,
     pub(super) clear_output_tail: bool,
 }
 
@@ -79,6 +80,7 @@ impl TerminalTurnTransition {
             prompt_submitted_at: TimestampTransition::Unchanged,
             prompt_ready_at: TimestampTransition::Unchanged,
             approval_prompt_at: TimestampTransition::Unchanged,
+            notify_turn_complete_at: TimestampTransition::Unchanged,
             clear_output_tail: false,
         }
     }
@@ -114,6 +116,11 @@ impl TerminalTurnTransition {
 
     fn with_approval_prompt_at(mut self, transition: TimestampTransition) -> Self {
         self.approval_prompt_at = transition;
+        self
+    }
+
+    fn with_notify_turn_complete_at(mut self, transition: TimestampTransition) -> Self {
+        self.notify_turn_complete_at = transition;
         self
     }
 
@@ -158,7 +165,13 @@ pub(super) fn terminal_output_evidence(
     let codex_prompt_ready = !status_only_work_redraw_at_prompt
         && codex_prompt_ready_at_end
         && (!agent_owned || completion_text_before_prompt);
-    let codex_active_work = !owner_status_only_work_redraw_at_prompt
+    // After a Codex notify agent-turn-complete confirmed the owner's turn, stale
+    // working text in redraws cannot prove the agent resumed; only a new owner
+    // submission clears the notify timestamp and re-enables work evidence.
+    let notify_confirmed_owner_wait =
+        owner_waiting && record.last_notify_turn_complete_at.is_some();
+    let codex_active_work = !notify_confirmed_owner_wait
+        && !owner_status_only_work_redraw_at_prompt
         && (!codex_prompt_ready_at_end || status_only_work_redraw_at_prompt)
         && codex_active_work_evidence;
 
@@ -279,6 +292,7 @@ pub(super) fn resolve_input_transition(
         .with_prompt_submitted_at(TimestampTransition::SetNow)
         .with_prompt_ready_at(TimestampTransition::Clear)
         .with_approval_prompt_at(TimestampTransition::Clear)
+        .with_notify_turn_complete_at(TimestampTransition::Clear)
         .with_turn_state(TerminalTurnState::PromptSubmitted)
         .with_clear_output_tail();
     }
@@ -311,6 +325,7 @@ pub(super) fn resolve_active_profile_transition(
         .with_prompt_submitted_at(TimestampTransition::Clear)
         .with_prompt_ready_at(TimestampTransition::Clear)
         .with_approval_prompt_at(TimestampTransition::Clear)
+        .with_notify_turn_complete_at(TimestampTransition::Clear)
         .with_turn_state(TerminalTurnState::Shell)
         .with_clear_output_tail();
     }
@@ -452,6 +467,7 @@ pub(super) fn resolve_codex_notify_agent_turn_complete_transition(
     .with_active_profile(TerminalLaunchProfile::Codex)
     .with_prompt_ready_at(prompt_ready_at)
     .with_approval_prompt_at(TimestampTransition::Clear)
+    .with_notify_turn_complete_at(TimestampTransition::SetNow)
     .with_turn_state(TerminalTurnState::OwnerPromptReady)
     .with_clear_output_tail()
 }

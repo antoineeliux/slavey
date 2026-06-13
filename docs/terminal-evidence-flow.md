@@ -8,7 +8,7 @@ Slavey has three Codex evidence paths.
 
 The preferred path is the Codex app-server path. It uses structured JSON-RPC responses, notifications, and requests from `codex app-server --stdio`. Those events are recorded in `AgentRuntimeStore` with `source: codex_app_server` and `confidence: structured`.
 
-PTY-launched Codex sessions also get a scoped Codex `notify` override. Codex calls a Slavey-owned helper for `agent-turn-complete`; the helper writes the official notification payload into a per-session temp directory, and the backend watcher re-applies the current PTY size to trigger a Codex redraw for that session. The redraw is then parsed through the normal PTY evidence path. This path exists to avoid requiring a manual terminal resize after turn completion, but it still records terminal-fallback source/confidence because it is attached to a PTY session rather than an app-server session.
+PTY-launched Codex sessions also get a scoped Codex `notify` override. Codex calls a Slavey-owned helper for `agent-turn-complete`; the helper writes the official notification payload into a per-session temp directory. The backend watcher records the turn completion directly on the owning terminal session — moving it to `owner_prompt_ready` even from `prompt_submitted` or `agent_working` — and then re-applies the current PTY size so Codex repaints its final state for display. The notification is authoritative for turn completion because it does not depend on recognizing terminal text, but it still records terminal-fallback source/confidence because it is attached to a PTY session rather than an app-server session.
 
 The final fallback path is PTY parsing. Shell sessions and direct Codex terminal sessions stream terminal bytes through a PTY reader. Slavey strips its own control markers, stores bounded terminal metadata, and parses bounded output tails for strong Codex signals such as prompt-ready output, approval prompts, and active working output. PTY parsing is fallback evidence because terminal output is not a stable protocol.
 
@@ -125,7 +125,7 @@ Terminal owner-wait states, such as Codex waiting for instruction or terminal ap
 
 1. `employee_start_terminal` creates a `TerminalSessionRecord`, syncs an initial agent runtime snapshot, and starts a PTY session through `TerminalManager`.
 2. `TerminalManager` spawns the requested shell or Codex command. Direct Codex sessions run `codex --no-alt-screen --dangerously-bypass-approvals-and-sandbox`. Shell sessions install shell integrations where supported.
-3. On Unix, `TerminalManager` creates a per-session Codex notify bridge. Direct Codex PTYs receive `--config notify=[...]`; shell PTYs expose the same override through the temporary `codex` wrapper. The helper writes Codex notification JSON to a per-session temp directory, and the watcher re-applies the current PTY size when it sees `agent-turn-complete`.
+3. On Unix, `TerminalManager` creates a per-session Codex notify bridge. Direct Codex PTYs receive `--config notify=[...]`; shell PTYs expose the same override through the temporary `codex` wrapper. The helper writes Codex notification JSON to a per-session temp directory; when the watcher sees `agent-turn-complete` it records the completion on the terminal session first and then re-applies the current PTY size so Codex repaints for display.
 4. The terminal reader receives chunks from the PTY in an 8192-byte buffer.
 5. `parse_terminal_control_markers` removes Slavey control markers and reports active-profile and CWD changes. Partial markers can be held in a pending buffer across reads.
 6. Visible output is appended to the in-memory bounded terminal output buffer and emitted as `terminal:data`.
@@ -136,8 +136,8 @@ Terminal owner-wait states, such as Codex waiting for instruction or terminal ap
 11. If output shows an approval prompt, the session becomes `waiting_approval`, `last_approval_prompt_at` is set, and prompt-ready state is cleared.
 12. If output shows active work and does not end at a prompt, the session becomes `agent_working`, prompt-ready and approval timestamps are cleared, and a missing submitted timestamp may be filled when work resumes from an owner-wait state.
 13. If output shows a Codex prompt ready, the session becomes `owner_prompt_ready`, `last_prompt_ready_at` is set, and approval state is cleared.
-14. If a Codex notify `agent-turn-complete` event arrives for a PTY session, the watcher refreshes the PTY so Codex can redraw its current state. Status-only working redraws that end at a prompt glyph remain `agent_working`; working redraws with completion text before the returned prompt can become `owner_prompt_ready`.
-15. If the session is already waiting for owner input or approval, echoed owner draft text and prompt redraws do not prove that the agent resumed work.
+14. If a Codex notify `agent-turn-complete` event arrives for a PTY session, the backend records the completion directly: the session becomes `owner_prompt_ready`, `last_prompt_ready_at` is set, approval state is cleared, and a notify completion timestamp is stored on the session. The watcher then refreshes the PTY so Codex repaints its final state for display. Notify events older than the latest prompt submission are ignored. The heuristic completion-text path remains for sessions without a notify bridge: status-only working redraws that end at a prompt glyph remain `agent_working`, while working redraws with completion text before the returned prompt can become `owner_prompt_ready`.
+15. If the session is already waiting for owner input or approval, echoed owner draft text and prompt redraws do not prove that the agent resumed work. After a notify-confirmed completion, stale `Working ... esc to interrupt` redraw text also cannot move the session back to `agent_working`; only the next owner submission clears the notify timestamp and re-enables active-work evidence.
 16. Otherwise visible output updates `last_output_at`; active Codex sessions that emit visible text while already submitted or working remain `agent_working`.
 17. When relevant session fields change, `AgentRuntimeStore.sync_from_terminal_session` records a fallback runtime snapshot and the backend emits `terminal:session-updated`.
 18. `emit_terminal_session_updated` also emits `employee:activity-updated`.
@@ -158,9 +158,9 @@ The resolver records transition reasons such as `shell_output`, `codex_approval_
 
 The PTY parser fixture corpus lives in `src-tauri/src/terminal/session_fixture_tests.rs`. It is compiled only for Rust tests through the `#[cfg(test)]` module registration in `src-tauri/src/terminal.rs`.
 
-The corpus replays sanitized in-code fixtures through `TerminalSessionStore` and `AgentRuntimeStore`. It covers shell-open state, direct Codex startup, prompt-ready output, owner composing, prompt submission, active working output, prompt echo plus working output, final answer prompt return, stale redraw prompt return, approval prompts, approval response submission, split approval prompts, split prompt-ready output, shell-launched Codex profile switching, shell reset, clean Codex exit to `completed`, and failed Codex exit to `failed`.
+The corpus replays sanitized in-code fixtures through `TerminalSessionStore` and `AgentRuntimeStore`. It covers shell-open state, direct Codex startup, prompt-ready output, owner composing, prompt submission, active working output, prompt echo plus working output, final answer prompt return, stale redraw prompt return, approval prompts, approval response submission, split approval prompts, split prompt-ready output, shell-launched Codex profile switching, shell reset, clean Codex exit to `completed`, and failed Codex exit to `failed`. It also covers Codex notify turn completion: fast turns that never paint a recognizable working line, long final answers that scroll the working line out of the bounded detection tail, and stale working redraws arriving after a notify-confirmed completion.
 
-To add a regression fixture, add a sanitized `Fixture` entry with ordered `Output`, `Input`, `ActiveProfile`, or `Finish` events. Avoid local usernames, machine paths, real private prompts, secrets, or raw logs. Assert the final launch profile, effective profile, turn state, prompt/approval timestamp presence, runtime state, source, and confidence so the fixture documents current behavior precisely.
+To add a regression fixture, add a sanitized `Fixture` entry with ordered `Output`, `Input`, `ActiveProfile`, `NotifyTurnComplete`, or `Finish` events. Avoid local usernames, machine paths, real private prompts, secrets, or raw logs. Assert the final launch profile, effective profile, turn state, prompt/approval timestamp presence, runtime state, source, and confidence so the fixture documents current behavior precisely.
 
 ### Stress Matrix
 
@@ -207,6 +207,7 @@ For app-server sessions, activity state is driven by structured `AgentRuntimeSto
 | Prompt submitted | `prompt_submitted` | `thinking` | `codex_running` | `desk` / `working` | No |
 | Agent working | `agent_working` | `thinking` | `codex_running` | `desk` / `working` | No |
 | Final answer / prompt returns | `owner_prompt_ready` | `waiting_prompt` | `codex_waiting_instruction` | `owner_office` / `waiting_instruction` | `needs_instruction` |
+| Codex notify `agent-turn-complete` | `owner_prompt_ready` | `waiting_prompt` | `codex_waiting_instruction` | `owner_office` / `waiting_instruction` | `needs_instruction` |
 | Approval prompt | `waiting_approval` | `waiting_approval` | `codex_waiting_approval` | `owner_office` / `approval` | `needs_terminal_approval` |
 | Approval resolved | `prompt_submitted` or `agent_working` until the next prompt or failure signal | `thinking` until the next prompt or failure signal | `codex_running` | `desk` / `working` | No |
 | App-server turn started | `agent_working` | `thinking` | `codex_running` | `desk` / `working` | No |
@@ -267,7 +268,7 @@ Diagnostics continue to exclude raw terminal output, raw process logs, environme
 
 ## Current Risk Areas
 
-- PTY output is not a stable protocol. Codex UI text, prompt glyphs, progress wording, and redraw behavior can change outside Slavey's control. The Codex notify side-channel reduces redraw dependence for turn completion but does not replace app-server structured state.
+- PTY output is not a stable protocol. Codex UI text, prompt glyphs, progress wording, and redraw behavior can change outside Slavey's control. The Codex notify side-channel records turn completion authoritatively for PTY sessions, which removes the dependence on recognizing working/prompt text at turn end; remaining PTY heuristics still cover turn start, approval prompts, and platforms or shells where the notify bridge is unavailable.
 - Redraws, ANSI/control sequences, carriage returns, and split chunks can create edge cases. The parser handles known stale redraws and split Slavey control markers, but the corpus is not complete.
 - Frontend terminal buffers may update before the matching `terminal:session-updated` record arrives. During that gap, terminal text can be fresher than terminal session turn metadata, but backend session records remain authoritative for Codex state.
 - Activity refresh responses can still be delayed by IPC or command latency, but stale responses are ignored so a slower old refresh should not overwrite a newer backend activity contract.
