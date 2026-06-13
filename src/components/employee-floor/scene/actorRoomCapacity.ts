@@ -1,6 +1,9 @@
 import * as THREE from "three";
 
-import type { EmployeeFloorViewModel } from "../employeeFloorViewModel";
+import {
+  isPetFloorViewModel,
+  type EmployeeFloorViewModel,
+} from "../employeeFloorViewModel";
 import {
   behaviorForViewModel,
   type CharacterLocation,
@@ -43,6 +46,9 @@ export function createRoomCapacityTargetAssignments(
   const reservedTargetKeys = new Set<string>();
 
   for (const entry of entries) {
+    if (isPetFloorViewModel(entry.viewModel)) {
+      continue;
+    }
     const actionTarget = entry.actor.visual.action?.target;
     if (actionTarget) {
       reservedTargetKeys.add(targetKey(clampToWalkable(actionTarget)));

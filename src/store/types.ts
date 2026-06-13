@@ -4,6 +4,7 @@ import type { StateCreator } from "zustand";
 import type {
   CreateActionInput,
   CreateApprovalInput,
+  CreateEmployeeCompanionInput,
   CreateEmployeeInput,
 } from "../lib/tauriCommands";
 import type {
@@ -88,6 +89,7 @@ export type AppStore = {
   clearRecentWorkspaces: () => Promise<void>;
   updateSettings: (settings: AppSettingsUpdate) => Promise<void>;
   createEmployee: (input: CreateEmployeeInput) => Promise<void>;
+  createEmployeeCompanion: (input: CreateEmployeeCompanionInput) => Promise<void>;
   removeEmployee: (employeeId: string) => Promise<void>;
   selectEmployee: (employeeId: string | null) => Promise<void>;
   setEmployeeWorkingFolder: (employeeId: string, path: string) => Promise<void>;

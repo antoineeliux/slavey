@@ -3,6 +3,7 @@ import {
   FileCode2,
   GitBranch,
   Monitor,
+  PawPrint,
   Play,
   TerminalSquare,
   UserMinus,
@@ -11,6 +12,7 @@ import {
 import type {
   Action,
   ApprovalRequest,
+  PetVariant,
   WorktreeHandoffPreflight,
 } from "../../types";
 import type { EmployeeFloorViewModel } from "../employee-floor/employeeFloorViewModel";
@@ -29,9 +31,11 @@ export function OfficeStatusHud({
   onOpenReview,
   onResolvePendingApproval,
   onApplyHandoff,
+  onCreateCompanion,
   onReleaseEmployee,
   onSetStandby,
   onResumeStandby,
+  companionCount,
 }: {
   viewModel: EmployeeFloorViewModel | null;
   pendingApproval: ApprovalRequest | null;
@@ -39,12 +43,14 @@ export function OfficeStatusHud({
   handoff: WorktreeHandoffPreflight | null;
   handoffDisabledReason: string | null;
   changedFiles: string[];
+  companionCount: number;
   onOpenTerminal: () => void;
   onOpenEditor: () => void;
   onOpenApprovals: () => void;
   onOpenReview: () => void;
   onResolvePendingApproval: (resolution: "approve" | "reject") => void;
   onApplyHandoff: () => void;
+  onCreateCompanion: (employeeId: string, petVariant: PetVariant) => void;
   onReleaseEmployee: (employeeId: string) => void;
   onSetStandby: (employeeId: string) => void;
   onResumeStandby: (employeeId: string) => void;
@@ -58,14 +64,21 @@ export function OfficeStatusHud({
     viewModel.changedFiles > 0 ? `${viewModel.changedFiles} files` : null,
     viewModel.runningActions > 0 ? `${viewModel.runningActions} actions` : null,
     viewModel.runningProcesses > 0 ? `${viewModel.runningProcesses} processes` : null,
+    companionCount > 0 ? `${companionCount} pets` : null,
   ].filter(Boolean);
+  const isPet = viewModel.visualKind === "pet";
+  const releaseDisabledReason = viewModel.worktreePath
+    ? "Remove or archive the worktree before releasing"
+    : companionCount > 0
+      ? "Release attached pets before releasing"
+      : null;
 
   return (
     <aside className={`office-status-hud office-state-${viewModel.officeState}`}>
       <div className="office-status-hud-header">
         <div>
           <span>{viewModel.name}</span>
-          <small>{viewModel.role}</small>
+          <small>{isPet ? petVariantLabel(viewModel.petVariant) : viewModel.role}</small>
         </div>
         <strong>{officeStateLabel(viewModel.officeState)}</strong>
       </div>
@@ -93,6 +106,20 @@ export function OfficeStatusHud({
           <FileCode2 size={15} />
           Editor
         </button>
+        {!isPet ? (
+          <>
+            {PET_VARIANTS.map((petVariant) => (
+              <button
+                key={petVariant}
+                title={`Create ${petVariant} pet`}
+                onClick={() => onCreateCompanion(viewModel.id, petVariant)}
+              >
+                <PawPrint size={15} />
+                {petVariantLabel(petVariant)}
+              </button>
+            ))}
+          </>
+        ) : null}
         {viewModel.employeeStatus === "standby" ? (
           <button onClick={() => onResumeStandby(viewModel.id)}>
             <Play size={15} />
@@ -106,12 +133,8 @@ export function OfficeStatusHud({
         )}
         <button
           className="danger"
-          disabled={Boolean(viewModel.worktreePath)}
-          title={
-            viewModel.worktreePath
-              ? "Remove or archive the worktree before releasing"
-              : "Release employee"
-          }
+          disabled={Boolean(releaseDisabledReason)}
+          title={releaseDisabledReason ?? "Release employee"}
           onClick={() => onReleaseEmployee(viewModel.id)}
         >
           <UserMinus size={15} />
@@ -133,6 +156,20 @@ export function OfficeStatusHud({
       />
     </aside>
   );
+}
+
+const PET_VARIANTS: PetVariant[] = ["dog", "cat", "robot"];
+
+function petVariantLabel(variant: PetVariant | null | undefined): string {
+  switch (variant) {
+    case "cat":
+      return "Cat";
+    case "robot":
+      return "Robot";
+    case "dog":
+    default:
+      return "Dog";
+  }
 }
 
 function officeStateLabel(state: EmployeeFloorViewModel["officeState"]): string {

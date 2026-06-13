@@ -17,6 +17,8 @@ export type CharacterParts = {
   rightLeg: THREE.Group;
   phone: THREE.Mesh;
   cup: THREE.Mesh;
+  tail?: THREE.Object3D;
+  antenna?: THREE.Object3D;
 };
 
 export type HairStyle = "bob" | "crop" | "long" | "buzz" | "sweep" | "pigtails" | "undercut" | "lob" | "curls" | "pony";

@@ -1,8 +1,12 @@
 import * as THREE from "three";
 
-import type { EmployeeFloorViewModel } from "../employeeFloorViewModel";
+import {
+  isPetFloorViewModel,
+  type EmployeeFloorViewModel,
+} from "../employeeFloorViewModel";
 import {
   DONE_ROOM_POINTS,
+  EMPLOYEE_ENTRY_POINT,
   EXECUTIVE_QUEUE_POINTS,
   deskAnchorForIndex,
   standbyAnchorForIndex,
@@ -62,6 +66,15 @@ export type CharacterAnchorTargets = {
 };
 
 export function behaviorForViewModel(viewModel: EmployeeFloorViewModel): CharacterBehavior {
+  if (isPetFloorViewModel(viewModel)) {
+    return behavior(
+      "standing",
+      "office",
+      viewModel.attentionReason || viewModel.pendingApprovals > 0 ? "approval" : "chilling",
+      "social",
+    );
+  }
+
   switch (viewModel.officeState) {
     case "on_standby":
       return behavior("sitting", "standby", "chilling", "social");
@@ -112,6 +125,9 @@ export function anchorTargetsForViewModel(
 }
 
 export function spawnPointForViewModel(viewModel: EmployeeFloorViewModel): THREE.Vector3 {
+  if (isPetFloorViewModel(viewModel)) {
+    return EMPLOYEE_ENTRY_POINT.clone();
+  }
   if (viewModel.kind === "standby") {
     return standbyAnchorForIndex(viewModel.deskIndex).position.clone();
   }

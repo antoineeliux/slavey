@@ -2,7 +2,9 @@
 name = "slavey"
 version = "0.1.0"
 description = "Terminal and lightweight IDE for managing AI coding-agent employees"
-authors = ["Slavey"]
+authors = ["Antoine Liu and contributors"]
+license = "Apache-2.0"
+repository = "https://github.com/antoineeliux/slavey"
 edition = "2021"
 
 [lib]

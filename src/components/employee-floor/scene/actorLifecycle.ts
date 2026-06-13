@@ -1,6 +1,10 @@
 import * as THREE from "three";
 
-import type { EmployeeFloorViewModel } from "../employeeFloorViewModel";
+import {
+  isDeskOccupantFloorViewModel,
+  isPetFloorViewModel,
+  type EmployeeFloorViewModel,
+} from "../employeeFloorViewModel";
 import {
   applyCharacterView,
   createCharacter,
@@ -15,6 +19,7 @@ import {
 } from "./characterBehavior";
 import type { ActorMap } from "./actorTypes";
 import { EMPLOYEE_ENTRY_POINT } from "./layout";
+import { followTargetForPet } from "./petCompanionBehavior";
 
 export function syncActorLifecycle(
   floorScene: FloorScene,
@@ -41,7 +46,9 @@ export function syncActorLifecycle(
     if (!actor) {
       actor = createCharacter(viewModel, floorScene.materials);
       installActorAnchors(actor, viewModel);
-      actor.root.position.copy(spawnPointForActorMount(viewModel, initialSceneMount));
+      actor.root.position.copy(
+        spawnPointForActorMountWithParent(viewModel, actors, initialSceneMount),
+      );
       actor.visual.lastPosition.copy(actor.root.position);
       actor.root.rotation.y = actor.homeRotationY;
       actor.target.position.set(actor.root.position.x, actor.height, actor.root.position.z);
@@ -61,7 +68,7 @@ export function updateDeskStates(
 ): void {
   const viewByDesk = new Map(
     viewModels
-      .filter((viewModel) => viewModel.kind === "employee" && viewModel.worksAtDesk)
+      .filter((viewModel) => isDeskOccupantFloorViewModel(viewModel) && viewModel.worksAtDesk)
       .map((viewModel) => [viewModel.deskIndex, viewModel]),
   );
   for (const desk of floorScene.desks.values()) {
@@ -109,10 +116,29 @@ export function spawnPointForActorMount(
   viewModel: EmployeeFloorViewModel,
   initialSceneMount: boolean,
 ): THREE.Vector3 {
+  if (isPetFloorViewModel(viewModel)) {
+    return EMPLOYEE_ENTRY_POINT.clone();
+  }
   if (initialSceneMount) {
     return spawnPointForViewModel(viewModel);
   }
   return EMPLOYEE_ENTRY_POINT.clone();
+}
+
+function spawnPointForActorMountWithParent(
+  viewModel: EmployeeFloorViewModel,
+  actors: ActorMap,
+  initialSceneMount: boolean,
+): THREE.Vector3 {
+  if (isPetFloorViewModel(viewModel)) {
+    const parent = viewModel.followTargetEmployeeId
+      ? actors.get(viewModel.followTargetEmployeeId)
+      : null;
+    if (parent) {
+      return followTargetForPet(parent, viewModel);
+    }
+  }
+  return spawnPointForActorMount(viewModel, initialSceneMount);
 }
 
 function syncDesks(
@@ -120,7 +146,7 @@ function syncDesks(
   viewModels: EmployeeFloorViewModel[],
   minimumDeskCount: number,
 ): void {
-  const employeeViewModels = viewModels.filter((viewModel) => viewModel.kind === "employee");
+  const employeeViewModels = viewModels.filter(isDeskOccupantFloorViewModel);
   const activeDeskIndexes = new Set(employeeViewModels.map((viewModel) => viewModel.deskIndex));
   const deskCount = Math.max(minimumDeskCount, employeeViewModels.length);
   for (let index = 0; index < deskCount; index += 1) {

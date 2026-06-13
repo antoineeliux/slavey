@@ -1,7 +1,18 @@
 {
   "name": "slavey",
   "version": "0.1.0",
+  "description": "Local desktop app for managing AI coding-agent employees across a workspace.",
   "private": true,
+  "license": "Apache-2.0",
+  "author": "Antoine Liu",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/antoineeliux/slavey.git"
+  },
+  "bugs": {
+    "url": "https://github.com/antoineeliux/slavey/issues"
+  },
+  "homepage": "https://github.com/antoineeliux/slavey#readme",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",

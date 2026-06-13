@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security report
+    url: https://github.com/antoineeliux/slavey/security/policy
+    about: Read the vulnerability reporting process before sharing details.

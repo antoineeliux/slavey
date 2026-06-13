@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 
 import { useAppStore } from "../../store/appStore";
-import type { EmployeeRole } from "../../types";
+import type { Employee, EmployeeRole, PetVariant } from "../../types";
 import {
   DEFAULT_OWNER_AVATAR_APPEARANCE,
   cycleAvatarAppearance,
@@ -36,6 +36,7 @@ export function useOfficeViewModel() {
   const workspaceInfo = useAppStore((state) => state.workspaceInfo);
   const settings = useAppStore((state) => state.settings);
   const createEmployee = useAppStore((state) => state.createEmployee);
+  const createEmployeeCompanion = useAppStore((state) => state.createEmployeeCompanion);
   const removeEmployee = useAppStore((state) => state.removeEmployee);
   const setEmployeeStandby = useAppStore((state) => state.setEmployeeStandby);
   const resumeEmployeeFromStandby = useAppStore((state) => state.resumeEmployeeFromStandby);
@@ -67,7 +68,15 @@ export function useOfficeViewModel() {
   const [nameplateScale, setNameplateScaleState] = useState(readStoredNameplateScale);
   const [terminalDockEmployeeId, setTerminalDockEmployeeId] = useState<string | null>(null);
   const [terminalDockExpanded, setTerminalDockExpanded] = useState(false);
-  const nextName = useMemo(() => `Employee ${employees.length + 1}`, [employees.length]);
+  const personEmployees = useMemo(
+    () => employees.filter((employee) => !isPetEmployee(employee)),
+    [employees],
+  );
+  const companionCounts = useMemo(() => companionCountsByParent(employees), [employees]);
+  const nextName = useMemo(
+    () => `Employee ${personEmployees.length + 1}`,
+    [personEmployees.length],
+  );
   const workspaceRoot = workspaceInfo?.workspaceRoot ?? null;
   const cwdPlaceholder = workspaceRoot ?? "Workspace root";
   const stationModels = useMemo(
@@ -102,6 +111,13 @@ export function useOfficeViewModel() {
   );
   const selectedFloorModel =
     floorViewModels.find((viewModel) => viewModel.kind === "employee" && viewModel.selected) ?? null;
+  const selectedEmployee =
+    selectedFloorModel && selectedFloorModel.kind === "employee"
+      ? employees.find((employee) => employee.id === selectedFloorModel.id) ?? null
+      : null;
+  const selectedCompanionCount = selectedEmployee
+    ? companionCounts.get(selectedEmployee.id) ?? 0
+    : 0;
   const terminalDockEmployee =
     employees.find((employee) => employee.id === terminalDockEmployeeId) ?? null;
   const terminalDockSession = terminalDockEmployee?.terminalSessionId
@@ -187,6 +203,11 @@ export function useOfficeViewModel() {
         window.alert("Remove or archive the employee worktree before releasing this employee.");
         return;
       }
+      const companionCount = companionCounts.get(employeeId) ?? 0;
+      if (companionCount > 0) {
+        window.alert("Release attached pets before releasing this employee.");
+        return;
+      }
       const confirmed =
         !settings.requireConfirmationDelete ||
         window.confirm(`Release ${employee.name} and return this character to standby?`);
@@ -197,7 +218,26 @@ export function useOfficeViewModel() {
       }
       void removeEmployee(employeeId);
     },
-    [employees, removeEmployee, settings.requireConfirmationDelete, terminalDockEmployeeId],
+    [
+      companionCounts,
+      employees,
+      removeEmployee,
+      settings.requireConfirmationDelete,
+      terminalDockEmployeeId,
+    ],
+  );
+  const createCompanionForEmployee = useCallback(
+    (employeeId: string, petVariant: PetVariant) => {
+      const parent = employees.find((employee) => employee.id === employeeId);
+      if (!parent || isPetEmployee(parent)) {
+        return;
+      }
+      void createEmployeeCompanion({
+        parentEmployeeId: parent.id,
+        petVariant,
+      });
+    },
+    [createEmployeeCompanion, employees],
   );
   const setEmployeeOnStandby = useCallback(
     (employeeId: string) => {
@@ -369,6 +409,7 @@ export function useOfficeViewModel() {
     ownerName,
     pendingAction,
     pendingApproval,
+    selectedCompanionCount,
     releaseEmployee,
     reviewHandoff,
     role,
@@ -378,6 +419,7 @@ export function useOfficeViewModel() {
     selectedFloorModel,
     setOfficeColorTheme,
     setNameplateScale,
+    createCompanionForEmployee,
     setEmployeeStandby: setEmployeeOnStandby,
     setName,
     setCwd,
@@ -394,6 +436,21 @@ export function useOfficeViewModel() {
     resolvePendingApproval,
     workspaceRoot,
   };
+}
+
+function isPetEmployee(employee: Employee): boolean {
+  return employee.visualKind === "pet" || Boolean(employee.companionOfEmployeeId);
+}
+
+function companionCountsByParent(employees: Employee[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const employee of employees) {
+    const parentId = employee.companionOfEmployeeId;
+    if (isPetEmployee(employee) && parentId) {
+      counts.set(parentId, (counts.get(parentId) ?? 0) + 1);
+    }
+  }
+  return counts;
 }
 
 function readStoredNameplateScale(): number {

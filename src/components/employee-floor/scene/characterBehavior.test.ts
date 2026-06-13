@@ -303,6 +303,11 @@ function viewModel(overrides: Partial<EmployeeFloorViewModel> = {}): EmployeeFlo
   return {
     id: "emp-1",
     kind: "employee",
+    visualKind: "person",
+    companionOfEmployeeId: null,
+    petVariant: null,
+    occupiesDesk: true,
+    followTargetEmployeeId: null,
     name: "Employee",
     role: "general",
     employeeStatus: "running",

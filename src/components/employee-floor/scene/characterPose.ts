@@ -1,6 +1,11 @@
 import type { EmployeeActor } from "./characterTypes";
 
 export function updatePose(actor: EmployeeActor, time: number, index: number): void {
+  if (actor.viewModel.visualKind === "pet") {
+    updatePetPose(actor, time, index);
+    return;
+  }
+
   const p = actor.parts;
   const posture = actor.visual.posture;
   const activity = actor.visual.activity;
@@ -76,5 +81,107 @@ export function updatePose(actor: EmployeeActor, time: number, index: number): v
     const gesture = Math.sin(phase * 3.4) * 0.18;
     p.leftArm.rotation.set(0.28 + gesture, 0, 0.42);
     p.rightArm.rotation.set(0.74 - gesture, 0, -0.52);
+  }
+}
+
+function updatePetPose(actor: EmployeeActor, time: number, index: number): void {
+  const p = actor.parts;
+  const phase = time + index * 0.6;
+  const isWalking = actor.visual.posture === "walking";
+  const isSitting = actor.visual.posture === "sitting";
+  const needsAttention = actor.visual.activity === "approval";
+  const pose = petPoseSpec(actor.viewModel.petVariant ?? "dog");
+  const bob = isWalking
+    ? Math.abs(Math.sin(phase * 8.6)) * 0.038
+    : isSitting
+      ? Math.sin(phase * 1.6) * 0.006
+      : Math.sin(phase * 2.1) * 0.012;
+  actor.root.position.y = bob;
+  p.phone.visible = false;
+  p.cup.visible = false;
+
+  const stride = isWalking ? Math.sin(phase * 8.6) : Math.sin(phase * 2.4) * 0.12;
+  const oppositeStride = -stride;
+  const leftLift = isWalking ? Math.max(0, stride) * 0.09 : 0;
+  const rightLift = isWalking ? Math.max(0, oppositeStride) * 0.09 : 0;
+  p.body.rotation.set(isSitting ? -0.12 : 0, 0, 0);
+  p.leftArm.position.set(-pose.legX, pose.legY + leftLift, pose.frontZ + stride * pose.stride);
+  p.rightArm.position.set(pose.legX, pose.legY + rightLift, pose.frontZ + oppositeStride * pose.stride);
+  p.leftLeg.position.set(-pose.legX, pose.legY + rightLift, pose.backZ + oppositeStride * pose.stride);
+  p.rightLeg.position.set(pose.legX, pose.legY + leftLift, pose.backZ + stride * pose.stride);
+  p.leftArm.rotation.set(0.62 * stride, 0, 0.02);
+  p.rightArm.rotation.set(0.62 * oppositeStride, 0, -0.02);
+  p.leftLeg.rotation.set(0.62 * oppositeStride, 0, 0.02);
+  p.rightLeg.rotation.set(0.62 * stride, 0, -0.02);
+
+  if (isSitting) {
+    p.leftArm.position.set(-pose.legX, pose.legY, pose.sitFrontZ);
+    p.rightArm.position.set(pose.legX, pose.legY, pose.sitFrontZ);
+    p.leftLeg.position.set(-pose.legX, pose.sitBackY, pose.sitBackZ);
+    p.rightLeg.position.set(pose.legX, pose.sitBackY, pose.sitBackZ);
+    p.leftArm.rotation.set(0.08, 0, 0.04);
+    p.rightArm.rotation.set(-0.08, 0, -0.04);
+    p.leftLeg.rotation.set(-0.82, 0, 0.08);
+    p.rightLeg.rotation.set(0.82, 0, -0.08);
+  }
+
+  p.head.rotation.set(
+    needsAttention ? Math.sin(phase * 7.8) * 0.14 : 0,
+    Math.sin(phase * 1.6) * 0.1,
+    0,
+  );
+  if (p.tail) {
+    p.tail.rotation.y = Math.sin(phase * (needsAttention ? 9 : 4.4)) * (needsAttention ? 0.45 : 0.22);
+  }
+  if (p.antenna) {
+    p.antenna.rotation.z = Math.sin(phase * 5.4) * (needsAttention ? 0.18 : 0.05);
+  }
+}
+
+function petPoseSpec(variant: "dog" | "cat" | "robot"): {
+  legX: number;
+  legY: number;
+  frontZ: number;
+  backZ: number;
+  stride: number;
+  sitFrontZ: number;
+  sitBackY: number;
+  sitBackZ: number;
+} {
+  switch (variant) {
+    case "cat":
+      return {
+        legX: 0.15,
+        legY: 0.23,
+        frontZ: -0.18,
+        backZ: 0.3,
+        stride: 0.1,
+        sitFrontZ: -0.22,
+        sitBackY: 0.17,
+        sitBackZ: 0.2,
+      };
+    case "robot":
+      return {
+        legX: 0.2,
+        legY: 0.24,
+        frontZ: -0.14,
+        backZ: 0.26,
+        stride: 0.08,
+        sitFrontZ: -0.16,
+        sitBackY: 0.18,
+        sitBackZ: 0.18,
+      };
+    case "dog":
+    default:
+      return {
+        legX: 0.18,
+        legY: 0.24,
+        frontZ: -0.25,
+        backZ: 0.36,
+        stride: 0.12,
+        sitFrontZ: -0.29,
+        sitBackY: 0.18,
+        sitBackZ: 0.24,
+      };
   }
 }

@@ -16,6 +16,10 @@ export type EmployeeRole =
   | "tester"
   | "general";
 
+export type EmployeeVisualKind = "person" | "pet";
+
+export type PetVariant = "dog" | "cat" | "robot";
+
 export type Employee = {
   id: string;
   name: string;
@@ -26,6 +30,9 @@ export type Employee = {
   branchName?: string | null;
   terminalSessionId?: string | null;
   currentCommand?: string | null;
+  visualKind?: EmployeeVisualKind;
+  companionOfEmployeeId?: string | null;
+  petVariant?: PetVariant | null;
   createdAt: number;
   updatedAt: number;
 };

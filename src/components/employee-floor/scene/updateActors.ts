@@ -1,5 +1,8 @@
 import { updatePose, type EmployeeActor } from "./createCharacter";
-import type { EmployeeFloorViewModel } from "../employeeFloorViewModel";
+import {
+  isPetFloorViewModel,
+  type EmployeeFloorViewModel,
+} from "../employeeFloorViewModel";
 import type { FloorScene } from "./createScene";
 import { behaviorForViewModel } from "./characterBehavior";
 import {
@@ -14,6 +17,7 @@ import { targetForActor } from "./actorTargets";
 import type { ActorMap, ActorUpdateOptions } from "./actorTypes";
 import { assignCharacterActions } from "./actions/actionScheduler";
 import { updateNameplateScale } from "./characterNameplate";
+import { updatePetActorVisual } from "./petCompanionBehavior";
 
 export type { ActorMap, ActorUpdateOptions };
 
@@ -47,7 +51,10 @@ export function updateActors(
 
   const targetAssignments = createRoomCapacityTargetAssignments(activeActors);
 
-  activeActors.forEach(({ actor, viewModel, index }) => {
+  const personActors = activeActors.filter(({ viewModel }) => !isPetFloorViewModel(viewModel));
+  const petActors = activeActors.filter(({ viewModel }) => isPetFloorViewModel(viewModel));
+
+  personActors.forEach(({ actor, viewModel }) => {
     if (options.reducedMotion) {
       const behavior = behaviorForViewModel(viewModel);
       const target = targetForActor(actor, behavior, options.elapsed, targetAssignments);
@@ -57,10 +64,24 @@ export function updateActors(
     } else {
       updateActorVisual(actor, viewModel, options.delta, options.elapsed, targetAssignments);
     }
-    updatePose(actor, options.elapsed, index);
+  });
+
+  petActors.forEach(({ actor, viewModel }) => {
+    const parent = viewModel.followTargetEmployeeId
+      ? actors.get(viewModel.followTargetEmployeeId) ?? null
+      : null;
+    updatePetActorVisual({
+      actor,
+      viewModel,
+      parent,
+      delta: options.delta,
+      time: options.elapsed,
+      reducedMotion: options.reducedMotion,
+    });
   });
 
   activeActors.forEach(({ actor, index }) => {
+    updatePose(actor, options.elapsed, index);
     actor.target.position.x = actor.root.position.x;
     actor.target.position.y = actor.height;
     actor.target.position.z = actor.root.position.z;

@@ -39,6 +39,11 @@ function viewModel(
   return {
     id: "employee-1",
     kind: "employee",
+    visualKind: "person",
+    companionOfEmployeeId: null,
+    petVariant: null,
+    occupiesDesk: true,
+    followTargetEmployeeId: null,
     name: "Ada",
     role: "general",
     employeeStatus: "running",

@@ -8,3 +8,26 @@ src-tauri/target
 src-tauri/gen
 *.log
 .DS_Store
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+*.csr
+*.keystore
+*.jks
+*.mobileprovision
+*.provisionprofile
+
+# Signing material
+*.asc
+*.sig
+*.signing-key
+tauri.key
+tauri.key.pub

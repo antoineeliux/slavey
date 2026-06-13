@@ -30,7 +30,7 @@ The employee floor is driven by this pipeline:
 
 Desk sitting is reserved for active productive work. Idle, shell-open, startup, handoff, review, blocked, and owner-waiting states route away from desks.
 
-See [Architecture](docs/architecture.md), [Employee Activity Contract](docs/activity-contract.md), and [Terminal Evidence Flow](docs/terminal-evidence-flow.md) for the full system model.
+See [Architecture](docs/architecture.md), [Employee Activity Contract](docs/activity-contract.md), and [Terminal Evidence Flow](docs/terminal-evidence-flow.md) for the full system model. The dependent helper/pet model is documented separately in [Pet Companion System](docs/pet-companion-system.md).
 
 ## Development
 
@@ -116,8 +116,19 @@ Backend filesystem operations validate paths, reject workspace escapes, block se
 - [Architecture](docs/architecture.md): module map, data flow, runtime state, persistence, events, diagnostics, and testing strategy.
 - [Employee Activity Contract](docs/activity-contract.md): canonical employee activity semantics and routing rules.
 - [Terminal Evidence Flow](docs/terminal-evidence-flow.md): current terminal, Codex, runtime, activity refresh, diagnostics trace, fixture/stress coverage, and risk areas.
+- [Pet Companion System](docs/pet-companion-system.md): dependent companion employees that reuse backend employee state while following a parent employee visually.
 - [Engineering Rules](docs/engineering-rules.md): standards for safety, validation, module boundaries, and Git workflow.
 - [Contributing](CONTRIBUTING.md): setup, branch workflow, validation, and contribution expectations.
+- [Security Policy](SECURITY.md): how to report vulnerabilities and what areas are security-sensitive.
+- [Privacy](PRIVACY.md): local-first data handling, diagnostics, and telemetry policy.
+- [Governance](GOVERNANCE.md): maintainer model, contribution licensing, and release authority.
+- [Release Process](docs/release.md): versioning, preflight, tagging, and binary distribution checklist.
+
+## Open Source
+
+Slavey is licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for project attribution.
+
+Before contributing, read [Contributing](CONTRIBUTING.md), [Code of Conduct](CODE_OF_CONDUCT.md), and [Security Policy](SECURITY.md).
 
 ## Current Limitations
 
