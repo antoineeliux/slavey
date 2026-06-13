@@ -305,22 +305,14 @@ impl TerminalSessionStore {
         let mut records = self.records.lock();
         let record = records.get_mut(session_id)?;
         let now = crate::events::now_ms();
-        let previous_active_profile = record.active_profile;
-        let previous_prompt_ready_at = record.last_prompt_ready_at;
-        let previous_prompt_submitted_at = record.last_prompt_submitted_at;
-        let previous_approval_prompt_at = record.last_approval_prompt_at;
-        let previous_turn_state = record.turn_state;
+        let before = activity_relevant_snapshot(record);
         let detection_output = output_for_prompt_detection(&record.last_output_tail, output);
         let evidence = terminal_output_evidence(record, output, &detection_output);
         let transition = resolve_output_transition(record, &evidence);
         apply_terminal_turn_transition(record, transition, now);
         record.last_output_tail = terminal_output_tail(&detection_output);
 
-        let activity_relevant_change = previous_active_profile != record.active_profile
-            || previous_prompt_ready_at != record.last_prompt_ready_at
-            || previous_prompt_submitted_at != record.last_prompt_submitted_at
-            || previous_approval_prompt_at != record.last_approval_prompt_at
-            || previous_turn_state != record.turn_state;
+        let activity_relevant_change = before != activity_relevant_snapshot(record);
         activity_relevant_change.then(|| record.clone())
     }
 
@@ -333,21 +325,12 @@ impl TerminalSessionStore {
             return None;
         }
 
-        let previous_active_profile = record.active_profile;
-        let previous_prompt_ready_at = record.last_prompt_ready_at;
-        let previous_prompt_submitted_at = record.last_prompt_submitted_at;
-        let previous_approval_prompt_at = record.last_approval_prompt_at;
-        let previous_turn_state = record.turn_state;
-
+        let before = activity_relevant_snapshot(record);
         let now = crate::events::now_ms();
         let transition = resolve_input_transition(record, input);
         apply_terminal_turn_transition(record, transition, now);
 
-        let activity_relevant_change = previous_active_profile != record.active_profile
-            || previous_prompt_ready_at != record.last_prompt_ready_at
-            || previous_prompt_submitted_at != record.last_prompt_submitted_at
-            || previous_approval_prompt_at != record.last_approval_prompt_at
-            || previous_turn_state != record.turn_state;
+        let activity_relevant_change = before != activity_relevant_snapshot(record);
         activity_relevant_change.then(|| record.clone())
     }
 
@@ -385,20 +368,11 @@ impl TerminalSessionStore {
             return None;
         }
 
-        let previous_active_profile = record.active_profile;
-        let previous_prompt_ready_at = record.last_prompt_ready_at;
-        let previous_prompt_submitted_at = record.last_prompt_submitted_at;
-        let previous_approval_prompt_at = record.last_approval_prompt_at;
-        let previous_turn_state = record.turn_state;
-
+        let before = activity_relevant_snapshot(record);
         let transition = resolve_app_server_runtime_state_transition(record, state);
         apply_terminal_turn_transition(record, transition, crate::events::now_ms());
 
-        let activity_relevant_change = previous_active_profile != record.active_profile
-            || previous_prompt_ready_at != record.last_prompt_ready_at
-            || previous_prompt_submitted_at != record.last_prompt_submitted_at
-            || previous_approval_prompt_at != record.last_approval_prompt_at
-            || previous_turn_state != record.turn_state;
+        let activity_relevant_change = before != activity_relevant_snapshot(record);
         activity_relevant_change.then(|| record.clone())
     }
 
@@ -422,22 +396,14 @@ impl TerminalSessionStore {
             return None;
         }
 
-        let previous_active_profile = record.active_profile;
-        let previous_prompt_ready_at = record.last_prompt_ready_at;
-        let previous_prompt_submitted_at = record.last_prompt_submitted_at;
-        let previous_approval_prompt_at = record.last_approval_prompt_at;
-        let previous_turn_state = record.turn_state;
-        let previous_transition_reason = record.last_transition_reason;
+        let before = activity_relevant_snapshot(record);
+        let before_transition_reason = record.last_transition_reason;
 
         let transition = resolve_codex_notify_agent_turn_complete_transition(record);
         apply_terminal_turn_transition(record, transition, crate::events::now_ms());
 
-        let activity_relevant_change = previous_active_profile != record.active_profile
-            || previous_prompt_ready_at != record.last_prompt_ready_at
-            || previous_prompt_submitted_at != record.last_prompt_submitted_at
-            || previous_approval_prompt_at != record.last_approval_prompt_at
-            || previous_turn_state != record.turn_state
-            || previous_transition_reason != record.last_transition_reason;
+        let activity_relevant_change = before != activity_relevant_snapshot(record)
+            || before_transition_reason != record.last_transition_reason;
         activity_relevant_change.then(|| record.clone())
     }
 
@@ -470,6 +436,24 @@ impl TerminalSessionStore {
         );
         Some(record.clone())
     }
+}
+
+type ActivityRelevantSnapshot = (
+    Option<TerminalLaunchProfile>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    TerminalTurnState,
+);
+
+fn activity_relevant_snapshot(record: &TerminalSessionRecord) -> ActivityRelevantSnapshot {
+    (
+        record.active_profile,
+        record.last_prompt_ready_at,
+        record.last_prompt_submitted_at,
+        record.last_approval_prompt_at,
+        record.turn_state,
+    )
 }
 
 fn apply_terminal_turn_transition(
